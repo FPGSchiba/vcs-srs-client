@@ -2,6 +2,9 @@ package main
 
 import (
 	"embed"
+	"go.uber.org/zap"
+	"myproject/app"
+	"myproject/utils"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -12,21 +15,30 @@ import (
 var assets embed.FS
 
 func main() {
+	logger := utils.CreateLogger()
+
+	defer func(logger *zap.Logger) {
+		err := logger.Sync()
+		if err != nil {
+			println(err.Error())
+		}
+	}(logger)
+
 	// Create an instance of the app structure
-	app := NewApp()
+	gui := app.NewApp(logger)
 
 	// Create application with options
 	err := wails.Run(&options.App{
 		Title:  "VCS Client",
-		Width:  1024,
-		Height: 768,
+		Width:  1280,
+		Height: 720,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
-		OnStartup:        app.startup,
+		OnStartup:        gui.Startup,
 		Bind: []interface{}{
-			app,
+			gui,
 		},
 	})
 
