@@ -4,7 +4,7 @@ go 1.23
 
 require (
 	github.com/wailsapp/wails/v2 v2.10.1
-	go.uber.org/zap v1.27.0
+	go.uber.org/zap v1.27.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
