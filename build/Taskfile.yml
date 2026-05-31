@@ -1,11 +1,8 @@
 version: '3'
 
 vars:
-  SYSTEM_PATH:
-    sh: echo $PATH
-
-env:
-  PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:{{.SYSTEM_PATH}}"
+  NPM_BIN:
+    sh: which npm 2>/dev/null || echo /opt/homebrew/bin/npm
 
 tasks:
   go:mod:tidy:
@@ -27,10 +24,10 @@ tasks:
     generates:
       - node_modules
     preconditions:
-      - sh: npm version
-        msg: "Looks like npm isn't installed. Npm is part of the Node installer: https://nodejs.org/en/download/"
+      - sh: "{{.NPM_BIN}} --version"
+        msg: "npm not found. Install Node.js from https://nodejs.org/en/download/"
     cmds:
-      - npm install
+      - "{{.NPM_BIN}} install"
 
   install:frontend:deps:bun:
     dir: ../frontend
@@ -108,7 +105,7 @@ tasks:
   frontend:run:npm:
     dir: ../frontend
     cmds:
-      - npm run {{.SCRIPT}} -q
+      - "{{.NPM_BIN}} run {{.SCRIPT}} -q"
     vars:
       SCRIPT: "{{.SCRIPT}}"
 
@@ -172,7 +169,7 @@ tasks:
   frontend:dev:npm:
     dir: ../frontend
     cmds:
-      - npm run dev -- --port {{.VITE_PORT}} --strictPort
+      - "{{.NPM_BIN}} run dev -- --port {{.VITE_PORT}} --strictPort"
 
   frontend:dev:yarn:
     dir: ../frontend
