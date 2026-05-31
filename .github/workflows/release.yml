@@ -1,92 +1,106 @@
-name: Release Version
+name: Release
 
 on:
   push:
-    branches:
-      - master
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  changelog:
-    permissions:
-      contents: write
-      pull-requests: write
-    name: Changelog
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.merged == true
-    steps:
-      - name: Not implemented
-        run: exit 1
-      
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Rust-Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Install cargo-smart-release
-        run: cargo install cargo-smart-release
-      
-      - name: Generate Changelog
-        run: cargo changelog --write
-
-  release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.merged == true
-    needs: changelog
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Semver Tag
-        uses: K-Phoen/semver-release-action@v1.3.2
-        id: semver
-        with:
-          release_branch: main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    outputs:
-      tag: ${{ steps.semver.outputs.tag }}
-
   build:
-    name: Build for ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    needs: release
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            artifact_name: vngd-srs-server
-            asset_name: vngd-srs-server-linux-amd64
-          - os: windows-latest
-            artifact_name: vngd-srs-server.exe
-            asset_name: vngd-srs-server-windows-amd64.exe
-          - os: macos-latest
-            artifact_name: vngd-srs-server
-            asset_name: vngd-srs-server-macos-amd64
-    if: github.event.pull_request.merged == true
+          - platform: darwin-arm64
+            runner: macos-latest
+            binary: vcs-client
+          - platform: linux-amd64
+            runner: ubuntu-latest
+            binary: vcs-client
+          - platform: windows-amd64
+            runner: windows-latest
+            binary: vcs-client.exe
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Setup Rust-Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          rustflags: -Awarnings
+          go-version-file: go.mod
+          cache: true
 
-      - name: Build
-        run: cargo build --release
-      
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/release/${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.asset_name }}
-          tag: ${{ needs.release.outputs.tag }}
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux GUI deps
+        if: matrix.platform == 'linux-amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev
+
+      - name: Install wails3 CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha.96
+
+      - name: Generate TypeScript bindings
+        run: wails3 generate bindings -ts -clean=true
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Build app
+        run: wails3 task build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcs-client-${{ matrix.platform }}
+          path: bin/${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    name: Draft Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename per-platform binaries
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            for file in "$dir"*; do
+              ext="${file##*.}"
+              if [ "$ext" = "exe" ]; then
+                cp "$file" "release/${name}.exe"
+              else
+                cp "$file" "release/${name}"
+              fi
+            done
+          done
+          ls -la release/
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: release/*
+          generate_release_notes: true
