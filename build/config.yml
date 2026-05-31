@@ -1,0 +1,6 @@
+frontend:
+  dir: frontend
+  devServerURL: http://localhost:9245
+  installCommand: npm install
+  buildCommand: npm run build
+  devCommand: npm run dev -- --port 9245 --strictPort

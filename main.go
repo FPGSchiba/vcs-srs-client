@@ -2,13 +2,11 @@ package main
 
 import (
 	"embed"
-	"go.uber.org/zap"
+	"log"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
 	"myproject/app"
 	"myproject/utils"
-
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
 
 //go:embed all:frontend/dist
@@ -16,33 +14,37 @@ var assets embed.FS
 
 func main() {
 	logger := utils.CreateLogger()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
-	defer func(logger *zap.Logger) {
-		err := logger.Sync()
-		if err != nil {
-			println(err.Error())
-		}
-	}(logger)
-
-	// Create an instance of the app structure
 	gui := app.NewApp(logger)
 
-	// Create application with options
-	err := wails.Run(&options.App{
-		Title:  "VCS Client",
-		Width:  1280,
-		Height: 720,
-		AssetServer: &assetserver.Options{
-			Assets: assets,
+	wailsApp := application.New(application.Options{
+		Name:        "VCS Client",
+		Description: "VCS SRS Client",
+		Assets: application.AssetOptions{
+			Handler: application.BundledAssetFileServer(assets),
 		},
-		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
-		OnStartup:        gui.Startup,
-		Bind: []interface{}{
-			gui,
+		Services: []application.Service{
+			application.NewService(gui),
+		},
+		Mac: application.MacOptions{
+			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
 
-	if err != nil {
-		println("Error:", err.Error())
+	gui.SetApp(wailsApp)
+
+	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
+		Title:            "VCS Client",
+		Width:            1280,
+		Height:           720,
+		URL:              "/",
+		BackgroundColour: application.NewRGBA(27, 38, 54, 255),
+	})
+
+	if err := wailsApp.Run(); err != nil {
+		log.Fatal(err)
 	}
 }
