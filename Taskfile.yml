@@ -6,6 +6,9 @@ includes:
   darwin: ./build/darwin/Taskfile.yml
   linux: ./build/linux/Taskfile.yml
 
+env:
+  PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+
 vars:
   APP_NAME: "vcs-client"
   BIN_DIR: "bin"
