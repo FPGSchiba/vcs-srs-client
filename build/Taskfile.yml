@@ -1,9 +1,5 @@
 version: '3'
 
-vars:
-  NPM_BIN:
-    sh: which npm 2>/dev/null || echo /opt/homebrew/bin/npm
-
 tasks:
   go:mod:tidy:
     summary: Runs `go mod tidy`
@@ -17,20 +13,20 @@ tasks:
       - task: install:frontend:deps:{{.PACKAGE_MANAGER}}
 
   install:frontend:deps:npm:
-    dir: ../frontend
+    dir: frontend
     sources:
       - package.json
       - package-lock.json
     generates:
       - node_modules
     preconditions:
-      - sh: "{{.NPM_BIN}} --version"
+      - sh: npm --version
         msg: "npm not found. Install Node.js from https://nodejs.org/en/download/"
     cmds:
-      - "{{.NPM_BIN}} install"
+      - npm install
 
   install:frontend:deps:bun:
-    dir: ../frontend
+    dir: frontend
     sources:
       - package.json
       - bun.lock
@@ -44,7 +40,7 @@ tasks:
       - bun install
 
   install:frontend:deps:pnpm:
-    dir: ../frontend
+    dir: frontend
     sources:
       - package.json
       - pnpm-lock.yaml
@@ -57,7 +53,7 @@ tasks:
       - pnpm install
 
   install:frontend:deps:yarn:
-    dir: ../frontend
+    dir: frontend
     sources:
       - package.json
       - yarn.lock
@@ -72,7 +68,7 @@ tasks:
   build:frontend:
     label: build:frontend (DEV={{.DEV}} RUNNER={{.PACKAGE_MANAGER}})
     summary: Build the frontend project
-    dir: ../frontend
+    dir: frontend
     sources:
       - "**/*"
       - exclude: node_modules/**/*
@@ -103,28 +99,28 @@ tasks:
       SCRIPT: "{{.SCRIPT}}"
 
   frontend:run:npm:
-    dir: ../frontend
+    dir: frontend
     cmds:
-      - "{{.NPM_BIN}} run {{.SCRIPT}} -q"
+      - npm run {{.SCRIPT}} -q
     vars:
       SCRIPT: "{{.SCRIPT}}"
 
   frontend:run:yarn:
-    dir: ../frontend
+    dir: frontend
     cmds:
       - yarn {{.SCRIPT}}
     vars:
       SCRIPT: "{{.SCRIPT}}"
 
   frontend:run:pnpm:
-    dir: ../frontend
+    dir: frontend
     cmds:
       - pnpm run {{.SCRIPT}}
     vars:
       SCRIPT: "{{.SCRIPT}}"
 
   frontend:run:bun:
-    dir: ../frontend
+    dir: frontend
     cmds:
       - bun run {{.SCRIPT}}
     vars:
@@ -137,19 +133,20 @@ tasks:
     deps:
       - task: go:mod:tidy
     sources:
-      - "../**/*.[jt]s"
-      - exclude: ../frontend/**/*
-      - ../frontend/bindings/**/*  # Rerun when switching between dev/production mode causes changes in output
-      - "../**/*.go"
-      - ../go.mod
-      - ../go.sum
+      - "**/*.[jt]s"
+      - exclude: frontend/**/*
+      - frontend/bindings/**/*  # Rerun when switching between dev/production mode causes changes in output
+      - "**/*.go"
+      - go.mod
+      - go.sum
     generates:
-      - ../frontend/bindings/**/*
+      - frontend/bindings/**/*
     cmds:
-      - wails3 generate bindings -f '{{.BUILD_FLAGS}}' -clean=true{{if eq .OBFUSCATED "true"}} -obfuscated{{end}}
+      - wails3 generate bindings -ts -f '{{.BUILD_FLAGS}}' -clean=true{{if eq .OBFUSCATED "true"}} -obfuscated{{end}}
 
   generate:icons:
     summary: Generates Windows `.ico` and Mac `.icns` from an image; on macOS, `-iconcomposerinput appicon.icon -macassetdir darwin` also produces `Assets.car` from a `.icon` file (skipped on other platforms).
+    dir: build
     sources:
       - "appicon.png"
       - "appicon.icon"
@@ -167,27 +164,28 @@ tasks:
       - task: frontend:dev:{{.PACKAGE_MANAGER}}
 
   frontend:dev:npm:
-    dir: ../frontend
+    dir: frontend
     cmds:
-      - "{{.NPM_BIN}} run dev -- --port {{.VITE_PORT}} --strictPort"
+      - npm run dev -- --port {{.VITE_PORT}} --strictPort --host 127.0.0.1
 
   frontend:dev:yarn:
-    dir: ../frontend
+    dir: frontend
     cmds:
       - yarn dev --port {{.VITE_PORT}} --strictPort
 
   frontend:dev:pnpm:
-    dir: ../frontend
+    dir: frontend
     cmds:
       - pnpm dev --port {{.VITE_PORT}} --strictPort
 
   frontend:dev:bun:
-    dir: ../frontend
+    dir: frontend
     cmds:
       - bun run dev --port {{.VITE_PORT}} --strictPort
 
   update:build-assets:
     summary: Updates the build assets
+    dir: build
     cmds:
       - wails3 update build-assets -name "{{.APP_NAME}}" -binaryname "{{.APP_NAME}}" -config config.yml -dir .
 

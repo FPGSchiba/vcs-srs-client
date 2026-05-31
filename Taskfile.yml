@@ -11,11 +11,6 @@ vars:
   BIN_DIR: "bin"
   PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
-  SYSTEM_PATH:
-    sh: echo $PATH
-
-env:
-  PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:{{.SYSTEM_PATH}}"
 
 tasks:
   build:
