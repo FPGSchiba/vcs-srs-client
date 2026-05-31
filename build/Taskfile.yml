@@ -1,5 +1,12 @@
 version: '3'
 
+vars:
+  SYSTEM_PATH:
+    sh: echo $PATH
+
+env:
+  PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:{{.SYSTEM_PATH}}"
+
 tasks:
   go:mod:tidy:
     summary: Runs `go mod tidy`
