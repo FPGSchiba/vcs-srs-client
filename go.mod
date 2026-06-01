@@ -3,6 +3,7 @@ module github.com/FPGSchiba/vcs-srs-client
 go 1.25.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/wailsapp/wails/v3 v3.0.0-alpha.96
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
