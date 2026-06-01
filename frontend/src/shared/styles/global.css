@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./tokens.css";
+@import "./components.css";
 
 /* Tailwind v4 reads the JS config (color/font aliases → design tokens) via
    the @config directive. Path is relative to this file. */
