@@ -6,3 +6,19 @@ log/
 **/wailsjs/go/**
 .idea/
 .task/
+
+# --- VCS Client additions ---
+
+# generated (not covered above)
+srspb/
+frontend/bindings/
+
+# runtime artefacts
+*.log
+
+# local-only configs that should never be committed
+session.json
+config.toml.local
+
+# IDE
+.vscode/
