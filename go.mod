@@ -1,4 +1,4 @@
-module myproject
+module github.com/FPGSchiba/vcs-srs-client
 
 go 1.25.0
 

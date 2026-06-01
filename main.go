@@ -5,20 +5,21 @@ import (
 	"log"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"myproject/app"
-	"myproject/utils"
+
+	"github.com/FPGSchiba/vcs-srs-client/internal/app"
+	"github.com/FPGSchiba/vcs-srs-client/pkg/logger"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func main() {
-	logger := utils.CreateLogger()
+	appLog := logger.CreateLogger()
 	defer func() {
-		_ = logger.Sync()
+		_ = appLog.Sync()
 	}()
 
-	gui := app.NewApp(logger)
+	gui := app.NewApp(appLog)
 
 	wailsApp := application.New(application.Options{
 		Name:        "VCS Client",
