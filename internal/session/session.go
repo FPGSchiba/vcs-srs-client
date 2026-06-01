@@ -34,6 +34,9 @@ type Session struct {
 	conn    *grpc.ClientConn
 	control *control.Client
 	cancel  context.CancelFunc
+
+	lastDialer Dialer
+	lastToken  string
 }
 
 // New constructs a Session.
@@ -88,6 +91,11 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 	s.conn, s.control, s.cancel = conn, cc, cancel
 	s.mu.Unlock()
 
+	s.mu.Lock()
+	s.lastDialer = dialer
+	s.lastToken = guest.Token
+	s.mu.Unlock()
+
 	go func() { _ = cc.ConsumeUpdates(streamCtx, s.st, s.em) }()
 
 	tagged.ConnectionState(events.ConnConnected)
@@ -114,6 +122,48 @@ func (s *Session) Disconnect(ctx context.Context) error {
 	tagged := events.New(s.em)
 	tagged.ConnectionState(events.ConnDisconnected)
 	tagged.SessionChanged("logged_out")
+	return nil
+}
+
+// Reconnect re-establishes the control session reusing the stored token (no
+// re-auth). Emits reconnecting → connected on success, or disconnected on failure.
+func (s *Session) Reconnect(ctx context.Context) error {
+	tagged := events.New(s.em)
+	tagged.ConnectionState(events.ConnReconnecting)
+
+	s.mu.Lock()
+	dialer, token := s.lastDialer, s.lastToken
+	s.mu.Unlock()
+	if dialer == nil {
+		tagged.ConnectionState(events.ConnDisconnected)
+		return fmt.Errorf("cannot reconnect: never connected")
+	}
+
+	conn, err := dialer(ctx)
+	if err != nil {
+		tagged.ConnectionState(events.ConnDisconnected)
+		return fmt.Errorf("reconnect dial: %w", err)
+	}
+	cc := control.New(conn, token)
+	if err := cc.SyncClient(ctx, s.st); err != nil {
+		_ = conn.Close()
+		tagged.ConnectionState(events.ConnDisconnected)
+		return fmt.Errorf("reconnect sync: %w", err)
+	}
+
+	streamCtx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.conn != nil {
+		_ = s.conn.Close()
+	}
+	s.conn, s.control, s.cancel = conn, cc, cancel
+	s.mu.Unlock()
+
+	go func() { _ = cc.ConsumeUpdates(streamCtx, s.st, s.em) }()
+	tagged.ConnectionState(events.ConnConnected)
 	return nil
 }
 
