@@ -5,6 +5,6 @@ import { Placeholder } from "./shared/components/Placeholder";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <Placeholder label="VCS · main window · tokens ready" />
+    <Placeholder label="VCS · comms popout · placeholder" />
   </React.StrictMode>,
 );

@@ -1,0 +1,57 @@
+/* Tokens — DO NOT EDIT BY HAND. Mirror of design/vcs/project/styles.css :root block. */
+:root {
+  /* Surfaces */
+  --bg-0: #03070d;
+  --bg-1: #060d16;
+  --bg-2: #0a141f;
+  --bg-3: #0e1a28;
+  --bg-4: #14233347;
+  --bg-lcd: #060e0a;
+  --bg-lcd-warm: #0e0805;
+
+  /* Borders */
+  --bd-1: #15273a;
+  --bd-2: #1d3147;
+  --bd-3: #2a4663;
+  --bd-glow: #60a5fa55;
+
+  /* Text */
+  --tx-0: #eaf2fb;
+  --tx-1: #c7d4e2;
+  --tx-2: #8ba0b6;
+  --tx-3: #5b748b;
+  --tx-4: #3b556e;
+  --tx-disabled: #2a3e54;
+
+  /* Accents */
+  --ac-primary: #60a5fa;
+  --ac-primary-dim: #3a73c4;
+  --ac-primary-glow: #60a5fa33;
+  --ac-warn: #f5a524;
+  --ac-warn-dim: #b07415;
+  --ac-alert: #ef4f4f;
+  --ac-alert-dim: #a32a2a;
+  --ac-ok: #4ade80;
+  --ac-ok-dim: #1f8a4a;
+  --ac-lcd: #7af0a4;
+  --ac-lcd-dim: #2e7548;
+  --ac-lcd-amber: #f5b94b;
+  --ac-violet: #a78bfa;
+
+  /* Type */
+  --ff-sans: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  --ff-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+  --ff-lcd: 'JetBrains Mono', monospace;
+
+  /* Sizing */
+  --r-sm: 2px;
+  --r-md: 4px;
+  --r-lg: 6px;
+  --r-pill: 999px;
+
+  /* Layout */
+  --nav-w: 224px;
+  --nav-w-collapsed: 56px;
+  --topbar-h: 48px;
+  --statusbar-h: 28px;
+}
