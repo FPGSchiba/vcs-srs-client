@@ -1,19 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./shared/styles/global.css";
-
-function Main() {
-  return (
-    <div className="h-full grid place-items-center text-tx-0">
-      <div className="font-mono text-ac-primary tracking-widest">
-        VCS · main window · tokens ready
-      </div>
-    </div>
-  );
-}
+import { Placeholder } from "./shared/components/Placeholder";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <Main />
+    <Placeholder label="VCS · main window · tokens ready" />
   </React.StrictMode>,
 );
