@@ -13,6 +13,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/control"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
+	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
 
 // Dialer opens a gRPC connection to the resolved target.
@@ -165,6 +166,17 @@ func (s *Session) Reconnect(ctx context.Context) error {
 	go func() { _ = cc.ConsumeUpdates(streamCtx, s.st, s.em) }()
 	tagged.ConnectionState(events.ConnConnected)
 	return nil
+}
+
+// UpdateRadioInfo pushes a radio change via the live control client.
+func (s *Session) UpdateRadioInfo(ctx context.Context, info *srspb.RadioInfo) error {
+	s.mu.Lock()
+	cc := s.control
+	s.mu.Unlock()
+	if cc == nil {
+		return fmt.Errorf("not connected")
+	}
+	return cc.UpdateRadioInfo(ctx, info)
 }
 
 // Control returns the live control client (nil if not connected).
