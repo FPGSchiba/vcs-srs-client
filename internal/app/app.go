@@ -4,20 +4,21 @@ import (
 	"context"
 	"fmt"
 
+	"log/slog"
+
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"go.uber.org/zap"
 )
 
 // App is the main application service. All exported methods are callable from
 // the frontend via Wails3 generated bindings.
 type App struct {
-	logger   *zap.Logger
+	logger   *slog.Logger
 	wailsApp *application.App
 }
 
 // NewApp creates a new App service. Call SetApp after creating the
 // *application.App so this service can create additional windows.
-func NewApp(logger *zap.Logger) *App {
+func NewApp(logger *slog.Logger) *App {
 	return &App{logger: logger}
 }
 

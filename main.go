@@ -15,9 +15,6 @@ var assets embed.FS
 
 func main() {
 	appLog := logger.CreateLogger()
-	defer func() {
-		_ = appLog.Sync()
-	}()
 
 	gui := app.NewApp(appLog)
 

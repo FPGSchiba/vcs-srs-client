@@ -1,64 +1,46 @@
+// Package logger wires log/slog with optional file rotation via lumberjack.
 package logger
 
 import (
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"gopkg.in/natefinch/lumberjack.v2"
+	"io"
+	"log/slog"
 	"os"
-	"time"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var logger *zap.Logger
-
-func CreateLogger() *zap.Logger {
-	stdout := zapcore.AddSync(os.Stdout)
-
-	file := zapcore.AddSync(&lumberjack.Logger{
-		Filename:   "log/vcs-server.log",
-		MaxSize:    10, // megabytes
-		MaxBackups: 3,
-		MaxAge:     180, // days
-	})
-
-	level := zap.NewAtomicLevelAt(zap.InfoLevel)
-
-	// Custom encoder config for both console and file
-	customEncoderConfig := zapcore.EncoderConfig{
-		TimeKey:        "timestamp",
-		LevelKey:       "level",
-		NameKey:        "logger",
-		CallerKey:      "caller",
-		MessageKey:     "msg",
-		StacktraceKey:  "stacktrace",
-		LineEnding:     zapcore.DefaultLineEnding,
-		EncodeLevel:    zapcore.CapitalLevelEncoder, // ERRO, INFO, etc
-		EncodeTime:     customTimeEncoder,           // Custom time format
-		EncodeDuration: zapcore.SecondsDurationEncoder,
-		EncodeCaller:   zapcore.ShortCallerEncoder,
-	}
-
-	consoleEncoder := zapcore.NewConsoleEncoder(customEncoderConfig)
-	fileEncoder := zapcore.NewJSONEncoder(customEncoderConfig)
-
-	core := zapcore.NewTee(
-		zapcore.NewCore(consoleEncoder, stdout, level),
-		zapcore.NewCore(fileEncoder, file, level),
-	)
-
-	// Enable caller tracking
-	logger := zap.New(core, zap.AddCaller())
-
-	return logger
+// Options configures the logger. Writer overrides FilePath when set (used in tests).
+type Options struct {
+	Level    slog.Level
+	Writer   io.Writer // if nil, writes to stderr + rotating file
+	JSON     bool      // true = JSON encoder; false = text encoder
+	FilePath string    // ignored if Writer is set; default: "log/vcs-client.log"
 }
 
-// Custom time encoder function
-func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-	enc.AppendString(t.Format("2006-01-02 15:04:05"))
+// New constructs a *slog.Logger using the given options.
+func New(opt Options) *slog.Logger {
+	w := opt.Writer
+	if w == nil {
+		path := opt.FilePath
+		if path == "" {
+			path = "log/vcs-client.log"
+		}
+		file := &lumberjack.Logger{Filename: path, MaxSize: 10, MaxBackups: 3, MaxAge: 180}
+		w = io.MultiWriter(os.Stderr, file)
+	}
+	handlerOpts := &slog.HandlerOptions{Level: opt.Level, AddSource: true}
+	var handler slog.Handler
+	if opt.JSON {
+		handler = slog.NewJSONHandler(w, handlerOpts)
+	} else {
+		handler = slog.NewTextHandler(w, handlerOpts)
+	}
+	return slog.New(handler)
 }
 
-func GetLogger() *zap.Logger {
-	if logger == nil {
-		logger = CreateLogger()
-	}
-	return logger
+// CreateLogger constructs the default app logger (INFO, JSON to stderr + file).
+// Kept for the existing main.go call site; will be replaced by New(...) directly
+// in a later task when config supplies the level.
+func CreateLogger() *slog.Logger {
+	return New(Options{Level: slog.LevelInfo, JSON: true})
 }
