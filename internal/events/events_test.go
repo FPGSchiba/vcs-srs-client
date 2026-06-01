@@ -74,3 +74,21 @@ func TestEmitter_ClientLeft(t *testing.T) {
 		t.Fatalf("unexpected event name: %q", got.name)
 	}
 }
+
+func TestEmitter_RadioUpdate(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	e.RadioUpdate("g", events.RadioInfoPayload{Muted: true})
+	if f.last().name != events.EventRadioUpdate {
+		t.Fatalf("unexpected: %q", f.last().name)
+	}
+}
+
+func TestEmitter_SessionChanged(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	e.SessionChanged("logged_in")
+	if f.last().name != events.EventAuthSession {
+		t.Fatalf("unexpected: %q", f.last().name)
+	}
+}
