@@ -57,6 +57,15 @@ func ConfigFilePath() (string, error) {
 	return filepath.Join(dir, "config.toml"), nil
 }
 
+// WindowStateFilePath returns the path to windows.json under AppDataDir.
+func WindowStateFilePath() (string, error) {
+	dir, err := AppDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "windows.json"), nil
+}
+
 // LogFilePath returns the path to the rotating client log under AppDataDir
 // (in a "log" subdirectory, which is created if it does not exist).
 func LogFilePath() (string, error) {
