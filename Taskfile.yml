@@ -32,3 +32,13 @@ tasks:
     summary: Runs the application in development mode
     cmds:
       - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
+
+  proto:
+    summary: Regenerate Go gRPC bindings from srs.proto into srspb/
+    cmds:
+      - cmd: powershell -Command "Remove-Item -Recurse -Force srspb -ErrorAction SilentlyContinue"
+        platforms: [windows]
+      - cmd: rm -rf srspb
+        platforms: [linux, darwin]
+      - mkdir srspb
+      - buf generate
