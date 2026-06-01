@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -37,5 +38,26 @@ func TestConfigFilePath_IsUnderAppDataDir(t *testing.T) {
 	}
 	if filepath.Base(cp) != "config.toml" {
 		t.Fatalf("expected basename config.toml, got %q", filepath.Base(cp))
+	}
+}
+
+func TestLogFilePath_IsUnderAppDataDir(t *testing.T) {
+	lp, err := config.LogFilePath()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dir, err := config.AppDataDir()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(filepath.Clean(lp), filepath.Clean(dir)) {
+		t.Fatalf("expected log path %q under app-data dir %q", lp, dir)
+	}
+	if filepath.Base(lp) != "vcs-client.log" {
+		t.Fatalf("expected basename vcs-client.log, got %q", filepath.Base(lp))
+	}
+	// The containing log directory must exist after the call.
+	if _, err := os.Stat(filepath.Dir(lp)); err != nil {
+		t.Fatalf("expected log directory to exist: %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -38,9 +39,18 @@ func New(opt Options) *slog.Logger {
 	return slog.New(handler)
 }
 
-// CreateLogger constructs the default app logger (INFO, JSON to stderr + file).
-// Kept for the existing main.go call site; will be replaced by New(...) directly
-// in a later task when config supplies the level.
-func CreateLogger() *slog.Logger {
-	return New(Options{Level: slog.LevelInfo, JSON: true})
+// ParseLevel maps a config log-level string to a slog.Level. Matching is
+// case-insensitive; "WARNING" is accepted as an alias for "WARN". Empty or
+// unrecognised values fall back to INFO.
+func ParseLevel(s string) slog.Level {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "WARN", "WARNING":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

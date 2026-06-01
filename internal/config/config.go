@@ -35,6 +35,22 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadOrCreate loads the config at path, writing it with defaults first if the
+// file does not yet exist. This guarantees a human-editable config.toml is
+// present on disk after first startup.
+func LoadOrCreate(path string) (*Config, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		cfg := Default()
+		if err := Save(path, cfg); err != nil {
+			return nil, fmt.Errorf("write default config: %w", err)
+		}
+		return cfg, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("stat config: %w", err)
+	}
+	return Load(path)
+}
+
 // Save writes the config atomically (write-temp + rename).
 func Save(path string, cfg *Config) error {
 	tmp := path + ".tmp"

@@ -57,3 +57,43 @@ func TestSave_RoundTrip(t *testing.T) {
 		t.Fatalf("round-trip mismatch: got %+v want %+v", got, cfg)
 	}
 }
+
+func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	cfg, err := config.LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *cfg != *config.Default() {
+		t.Fatalf("expected defaults, got %+v", cfg)
+	}
+	// The file must now exist on disk.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected config file to be created: %v", err)
+	}
+	// And re-loading it must yield the same defaults.
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if *reloaded != *config.Default() {
+		t.Fatalf("reloaded config differs from defaults: %+v", reloaded)
+	}
+}
+
+func TestLoadOrCreate_LeavesExistingFileUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "log_level = \"WARN\"\nserver_url = \"existing:443\"\nping_interval_seconds = 9\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	cfg, err := config.LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LogLevel != "WARN" || cfg.ServerURL != "existing:443" || cfg.PingIntervalSeconds != 9 {
+		t.Fatalf("expected existing values preserved, got %+v", cfg)
+	}
+}

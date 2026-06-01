@@ -56,3 +56,17 @@ func ConfigFilePath() (string, error) {
 	}
 	return filepath.Join(dir, "config.toml"), nil
 }
+
+// LogFilePath returns the path to the rotating client log under AppDataDir
+// (in a "log" subdirectory, which is created if it does not exist).
+func LogFilePath() (string, error) {
+	dir, err := AppDataDir()
+	if err != nil {
+		return "", err
+	}
+	logDir := filepath.Join(dir, "log")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(logDir, "vcs-client.log"), nil
+}
