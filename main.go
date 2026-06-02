@@ -8,6 +8,8 @@ import (
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/session"
+	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 	"github.com/FPGSchiba/vcs-srs-client/pkg/logger"
 )
 
@@ -66,12 +68,28 @@ func main() {
 
 	gui.SetApp(wailsApp)
 
+	// Wire backend: emitter → session → window registry → bindings.
+	emitter := app.NewWailsEmitter(wailsApp)
+	sess := session.New(gui.Store(), emitter, session.Deps{Version: version.Client})
+
+	winPath, winPathErr := config.WindowStateFilePath()
+	if winPathErr != nil {
+		appLog.Warn("could not resolve windows.json path; geometry will not persist", "err", winPathErr)
+		winPath = "windows.json"
+	}
+	registry := app.NewRegistry(app.NewWailsFactory(wailsApp), winPath, emitter)
+	gui.SetBackend(sess, registry)
+
+	// Main window: frameless + transparent, fixed 1440x900, loads the main entry.
 	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "VCS Client",
-		Width:            1280,
-		Height:           720,
-		URL:              "/",
-		BackgroundColour: application.NewRGBA(27, 38, 54, 255),
+		Width:            1440,
+		Height:           900,
+		URL:              "/main.html",
+		Frameless:        true,
+		DisableResize:    true, // main client is a fixed 1440x900 surface per the design
+		BackgroundType:   application.BackgroundTypeSolid,
+		BackgroundColour: application.NewRGBA(3, 7, 13, 255), // --bg-0, opaque (no click-through)
 	})
 
 	if err := wailsApp.Run(); err != nil {

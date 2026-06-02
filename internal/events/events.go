@@ -22,6 +22,7 @@ const (
 	EventAuthSession       = "auth:session_changed"
 	EventControlConnection = "control:connection"
 	EventWindowGeometry    = "window:geometry_changed"
+	EventWindowState       = "window:state" // payload: []string of open window ids
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -74,3 +75,41 @@ func (t *Tagged) ClientLeft(guid string) {
 func (t *Tagged) ConnectionState(state ConnectionState) {
 	t.em.Emit(EventControlConnection, state)
 }
+
+// RadioPayload mirrors srspb.Radio for the binding/event surface.
+type RadioPayload struct {
+	ID         uint32  `json:"id"`
+	Name       string  `json:"name"`
+	Frequency  float32 `json:"frequency"`
+	Enabled    bool    `json:"enabled"`
+	IsIntercom bool    `json:"is_intercom"`
+}
+
+// RadioInfoPayload mirrors srspb.RadioInfo.
+type RadioInfoPayload struct {
+	Radios []RadioPayload `json:"radios"`
+	Muted  bool           `json:"muted"`
+}
+
+// RadioUpdateEnvelope is the EventRadioUpdate payload.
+type RadioUpdateEnvelope struct {
+	Guid  string           `json:"guid"`
+	Radio RadioInfoPayload `json:"radio"`
+}
+
+// RadioUpdate emits EventRadioUpdate.
+func (t *Tagged) RadioUpdate(guid string, info RadioInfoPayload) {
+	t.em.Emit(EventRadioUpdate, RadioUpdateEnvelope{Guid: guid, Radio: info})
+}
+
+// SettingsUpdate emits EventSettingsUpdate with an opaque payload.
+func (t *Tagged) SettingsUpdate(payload any) { t.em.Emit(EventSettingsUpdate, payload) }
+
+// ServerAction emits EventServerAction with an opaque payload.
+func (t *Tagged) ServerAction(payload any) { t.em.Emit(EventServerAction, payload) }
+
+// SessionChanged emits EventAuthSession ("logged_in" | "logged_out").
+func (t *Tagged) SessionChanged(state string) { t.em.Emit(EventAuthSession, state) }
+
+// ClientState emits EventClientState with a full snapshot payload.
+func (t *Tagged) ClientState(snapshot any) { t.em.Emit(EventClientState, snapshot) }

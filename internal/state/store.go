@@ -13,6 +13,8 @@ type Snapshot struct {
 	Clients  map[string]*srspb.ClientInfo
 	Radios   map[string]*srspb.RadioInfo
 	Settings *srspb.ServerSettings
+	SelfGUID string
+	Self     *srspb.ClientInfo
 }
 
 // Store holds live client/radio/settings state. Safe for concurrent use.
@@ -21,6 +23,8 @@ type Store struct {
 	clients  map[string]*srspb.ClientInfo
 	radios   map[string]*srspb.RadioInfo
 	settings *srspb.ServerSettings
+	selfGUID string
+	self     *srspb.ClientInfo
 }
 
 // New constructs an empty Store.
@@ -69,6 +73,22 @@ func (s *Store) Radios(guid string) (*srspb.RadioInfo, bool) {
 	return r, ok
 }
 
+// SetSelf records the local client's own guid and info (set at connect).
+func (s *Store) SetSelf(guid string, info *srspb.ClientInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selfGUID = guid
+	s.self = info
+}
+
+// ClearSelf clears the local client identity (on disconnect).
+func (s *Store) ClearSelf() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selfGUID = ""
+	s.self = nil
+}
+
 // SetSettings overwrites the server settings.
 func (s *Store) SetSettings(settings *srspb.ServerSettings) {
 	s.mu.Lock()
@@ -97,5 +117,5 @@ func (s *Store) Snapshot() Snapshot {
 	for k, v := range s.radios {
 		radios[k] = v
 	}
-	return Snapshot{Clients: clients, Radios: radios, Settings: s.settings}
+	return Snapshot{Clients: clients, Radios: radios, Settings: s.settings, SelfGUID: s.selfGUID, Self: s.self}
 }

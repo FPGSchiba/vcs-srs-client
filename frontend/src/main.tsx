@@ -1,10 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./shared/styles/global.css";
-import { Placeholder } from "./shared/components/Placeholder";
+import { MainApp } from "./windows/main/MainApp";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <Placeholder label="VCS · main window · tokens ready" />
+    <MainApp />
   </React.StrictMode>,
 );
