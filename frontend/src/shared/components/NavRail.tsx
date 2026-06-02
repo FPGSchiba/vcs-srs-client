@@ -4,6 +4,7 @@ import { Icon } from "./Icon";
 interface NavRailProps {
   activeKey: string;
   onSelect: (key: string) => void;
+  onLogout?: () => void;
 }
 
 interface NavItem {
@@ -32,7 +33,7 @@ const NAV_ITEMS: NavItem[] = [
  * is not wired yet, so callsign/FFID show placeholders. classNames are kept
  * byte-identical to the design so the ported CSS applies unchanged.
  */
-export function NavRail({ activeKey, onSelect }: NavRailProps) {
+export function NavRail({ activeKey, onSelect, onLogout }: NavRailProps) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <nav className={`nav ${collapsed ? "collapsed" : ""}`}>
@@ -61,6 +62,19 @@ export function NavRail({ activeKey, onSelect }: NavRailProps) {
           ))}
         </div>
       </div>
+      {onLogout && (
+        <div style={{ borderTop: "1px solid var(--bd-1)", padding: "6px" }}>
+          <div
+            className="nav-item"
+            onClick={onLogout}
+            title={collapsed ? "Logout" : undefined}
+            style={{ color: "var(--ac-alert)" }}
+          >
+            <span className="ic"><Icon name="unlock" size={16} /></span>
+            <span className="label">Logout</span>
+          </div>
+        </div>
+      )}
       <div className="nav-footer">
         <div className="user-chip">
           <div className="avatar">—</div>
