@@ -11,7 +11,7 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ## Phase 1 — Scaffold + auth (guest) + control gRPC + Comms popout shell
 
-**Status:** `[ ]` design approved 2026-05-31 — implementation pending
+**Status:** `[x]` complete 2026-06-02 — landed across Part 1 (foundation) and Part 2 (plans 2A backend session, 2B windowing/frameless shell, 2C pixel-faithful frontend) on `feat/phase-1-part-2-auth-control`.
 
 **Headline deliverables**
 - Wails v3 multi-window scaffold with per-window Vite entries

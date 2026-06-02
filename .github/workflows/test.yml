@@ -56,11 +56,36 @@ jobs:
   frontend:
     name: Frontend (React)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
     steps:
       - uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # `wails3 generate bindings` type-checks the Go packages, which (via the
+      # Wails application package) use cgo against GTK4/WebKitGTK 6.0 headers, so
+      # the dev headers must be present even though this job only builds the FE.
+      - name: Install Linux GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev
+
+      - name: Install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
+
+      - name: Generate proto bindings
+        run: buf generate
+
+      - name: Install wails3 CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha.96
+
+      # frontend/src/shared/api/client.ts imports the generated TS bindings
+      # (gitignored), so they must be generated before tsc/vite build.
+      - name: Generate TypeScript bindings
+        run: wails3 generate bindings -ts -clean=true
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -70,10 +95,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend deps
+        working-directory: frontend
         run: npm ci
 
       - name: Frontend tests
+        working-directory: frontend
         run: npm run test
 
       - name: Build frontend
+        working-directory: frontend
         run: npm run build
