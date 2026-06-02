@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/auth"
@@ -75,7 +76,14 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 		_ = conn.Close()
 		return auth.ErrGuestUnavailable
 	}
-	guest, err := ac.GuestLogin(ctx, name, password, unitID, init.ClientGUID)
+	// The server matches the coalition by bcrypt-comparing the client-supplied
+	// hash against its stored coalition passwords, so we never send plaintext.
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("hash password: %w", err)
+	}
+	guest, err := ac.GuestLogin(ctx, name, string(hashed), unitID, init.ClientGUID)
 	if err != nil {
 		_ = conn.Close()
 		return err

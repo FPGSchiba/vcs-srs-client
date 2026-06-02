@@ -6,8 +6,27 @@ import { Field } from "../../../shared/components/Field";
 import { Button } from "../../../shared/components/Button";
 import { Icon } from "../../../shared/components/Icon";
 import { PreLoginTopBar } from "../../../shared/components/PreLoginTopBar";
+import { useBuildInfo } from "../../../shared/hooks/useBuildInfo";
 
 type Stage = "welcome" | "manual";
+
+/**
+ * Extracts a human-readable message from a binding error. Wails serializes a Go
+ * error as a JSON envelope ({message, cause, kind}); we surface only `message`.
+ */
+function errorMessage(e: unknown): string {
+  const raw = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && "message" in parsed) {
+      const m = (parsed as { message: unknown }).message;
+      if (typeof m === "string") return m;
+    }
+  } catch {
+    /* raw was not JSON — fall through */
+  }
+  return raw || "connection failed";
+}
 
 /**
  * Welcome is the guest login flow for the main window, ported from the design
@@ -20,6 +39,7 @@ type Stage = "welcome" | "manual";
  */
 export function Welcome() {
   const setPhase = useSession((s) => s.setPhase);
+  const build = useBuildInfo();
   const [stage, setStage] = useState<Stage>("welcome");
   const [server, setServer] = useState("localhost:5002");
   const [password, setPassword] = useState("");
@@ -35,7 +55,7 @@ export function Welcome() {
       // success transitions arrive via control:connection events (wired in MainApp)
     } catch (e) {
       setPhase("welcome");
-      setError(e instanceof Error ? e.message : "connection failed");
+      setError(errorMessage(e));
     }
   }
 
@@ -96,12 +116,6 @@ export function Welcome() {
                 <Button size="lg" onClick={() => setStage("manual")}>
                   <Icon name="server" size={14} /> JOIN AS GUEST · MANUAL SERVER
                 </Button>
-                <div className="row center gap-3" style={{ marginTop: 8 }}>
-                  <span className="cap">REGION</span>
-                  <span className="cap" style={{ color: "var(--ac-primary)" }}>EU-WEST · NOMINAL</span>
-                  <span style={{ color: "var(--tx-4)" }}>·</span>
-                  <span className="cap">28ms</span>
-                </div>
               </div>
             )}
 
@@ -129,20 +143,20 @@ export function Welcome() {
                   />
                 </Field>
                 <div className="row gap-4">
-                  <Field label="Player Name" htmlFor="player" style={{ flex: 1 }}>
-                    <input
-                      id="player"
-                      className="input"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                    />
-                  </Field>
                   <Field label="FFID (optional)" htmlFor="ffid" style={{ flex: 1 }}>
                     <input
                       id="ffid"
                       className="input mono"
                       value={ffid}
                       onChange={(e) => setFfid(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Player Name" htmlFor="player" style={{ flex: 1 }}>
+                    <input
+                      id="player"
+                      className="input"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
                     />
                   </Field>
                 </div>
@@ -157,11 +171,11 @@ export function Welcome() {
           </div>
 
           <div className="row center gap-4" style={{ marginTop: 16, color: "var(--tx-4)", fontFamily: "var(--ff-mono)", fontSize: 9, letterSpacing: "0.16em" }}>
-            <span>v3.2.1-stable</span>
+            <span>v{build?.client_version ?? "—"}</span>
             <span>·</span>
-            <span>SRS PROTOCOL 1.9.0</span>
+            <span>SRS PROTOCOL {build?.protocol_version ?? "—"}</span>
             <span>·</span>
-            <span>BUILD 20260518</span>
+            <span>BUILD {build?.build ?? "—"}</span>
           </div>
         </div>
       </div>

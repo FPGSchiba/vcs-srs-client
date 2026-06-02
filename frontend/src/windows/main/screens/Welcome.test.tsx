@@ -2,7 +2,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 vi.mock("../../../shared/api/client", () => ({
-  api: { connect: vi.fn().mockResolvedValue(undefined) },
+  api: {
+    connect: vi.fn().mockResolvedValue(undefined),
+    getBuildInfo: vi.fn().mockResolvedValue({
+      client_version: "0.1.0",
+      protocol_version: "1.0.0",
+      build: "test",
+    }),
+  },
 }));
 import { api } from "../../../shared/api/client";
 import { Welcome } from "./Welcome";

@@ -9,13 +9,12 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/session"
+	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 	"github.com/FPGSchiba/vcs-srs-client/pkg/logger"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
-
-const appVersion = "0.1.0"
 
 func main() {
 	// Resolve the rotating log path under the OS app-data dir. On failure, fall
@@ -71,7 +70,7 @@ func main() {
 
 	// Wire backend: emitter → session → window registry → bindings.
 	emitter := app.NewWailsEmitter(wailsApp)
-	sess := session.New(gui.Store(), emitter, session.Deps{Version: appVersion})
+	sess := session.New(gui.Store(), emitter, session.Deps{Version: version.Client})
 
 	winPath, winPathErr := config.WindowStateFilePath()
 	if winPathErr != nil {

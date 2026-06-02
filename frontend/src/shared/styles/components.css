@@ -1363,3 +1363,26 @@ input:focus, select:focus, textarea:focus {
   mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
   -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
 }
+
+/* ============================================================
+   Wails v3 window dragging.
+   The design used `-webkit-app-region: drag`, which the Wails v3 webview does
+   NOT honour — it detects drag regions via the `--wails-draggable` custom
+   property. Mark the title bars draggable and opt interactive controls out.
+   ============================================================ */
+.topbar { --wails-draggable: drag; }
+.topbar button,
+.topbar input,
+.topbar select,
+.topbar a,
+.topbar .launcher,
+.topbar .launcher-btn,
+.topbar .user-menu-trigger,
+.topbar .assignment-card,
+.win-ctrl,
+.win-ctrl button { --wails-draggable: no-drag; }
+
+.popout-chrome { --wails-draggable: drag; }
+.popout-chrome button,
+.popout-chrome .ctrl,
+.popout-chrome .ctrl button { --wails-draggable: no-drag; }

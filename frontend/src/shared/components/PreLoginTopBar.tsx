@@ -1,5 +1,6 @@
 import { Window } from "@wailsio/runtime";
 import { Icon } from "./Icon";
+import { useBuildInfo } from "../hooks/useBuildInfo";
 
 interface PreLoginTopBarProps {
   className?: string;
@@ -8,12 +9,12 @@ interface PreLoginTopBarProps {
 /**
  * PreLoginTopBar is the minimal title bar shown before the user signs in,
  * ported from the design prototype's `shell.jsx` PreLoginTopBar. The `.topbar`
- * className carries `-webkit-app-region: drag` from the ported CSS so the bar
- * is draggable; `.win-ctrl` buttons are marked `no-drag` by that same CSS. The
- * minimize/close buttons drive the current Wails window directly. classNames
- * are kept byte-identical to the design so the ported CSS applies unchanged.
+ * className carries `--wails-draggable: drag` (set in components.css) so the bar
+ * drags the window in Wails v3; `.win-ctrl` buttons opt out with `no-drag`. The
+ * minimize/close buttons drive the current Wails window directly.
  */
 export function PreLoginTopBar({ className }: PreLoginTopBarProps) {
+  const build = useBuildInfo();
   return (
     <div
       className={className ? `topbar ${className}` : "topbar"}
@@ -30,13 +31,13 @@ export function PreLoginTopBar({ className }: PreLoginTopBarProps) {
         </div>
         <div className="col" style={{ lineHeight: 1.1 }}>
           <span className="brand-name">VCS</span>
-          <span className="brand-sub">Vanguard · v3.2.1</span>
+          <span className="brand-sub">Vanguard · v{build?.client_version ?? "—"}</span>
         </div>
       </div>
       <div className="topbar-crumbs">
         <span className="crumb-active">Sign In</span>
         <span className="crumb-sep">·</span>
-        <span className="cap" style={{ color: "var(--tx-3)" }}>DRAG TITLE BAR TO MOVE WINDOW</span>
+        <span className="cap" style={{ color: "var(--tx-3)" }}>SRS PROTOCOL {build?.protocol_version ?? "—"}</span>
       </div>
       <div className="win-ctrl">
         <button title="Minimize" onClick={() => void Window.Minimise()}>

@@ -1,6 +1,7 @@
 import { Window } from "@wailsio/runtime";
 import { Icon } from "./Icon";
 import { api } from "../api/client";
+import { useBuildInfo } from "../hooks/useBuildInfo";
 
 interface TopBarProps {
   view: string;
@@ -44,6 +45,7 @@ const POPOUT_LAUNCHERS: Launcher[] = [
  * are kept byte-identical to the design so the ported CSS applies unchanged.
  */
 export function TopBar({ view }: TopBarProps) {
+  const build = useBuildInfo();
   return (
     <div className="topbar">
       <div className="brand">
@@ -57,7 +59,7 @@ export function TopBar({ view }: TopBarProps) {
         </div>
         <div className="col" style={{ lineHeight: 1.1 }}>
           <span className="brand-name">VCS</span>
-          <span className="brand-sub">Vanguard · v3.2.1</span>
+          <span className="brand-sub">Vanguard · v{build?.client_version ?? "—"}</span>
         </div>
       </div>
 

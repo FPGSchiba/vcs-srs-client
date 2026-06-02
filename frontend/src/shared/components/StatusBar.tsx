@@ -1,6 +1,7 @@
 import { Icon } from "./Icon";
 import { useSession } from "../store/session";
 import type { Conn } from "../store/session";
+import { useBuildInfo } from "../hooks/useBuildInfo";
 
 type StatusBarProps = Record<string, never>;
 
@@ -28,9 +29,10 @@ function dotColor(conn: Conn): string {
 export function StatusBar(_props: StatusBarProps) {
   const server = useSession((s) => s.server);
   const conn = useSession((s) => s.conn);
+  const build = useBuildInfo();
   return (
     <div className="statusbar">
-      <span className="sb-item">v3.2.1-stable</span>
+      <span className="sb-item">v{build?.client_version ?? "—"}</span>
       <span className="sb-divider"></span>
 
       <span className="sb-item">

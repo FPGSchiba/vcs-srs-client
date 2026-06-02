@@ -31,6 +31,13 @@ type ClientStateSnapshot struct {
 	Radios  map[string]RadioInfoDTO  `json:"radios"`
 }
 
+// BuildInfoDTO carries version identifiers for display in the UI.
+type BuildInfoDTO struct {
+	ClientVersion   string `json:"client_version"`
+	ProtocolVersion string `json:"protocol_version"`
+	Build           string `json:"build"`
+}
+
 // RadioInfoToProto maps a DTO to the proto message.
 func RadioInfoToProto(d RadioInfoDTO) *srspb.RadioInfo {
 	out := &srspb.RadioInfo{Muted: d.Muted}

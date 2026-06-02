@@ -21,8 +21,14 @@ export interface ClientStateSnapshot {
   clients: Record<string, ClientInfoDTO>;
   radios: Record<string, RadioInfoDTO>;
 }
+export interface BuildInfo {
+  client_version: string;
+  protocol_version: string;
+  build: string;
+}
 
 export const api = {
+  getBuildInfo: (): Promise<BuildInfo> => App.GetBuildInfo() as Promise<BuildInfo>,
   connect: (server: string, name: string, password: string, unitId: string) =>
     App.Connect(server, name, password, unitId),
   disconnect: () => App.Disconnect(),

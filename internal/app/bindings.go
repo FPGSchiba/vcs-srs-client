@@ -3,8 +3,18 @@ package app
 import (
 	"context"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 )
+
+// GetBuildInfo returns the client/protocol versions and build identifier.
+func (a *App) GetBuildInfo() BuildInfoDTO {
+	return BuildInfoDTO{
+		ClientVersion:   version.Client,
+		ProtocolVersion: version.Protocol,
+		Build:           version.Build(),
+	}
+}
 
 // Connect runs the guest connect sequence.
 func (a *App) Connect(serverURL, name, password, unitID string) error {
