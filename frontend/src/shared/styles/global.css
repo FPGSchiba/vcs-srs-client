@@ -10,6 +10,7 @@ html, body, #root {
   margin: 0;
   padding: 0;
   height: 100%;
+  width: 100%;
   background: var(--bg-0);
   color: var(--tx-1);
   font-family: var(--ff-sans);

@@ -6,7 +6,9 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 )
 
-// wailsFactory creates real frameless+transparent Wails windows.
+// wailsFactory creates real frameless, opaque Wails windows. (The windows are
+// opaque rather than transparent so their edges receive OS resize hit-tests and
+// no region is click-through.)
 type wailsFactory struct{ app *application.App }
 
 // NewWailsFactory builds a WindowFactory over the Wails app.
@@ -23,8 +25,8 @@ func (f *wailsFactory) Create(id, url string, g windowstate.Geometry) WindowHand
 		Y:                g.Y,
 		URL:              url,
 		Frameless:        true,
-		BackgroundType:   application.BackgroundTypeTransparent,
-		BackgroundColour: application.NewRGBA(0, 0, 0, 0),
+		BackgroundType:   application.BackgroundTypeSolid,
+		BackgroundColour: application.NewRGBA(3, 7, 13, 255), // --bg-0, opaque (no click-through)
 	})
 	return &wailsHandle{win: win}
 }

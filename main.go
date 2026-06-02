@@ -87,8 +87,9 @@ func main() {
 		Height:           900,
 		URL:              "/main.html",
 		Frameless:        true,
-		BackgroundType:   application.BackgroundTypeTransparent,
-		BackgroundColour: application.NewRGBA(0, 0, 0, 0),
+		DisableResize:    true, // main client is a fixed 1440x900 surface per the design
+		BackgroundType:   application.BackgroundTypeSolid,
+		BackgroundColour: application.NewRGBA(3, 7, 13, 255), // --bg-0, opaque (no click-through)
 	})
 
 	if err := wailsApp.Run(); err != nil {

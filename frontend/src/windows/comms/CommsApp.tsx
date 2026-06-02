@@ -44,7 +44,19 @@ export function CommsApp() {
   const entry = Object.values(radios)[0];
 
   return (
-    <div className="popout active" style={{ position: "static", width: "100%", height: "100%" }}>
+    <div
+      className="popout"
+      style={{
+        position: "static",
+        width: "100%",
+        height: "100%",
+        border: "none",
+        borderRadius: 0,
+        boxShadow: "none",
+        minWidth: 0,
+        minHeight: 0,
+      }}
+    >
       <div className="popout-chrome">
         <Icon name="broadcast" size={14} />
         <span className="ttl">Communications</span>
