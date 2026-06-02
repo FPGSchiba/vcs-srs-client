@@ -22,6 +22,7 @@ const (
 	EventAuthSession       = "auth:session_changed"
 	EventControlConnection = "control:connection"
 	EventWindowGeometry    = "window:geometry_changed"
+	EventWindowState       = "window:state" // payload: []string of open window ids
 )
 
 // ConnectionState is the payload value used with EventControlConnection.

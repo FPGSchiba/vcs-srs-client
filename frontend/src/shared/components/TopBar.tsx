@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { useBuildInfo } from "../hooks/useBuildInfo";
 import { useSession } from "../store/session";
 import type { Conn } from "../store/session";
+import { useWindows } from "../store/windows";
 
 interface TopBarProps {
   view: string;
@@ -56,6 +57,7 @@ export function TopBar({ view }: TopBarProps) {
   const build = useBuildInfo();
   const conn = useSession((s) => s.conn);
   const pill = CONN_PILL[conn];
+  const openWindows = useWindows((s) => s.open);
   return (
     <div className="topbar">
       <div className="brand">
@@ -82,13 +84,19 @@ export function TopBar({ view }: TopBarProps) {
         <div className="launcher">
           {POPOUT_LAUNCHERS.map((l) => {
             const isComms = l.key === "comms";
+            const isOpen = isComms && openWindows.includes("comms");
             return (
               <span
                 key={l.key}
-                className="launcher-btn"
-                onClick={isComms ? () => void api.openWindow("comms") : undefined}
-                title={isComms ? `${l.label} · Closed — click to open` : "Arrives in a later phase"}
+                className={`launcher-btn${isOpen ? " open" : ""}`}
+                onClick={isComms ? () => void api.toggleWindow("comms") : undefined}
+                title={
+                  isComms
+                    ? `${l.label} · ${isOpen ? "Open — click to close" : "Closed — click to open"}`
+                    : "Arrives in a later phase"
+                }
                 aria-disabled={isComms ? undefined : true}
+                aria-pressed={isComms ? isOpen : undefined}
                 style={isComms ? undefined : { opacity: 0.45, pointerEvents: "none" }}
               >
                 <Icon name={l.icon} size={11} />

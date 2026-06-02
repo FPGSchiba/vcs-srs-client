@@ -6,6 +6,7 @@ import { useSession } from "../../shared/store/session";
 import type { Conn } from "../../shared/store/session";
 import { useClients } from "../../shared/store/clients";
 import { useRadios } from "../../shared/store/radios";
+import { useWindows } from "../../shared/store/windows";
 import { TopBar } from "../../shared/components/TopBar";
 import { NavRail } from "../../shared/components/NavRail";
 import { StatusBar } from "../../shared/components/StatusBar";
@@ -53,8 +54,15 @@ export function MainApp() {
       .catch(() => {
         /* not connected yet — ignore */
       });
+    api
+      .getOpenWindows()
+      .then((ids) => useWindows.getState().setOpen(ids))
+      .catch(() => {
+        /* ignore */
+      });
 
     const offs = [
+      on<string[]>(EV.windowState, (ids) => useWindows.getState().setOpen(ids)),
       on<ClientUpdatePayload>(EV.clientUpdate, (d) => useClients.getState().upsert(d.guid, d.info)),
       on<ClientLeftPayload>(EV.clientLeft, (d) => useClients.getState().remove(d.guid)),
       on<RadioUpdatePayload>(EV.radioUpdate, (d) => useRadios.getState().setForGuid(d.guid, d.radio)),

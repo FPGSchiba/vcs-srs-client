@@ -10,6 +10,7 @@ export const EV = {
   serverAction: "state:server_action",
   authSession: "auth:session_changed",
   controlConnection: "control:connection",
+  windowState: "window:state",
 } as const;
 
 // on subscribes to a Wails event and returns an unsubscribe function.

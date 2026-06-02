@@ -77,7 +77,7 @@ func main() {
 		appLog.Warn("could not resolve windows.json path; geometry will not persist", "err", winPathErr)
 		winPath = "windows.json"
 	}
-	registry := app.NewRegistry(app.NewWailsFactory(wailsApp), winPath)
+	registry := app.NewRegistry(app.NewWailsFactory(wailsApp), winPath, emitter)
 	gui.SetBackend(sess, registry)
 
 	// Main window: frameless + transparent, fixed 1440x900, loads the main entry.

@@ -28,7 +28,7 @@ func (f *fakeFactory) Create(id string, url string, g windowstate.Geometry) app.
 
 func TestRegistry_OpenCreatesOnceThenFocuses(t *testing.T) {
 	ff := &fakeFactory{}
-	r := app.NewRegistry(ff, filepath.Join(t.TempDir(), "windows.json"))
+	r := app.NewRegistry(ff, filepath.Join(t.TempDir(), "windows.json"), nil)
 
 	r.Open("comms")
 	r.Open("comms") // second open should focus, not recreate
@@ -40,7 +40,7 @@ func TestRegistry_OpenCreatesOnceThenFocuses(t *testing.T) {
 func TestRegistry_PersistsGeometryOnClose(t *testing.T) {
 	ff := &fakeFactory{}
 	path := filepath.Join(t.TempDir(), "windows.json")
-	r := app.NewRegistry(ff, path)
+	r := app.NewRegistry(ff, path, nil)
 
 	r.Open("comms")
 	r.SetGeometry("comms", windowstate.Geometry{X: 5, Y: 6, W: 540, H: 720})
@@ -49,5 +49,28 @@ func TestRegistry_PersistsGeometryOnClose(t *testing.T) {
 	saved, _ := windowstate.Load(path)
 	if saved["comms"].W != 540 {
 		t.Fatalf("expected persisted geometry, got %+v", saved)
+	}
+}
+
+type capEmitter struct{ events []string }
+
+func (c *capEmitter) Emit(name string, _ any) { c.events = append(c.events, name) }
+
+func TestRegistry_ToggleOpensThenCloses(t *testing.T) {
+	ff := &fakeFactory{}
+	em := &capEmitter{}
+	r := app.NewRegistry(ff, filepath.Join(t.TempDir(), "windows.json"), em)
+
+	r.Toggle("comms")
+	if got := r.OpenWindows(); len(got) != 1 || got[0] != "comms" {
+		t.Fatalf("expected comms open after first toggle, got %v", got)
+	}
+	r.Toggle("comms")
+	if got := r.OpenWindows(); len(got) != 0 {
+		t.Fatalf("expected no open windows after second toggle, got %v", got)
+	}
+	// Each open/close should have broadcast a window:state event.
+	if len(em.events) != 2 {
+		t.Fatalf("expected 2 window:state broadcasts, got %d (%v)", len(em.events), em.events)
 	}
 }

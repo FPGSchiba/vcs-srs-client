@@ -38,4 +38,6 @@ export const api = {
   updateRadioInfo: (info: RadioInfoDTO) => App.UpdateRadioInfo(info),
   openWindow: (id: string) => App.OpenWindow(id),
   closeWindow: (id: string) => App.CloseWindow(id),
+  toggleWindow: (id: string) => App.ToggleWindow(id),
+  getOpenWindows: (): Promise<string[]> => App.GetOpenWindows() as Promise<string[]>,
 };

@@ -23,6 +23,8 @@ type sessionAPI interface {
 type windowsAPI interface {
 	Open(id string)
 	Close(id string)
+	Toggle(id string)
+	OpenWindows() []string
 	Geometry(id string) windowstate.Geometry
 	SetGeometry(id string, g windowstate.Geometry)
 }

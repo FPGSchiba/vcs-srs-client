@@ -28,6 +28,8 @@ type fakeWindows struct{ opened []string }
 
 func (f *fakeWindows) Open(id string)                           { f.opened = append(f.opened, id) }
 func (f *fakeWindows) Close(string)                             {}
+func (f *fakeWindows) Toggle(id string)                         { f.opened = append(f.opened, id) }
+func (f *fakeWindows) OpenWindows() []string                    { return nil }
 func (f *fakeWindows) Geometry(string) windowstate.Geometry     { return windowstate.Geometry{} }
 func (f *fakeWindows) SetGeometry(string, windowstate.Geometry) {}
 

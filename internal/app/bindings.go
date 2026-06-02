@@ -44,6 +44,12 @@ func (a *App) OpenWindow(id string) { a.windows.Open(id) }
 // CloseWindow closes a window by id.
 func (a *App) CloseWindow(id string) { a.windows.Close(id) }
 
+// ToggleWindow opens the window if closed, or closes it if open.
+func (a *App) ToggleWindow(id string) { a.windows.Toggle(id) }
+
+// GetOpenWindows returns the ids of currently-open windows.
+func (a *App) GetOpenWindows() []string { return a.windows.OpenWindows() }
+
 // GetWindowGeometry returns a window's last geometry.
 func (a *App) GetWindowGeometry(id string) windowstate.Geometry { return a.windows.Geometry(id) }
 

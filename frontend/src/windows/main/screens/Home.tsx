@@ -1,5 +1,6 @@
 import { api } from "../../../shared/api/client";
 import { Icon } from "../../../shared/components/Icon";
+import { useWindows } from "../../../shared/store/windows";
 
 interface LauncherTile {
   key: string;
@@ -19,13 +20,14 @@ const TILES: LauncherTile[] = [
 
 /**
  * Home is the main-window landing screen, ported from the design prototype's
- * home.jsx launcher-tile grid. The Comms tile opens the comms pop-out window via
- * `api.openWindow("comms")`; the remaining tiles render with the same
- * `.launcher-tile` styling but are inert this phase (their windows arrive
- * later). classNames match the ported design CSS.
+ * home.jsx launcher-tile grid. The Comms tile toggles the comms pop-out window
+ * via `api.toggleWindow("comms")` and shows an `is-open` state; the remaining
+ * tiles render with the same `.launcher-tile` styling but are inert this phase
+ * (their windows arrive later). classNames match the ported design CSS.
  */
 export function Home() {
-  const openComms = () => void api.openWindow("comms");
+  const openWindows = useWindows((s) => s.open);
+  const toggleComms = () => void api.toggleWindow("comms");
 
   return (
     <div style={{ padding: 14, height: "100%", overflow: "auto" }}>
@@ -36,13 +38,19 @@ export function Home() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
         {TILES.map((t) => {
           const isComms = t.key === "comms";
+          const isOpen = isComms && openWindows.includes("comms");
           return (
             <div
               key={t.key}
-              className="launcher-tile"
-              onClick={isComms ? openComms : undefined}
-              title={isComms ? "Comms · click to open" : "Arrives in a later phase"}
+              className={`launcher-tile${isOpen ? " is-open" : ""}`}
+              onClick={isComms ? toggleComms : undefined}
+              title={
+                isComms
+                  ? `Comms · ${isOpen ? "click to close" : "click to open"}`
+                  : "Arrives in a later phase"
+              }
               aria-disabled={isComms ? undefined : true}
+              aria-pressed={isComms ? isOpen : undefined}
               style={isComms ? undefined : { opacity: 0.45, pointerEvents: "none" }}
             >
               <span className="lt-bg"><Icon name={t.icon} size={92} /></span>
@@ -60,7 +68,7 @@ export function Home() {
               </div>
               <span className="lt-state">
                 <span className="dot" />
-                {isComms ? "CLOSED · click to open" : "ARRIVES LATER"}
+                {isComms ? (isOpen ? "OPEN · click to close" : "CLOSED · click to open") : "ARRIVES LATER"}
               </span>
             </div>
           );
