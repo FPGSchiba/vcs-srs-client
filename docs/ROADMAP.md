@@ -162,6 +162,11 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 **Blocking deps:** code-signing certificates
 
+**TODO (final step — code-quality pass before v1):**
+- [ ] Integrate **React Doctor** (frontend health/diagnostics) and act on its findings.
+- [ ] Resolve outstanding **SonarQube / SonarCloud** issues (the SonarCloud quality gate has been failing on PRs) and get the gate green.
+- Do this as the *last* step so the whole codebase is in its final shape when audited.
+
 ---
 
 ## Cross-phase tracking notes
