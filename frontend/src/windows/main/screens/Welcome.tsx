@@ -39,6 +39,8 @@ function errorMessage(e: unknown): string {
  */
 export function Welcome() {
   const setPhase = useSession((s) => s.setPhase);
+  const setSessionServer = useSession((s) => s.setServer);
+  const phase = useSession((s) => s.phase);
   const build = useBuildInfo();
   const [stage, setStage] = useState<Stage>("welcome");
   const [server, setServer] = useState("localhost:5002");
@@ -50,9 +52,11 @@ export function Welcome() {
   async function connect() {
     setError(null);
     try {
+      setSessionServer(server);
       setPhase("connecting");
       await api.connect(server, name, password, ffid);
-      // success transitions arrive via control:connection events (wired in MainApp)
+      // success transitions to the home screen arrive via the control:connection
+      // event wired in MainApp (phase → "connected").
     } catch (e) {
       setPhase("welcome");
       setError(errorMessage(e));
@@ -108,7 +112,20 @@ export function Welcome() {
           </div>
 
           <div className="panel" style={{ background: "rgba(10,20,32,0.7)", backdropFilter: "blur(6px)", borderColor: "var(--bd-3)" }}>
-            {stage === "welcome" && (
+            {phase === "connecting" && (
+              <div className="col gap-4" style={{ padding: 28 }}>
+                <div className="row acenter gap-3">
+                  <Icon name="server" size={14} style={{ color: "var(--ac-primary)" }} />
+                  <span className="cap" style={{ color: "var(--ac-primary)" }}>ESTABLISHING TACTICAL LINK</span>
+                </div>
+                <div className="cap cap-dim">Connecting to {server}…</div>
+                <div className="conn-pill warn" style={{ alignSelf: "flex-start" }}>
+                  <span className="dot" /> NEGOTIATING
+                </div>
+              </div>
+            )}
+
+            {phase !== "connecting" && stage === "welcome" && (
               <div className="col gap-4" style={{ padding: 28 }}>
                 <Button variant="primary" size="lg" disabled title="Arrives in a later phase">
                   <Icon name="shield" size={14} /> LOGIN · ORG MEMBER (SSO)
@@ -119,7 +136,7 @@ export function Welcome() {
               </div>
             )}
 
-            {stage === "manual" && (
+            {phase !== "connecting" && stage === "manual" && (
               <div className="col gap-5" style={{ padding: 28 }}>
                 <div className="row between acenter">
                   <div className="cap" style={{ color: "var(--ac-primary)" }}>MANUAL SERVER · GUEST</div>

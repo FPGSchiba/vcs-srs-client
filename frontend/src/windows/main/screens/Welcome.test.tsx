@@ -12,10 +12,15 @@ vi.mock("../../../shared/api/client", () => ({
   },
 }));
 import { api } from "../../../shared/api/client";
+import { useSession } from "../../../shared/store/session";
 import { Welcome } from "./Welcome";
 
 describe("Welcome (guest)", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Reset the shared session store so phase changes don't leak between tests.
+    useSession.setState({ phase: "welcome", conn: "disconnected", error: null, server: "" });
+  });
 
   it("submits guest credentials via api.connect", async () => {
     render(<Welcome />);

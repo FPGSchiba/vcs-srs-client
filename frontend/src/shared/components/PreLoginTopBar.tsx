@@ -1,4 +1,4 @@
-import { Window } from "@wailsio/runtime";
+import { Window, Application } from "@wailsio/runtime";
 import { Icon } from "./Icon";
 import { useBuildInfo } from "../hooks/useBuildInfo";
 
@@ -43,7 +43,7 @@ export function PreLoginTopBar({ className }: PreLoginTopBarProps) {
         <button title="Minimize" onClick={() => void Window.Minimise()}>
           <Icon name="minimize" size={12} />
         </button>
-        <button className="close" title="Close" onClick={() => void Window.Close()}>
+        <button className="close" title="Close · Quit" onClick={() => void Application.Quit()}>
           <Icon name="close" size={12} />
         </button>
       </div>

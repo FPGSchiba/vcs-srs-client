@@ -1,7 +1,9 @@
-import { Window } from "@wailsio/runtime";
+import { Window, Application } from "@wailsio/runtime";
 import { Icon } from "./Icon";
 import { api } from "../api/client";
 import { useBuildInfo } from "../hooks/useBuildInfo";
+import { useSession } from "../store/session";
+import type { Conn } from "../store/session";
 
 interface TopBarProps {
   view: string;
@@ -44,8 +46,16 @@ const POPOUT_LAUNCHERS: Launcher[] = [
  * `.topbar` className carries the drag region from the ported CSS. classNames
  * are kept byte-identical to the design so the ported CSS applies unchanged.
  */
+const CONN_PILL: Record<Conn, { cls: string; label: string }> = {
+  connected: { cls: "conn-pill", label: "CONNECTED" },
+  reconnecting: { cls: "conn-pill warn", label: "RECONNECTING" },
+  disconnected: { cls: "conn-pill alert", label: "DISCONNECTED" },
+};
+
 export function TopBar({ view }: TopBarProps) {
   const build = useBuildInfo();
+  const conn = useSession((s) => s.conn);
+  const pill = CONN_PILL[conn];
   return (
     <div className="topbar">
       <div className="brand">
@@ -89,6 +99,12 @@ export function TopBar({ view }: TopBarProps) {
           })}
         </div>
 
+        {/* Connection status */}
+        <span className={pill.cls}>
+          <span className="dot" />
+          {pill.label}
+        </span>
+
         {/* User menu (identity store not wired yet — placeholders) */}
         <div className="user-menu-anchor">
           <div className="user-menu-trigger">
@@ -105,7 +121,7 @@ export function TopBar({ view }: TopBarProps) {
           <button title="Minimize" onClick={() => void Window.Minimise()}>
             <Icon name="minimize" size={12} />
           </button>
-          <button className="close" title="Close" onClick={() => void Window.Close()}>
+          <button className="close" title="Close · Quit" onClick={() => void Application.Quit()}>
             <Icon name="close" size={12} />
           </button>
         </div>

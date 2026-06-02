@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { Window } from "@wailsio/runtime";
 import { api } from "../../shared/api/client";
 import type { RadioInfoDTO } from "../../shared/api/client";
 import { on, EV } from "../../shared/api/events";
@@ -21,7 +20,9 @@ interface RadioUpdatePayload {
  *
  * Phase-1 simplification: this window renders the first entry of the radios store.
  * If there are no radios it shows an empty state. The window chrome (title + close)
- * uses the ported `.popout`/`.popout-chrome` markup; close maps to `Window.Close()`.
+ * uses the ported `.popout`/`.popout-chrome` markup; close routes through the Go
+ * window registry via api.closeWindow("comms"), which persists geometry and is
+ * more reliable than the in-webview Window.Close().
  */
 export function CommsApp() {
   const radios = useRadios((s) => s.radios);
@@ -53,7 +54,7 @@ export function CommsApp() {
             className="close"
             aria-label="close"
             title="Close"
-            onClick={() => void Window.Close()}
+            onClick={() => void api.closeWindow("comms")}
           >
             <Icon name="close" size={14} />
           </button>
