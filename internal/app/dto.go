@@ -27,8 +27,10 @@ type ClientInfoDTO struct {
 
 // ClientStateSnapshot is returned by GetClientState.
 type ClientStateSnapshot struct {
-	Clients map[string]ClientInfoDTO `json:"clients"`
-	Radios  map[string]RadioInfoDTO  `json:"radios"`
+	Clients  map[string]ClientInfoDTO `json:"clients"`
+	Radios   map[string]RadioInfoDTO  `json:"radios"`
+	SelfGUID string                   `json:"self_guid"`
+	Self     *ClientInfoDTO           `json:"self"`
 }
 
 // BuildInfoDTO carries version identifiers for display in the UI.

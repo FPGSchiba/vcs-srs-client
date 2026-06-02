@@ -57,7 +57,10 @@ export function TopBar({ view }: TopBarProps) {
   const build = useBuildInfo();
   const conn = useSession((s) => s.conn);
   const pill = CONN_PILL[conn];
+  const self = useSession((s) => s.self);
   const openWindows = useWindows((s) => s.open);
+  const callsign = self?.callsign || "GUEST";
+  const initials = self?.callsign ? self.callsign.slice(0, 2).toUpperCase() : "—";
   return (
     <div className="topbar">
       <div className="brand">
@@ -113,13 +116,13 @@ export function TopBar({ view }: TopBarProps) {
           {pill.label}
         </span>
 
-        {/* User menu (identity store not wired yet — placeholders) */}
+        {/* Local user identity */}
         <div className="user-menu-anchor">
           <div className="user-menu-trigger">
-            <div className="avatar">—</div>
+            <div className="avatar">{initials}</div>
             <div className="col" style={{ lineHeight: 1.15 }}>
-              <span className="um-name">GUEST</span>
-              <span className="um-meta">—</span>
+              <span className="um-name">{callsign}</span>
+              <span className="um-meta">{self?.coalition || "—"}</span>
             </div>
             <Icon name="chevronD" size={10} style={{ color: "var(--tx-3)" }} />
           </div>

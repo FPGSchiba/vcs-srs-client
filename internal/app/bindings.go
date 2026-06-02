@@ -30,7 +30,13 @@ func (a *App) Reconnect() error { return a.sess.Reconnect(context.Background()) 
 // GetClientState returns the current snapshot for window hydration.
 func (a *App) GetClientState() ClientStateSnapshot {
 	snap := a.st.Snapshot()
-	return SnapshotFromProto(snap.Clients, snap.Radios)
+	out := SnapshotFromProto(snap.Clients, snap.Radios)
+	out.SelfGUID = snap.SelfGUID
+	if snap.Self != nil {
+		self := clientInfoFromProto(snap.Self)
+		out.Self = &self
+	}
+	return out
 }
 
 // UpdateRadioInfo pushes a radio config change through the live control client.

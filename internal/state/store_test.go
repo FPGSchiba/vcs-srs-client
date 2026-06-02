@@ -73,3 +73,21 @@ func TestStore_SetAndGetRadios(t *testing.T) {
 		t.Fatalf("unexpected radios: %+v", r)
 	}
 }
+
+func TestStore_SetSelfAppearsInSnapshot(t *testing.T) {
+	s := state.New()
+	s.SetSelf("guid-self", &srspb.ClientInfo{Name: "Spacer", Coalition: "VG", UnitId: "VG-0271-DSC"})
+
+	snap := s.Snapshot()
+	if snap.SelfGUID != "guid-self" {
+		t.Fatalf("expected self guid, got %q", snap.SelfGUID)
+	}
+	if snap.Self == nil || snap.Self.GetName() != "Spacer" || snap.Self.GetUnitId() != "VG-0271-DSC" {
+		t.Fatalf("unexpected self: %+v", snap.Self)
+	}
+
+	s.ClearSelf()
+	if snap2 := s.Snapshot(); snap2.SelfGUID != "" || snap2.Self != nil {
+		t.Fatalf("expected self cleared, got guid=%q self=%+v", snap2.SelfGUID, snap2.Self)
+	}
+}

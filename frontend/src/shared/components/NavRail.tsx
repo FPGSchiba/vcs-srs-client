@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Icon } from "./Icon";
+import { useSession } from "../store/session";
 
 interface NavRailProps {
   activeKey: string;
@@ -29,12 +30,14 @@ const NAV_ITEMS: NavItem[] = [
  * NavRail is the left console navigation rail, ported from the design
  * prototype's `shell.jsx` NavRail. It is decoupled from the router: selection
  * is reported via `onSelect` and the active item is driven by `activeKey`. The
- * collapse toggle keeps its local UI state. The footer user-chip identity store
- * is not wired yet, so callsign/FFID show placeholders. classNames are kept
+ * collapse toggle keeps its local UI state. The footer user-chip shows the
+ * local client's callsign/FFID from the session store. classNames are kept
  * byte-identical to the design so the ported CSS applies unchanged.
  */
 export function NavRail({ activeKey, onSelect, onLogout }: NavRailProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const self = useSession((s) => s.self);
+  const initials = self?.callsign ? self.callsign.slice(0, 2).toUpperCase() : "—";
   return (
     <nav className={`nav ${collapsed ? "collapsed" : ""}`}>
       <div className="nav-header">
@@ -77,10 +80,10 @@ export function NavRail({ activeKey, onSelect, onLogout }: NavRailProps) {
       )}
       <div className="nav-footer">
         <div className="user-chip">
-          <div className="avatar">—</div>
+          <div className="avatar">{initials}</div>
           <div className="user-meta">
-            <div className="user-name">—</div>
-            <div className="user-ffid">FFID —</div>
+            <div className="user-name">{self?.callsign || "—"}</div>
+            <div className="user-ffid">FFID {self?.ffid || "—"}</div>
           </div>
         </div>
       </div>

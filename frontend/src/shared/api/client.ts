@@ -20,6 +20,8 @@ export interface ClientInfoDTO {
 export interface ClientStateSnapshot {
   clients: Record<string, ClientInfoDTO>;
   radios: Record<string, RadioInfoDTO>;
+  self_guid: string;
+  self: ClientInfoDTO | null;
 }
 export interface BuildInfo {
   client_version: string;

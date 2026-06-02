@@ -95,6 +95,14 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 		return err
 	}
 
+	// Record the local client identity for the UI (callsign/FFID from the form,
+	// coalition resolved by the server from the password).
+	s.st.SetSelf(init.ClientGUID, &srspb.ClientInfo{
+		Name:      name,
+		Coalition: guest.Coalition,
+		UnitId:    unitID,
+	})
+
 	streamCtx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.conn, s.control, s.cancel = conn, cc, cancel
@@ -128,6 +136,7 @@ func (s *Session) Disconnect(ctx context.Context) error {
 	if conn != nil {
 		_ = conn.Close()
 	}
+	s.st.ClearSelf()
 	tagged := events.New(s.em)
 	tagged.ConnectionState(events.ConnDisconnected)
 	tagged.SessionChanged("logged_out")

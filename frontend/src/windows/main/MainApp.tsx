@@ -44,16 +44,28 @@ export function MainApp() {
   const [view, setView] = useState("home");
 
   useEffect(() => {
-    // hydrate on mount
-    api
-      .getClientState()
-      .then((snap) => {
-        useClients.getState().replaceAll(snap.clients ?? {});
-        useRadios.getState().replaceAll(snap.radios ?? {});
-      })
-      .catch(() => {
-        /* not connected yet — ignore */
-      });
+    // Pull the full snapshot (clients, radios, self) and replace the stores.
+    // Called on mount and again once the control link reports `connected`,
+    // because SyncClient populates the Go store during connect without emitting
+    // per-client events.
+    const hydrate = () => {
+      api
+        .getClientState()
+        .then((snap) => {
+          useClients.getState().replaceAll(snap.clients ?? {});
+          useRadios.getState().replaceAll(snap.radios ?? {});
+          useSession.getState().setSelf(
+            snap.self
+              ? { callsign: snap.self.name, ffid: snap.self.unit_id, coalition: snap.self.coalition }
+              : null,
+          );
+        })
+        .catch(() => {
+          /* not connected yet — ignore */
+        });
+    };
+
+    hydrate();
     api
       .getOpenWindows()
       .then((ids) => useWindows.getState().setOpen(ids))
@@ -68,10 +80,18 @@ export function MainApp() {
       on<RadioUpdatePayload>(EV.radioUpdate, (d) => useRadios.getState().setForGuid(d.guid, d.radio)),
       on<Conn>(EV.controlConnection, (c) => {
         useSession.getState().setConn(c);
-        if (c === "connected") useSession.getState().setPhase("connected");
+        if (c === "connected") {
+          useSession.getState().setPhase("connected");
+          hydrate(); // pull the clients/self the server returned at SyncClient
+        }
       }),
       on<string>(EV.authSession, (s) => {
-        if (s === "logged_out") useSession.getState().setPhase("welcome");
+        if (s === "logged_out") {
+          useSession.getState().setPhase("welcome");
+          useSession.getState().setSelf(null);
+          useClients.getState().replaceAll({});
+          useRadios.getState().replaceAll({});
+        }
       }),
     ];
     return () => offs.forEach((off) => off());
