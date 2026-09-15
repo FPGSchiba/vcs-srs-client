@@ -50,7 +50,11 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ## Phase 3 — Settings + keybinds
 
-**Status:** `[~]` design in progress, started 2026-09-15 — picked up ahead of Phase 2, which is deferred.
+**Status:** `[~]` design complete 2026-09-15 — picked up ahead of Phase 2, which is deferred.
+
+**Design doc:** [`2026-09-15-vcs-client-phase-3-settings-keybinds-design.md`](./superpowers/specs/2026-09-15-vcs-client-phase-3-settings-keybinds-design.md)
+
+**Prerequisite:** Wails v3 `alpha.96` → `beta.22` upgrade lands as its own `chore(deps)` commit before implementation (spec §10). Verified to build and pass `go test -race ./...` with zero Go source changes; the open cost is the regenerated TypeScript bindings.
 
 **Headline deliverables**
 - Settings popout/section with audio, network, appearance, profiles sub-sections
