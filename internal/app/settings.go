@@ -50,11 +50,17 @@ func (a *App) GetSettings() SettingsDTO {
 }
 
 // SetSettings replaces the General settings, persists them, and emits
-// settings:changed so every window re-renders from the new state.
+// settings:changed so every window re-renders from the new state. Persist
+// happens on a COPY of the config; sb.cfg is only repointed at it once the
+// save succeeds, so a failed write never leaves the in-memory settings
+// disagreeing with disk.
 func (a *App) SetSettings(s SettingsDTO) error {
 	sb := a.settings
 	sb.mu.Lock()
-	sb.cfg.General = config.General{
+	// Shallow copy: Keybinds is a map and would be shared with the original,
+	// but this path never touches Keybinds, so that sharing is harmless.
+	next := *sb.cfg
+	next.General = config.General{
 		StartMinimized:       s.StartMinimized,
 		MinimizeToTray:       s.MinimizeToTray,
 		ShowTransmitterName:  s.ShowTransmitterName,
@@ -63,7 +69,10 @@ func (a *App) SetSettings(s SettingsDTO) error {
 	}
 	var saveErr error
 	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, sb.cfg)
+		saveErr = config.Save(sb.cfgPath, &next)
+	}
+	if saveErr == nil {
+		sb.cfg = &next
 	}
 	sb.mu.Unlock()
 	if saveErr != nil {
@@ -95,7 +104,9 @@ func (a *App) GetKeybinds() []KeybindDTO {
 
 // SetKeybind validates the raw capture, binds it, persists, re-applies OS
 // hotkeys, and emits keybinds:changed. It reports which other action (if
-// any) lost the chord.
+// any) lost the chord. If persistence fails, the store is rolled back to its
+// pre-Set contents (undoing both the new binding and any steal) so the live
+// store never disagrees with disk.
 func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, error) {
 	c, err := chord.FromCode(cap.Code, cap.Ctrl, cap.Alt, cap.Shift, cap.Super)
 	if err != nil {
@@ -103,8 +114,10 @@ func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, err
 	}
 
 	sb := a.settings
+	before := sb.kb.Snapshot()
 	stolen := sb.kb.Set(keybinds.ActionID(actionID), c)
 	if err := a.persistKeybinds(); err != nil {
+		sb.kb.Load(before) // undo the Set (and any steal) so the store matches disk
 		return SetKeybindResult{}, err
 	}
 	a.applyHotkeys()
@@ -122,11 +135,14 @@ func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, err
 }
 
 // ClearKeybind removes any binding for actionID, persists, re-applies OS
-// hotkeys, and emits keybinds:changed.
+// hotkeys, and emits keybinds:changed. If persistence fails, the store is
+// rolled back to its pre-Clear contents.
 func (a *App) ClearKeybind(actionID string) error {
 	sb := a.settings
+	before := sb.kb.Snapshot()
 	sb.kb.Clear(keybinds.ActionID(actionID))
 	if err := a.persistKeybinds(); err != nil {
+		sb.kb.Load(before) // undo the Clear so the store matches disk
 		return err
 	}
 	a.applyHotkeys()
@@ -244,14 +260,22 @@ func (a *App) labelFor(id keybinds.ActionID) string {
 }
 
 // persistKeybinds snapshots the store into cfg.Keybinds and saves, skipped
-// when cfgPath == "" (as in tests).
+// when cfgPath == "" (as in tests). As with SetSettings, the snapshot is
+// written into a COPY of the config; sb.cfg only picks up the new Keybinds
+// map once the save succeeds, so a failed write can never leave cfg.Keybinds
+// out of sync with what's actually on disk (or with the store, which the
+// caller rolls back on error).
 func (a *App) persistKeybinds() error {
 	sb := a.settings
 	sb.mu.Lock()
-	sb.cfg.Keybinds = sb.kb.Snapshot()
+	next := *sb.cfg
+	next.Keybinds = sb.kb.Snapshot()
 	var saveErr error
 	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, sb.cfg)
+		saveErr = config.Save(sb.cfgPath, &next)
+	}
+	if saveErr == nil {
+		sb.cfg = &next
 	}
 	sb.mu.Unlock()
 	if saveErr != nil {

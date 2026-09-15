@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -48,6 +50,14 @@ func (f *failingRegistrar) UnregisterAll() {}
 // newTestApp wires an App with in-memory settings deps and no Wails.
 func newTestApp(t *testing.T) (*App, *recordingEmitter, *countingRegistrar) {
 	t.Helper()
+	return newTestAppWithPath(t, "")
+}
+
+// newTestAppWithPath is newTestApp but with an explicit cfgPath, so tests can
+// exercise the persistence-failure path with a real (broken) filesystem path
+// instead of the "" no-op skip every other test uses.
+func newTestAppWithPath(t *testing.T, cfgPath string) (*App, *recordingEmitter, *countingRegistrar) {
+	t.Helper()
 	em := &recordingEmitter{}
 	reg := &countingRegistrar{}
 	a := NewForTest(state.New(), nil, nil)
@@ -55,8 +65,15 @@ func newTestApp(t *testing.T) (*App, *recordingEmitter, *countingRegistrar) {
 	kb := keybinds.New()
 	kb.Load(map[string]string{})
 	hk := hotkeys.New(reg, a)
-	a.SetSettingsBackend(cfg, "", kb, hk, em)
+	a.SetSettingsBackend(cfg, cfgPath, kb, hk, em)
 	return a, em, reg
+}
+
+// unwritablePath returns a config path under a directory that does not
+// exist, so config.Save genuinely fails (ENOENT on the temp-file create).
+func unwritablePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "no-such-dir", "config.toml")
 }
 
 func TestGetSettingsReturnsDefaults(t *testing.T) {
@@ -195,6 +212,113 @@ func TestClearKeybind(t *testing.T) {
 		if k.ActionID == "global.ptt" && k.Chord != "" {
 			t.Errorf("chord = %q, want empty after clear", k.Chord)
 		}
+	}
+}
+
+func TestSetSettingsFailsWithoutMutatingOnPersistError(t *testing.T) {
+	a, em, _ := newTestAppWithPath(t, unwritablePath(t))
+
+	before := a.GetSettings()
+	next := before
+	next.StartMinimized = !before.StartMinimized
+	if err := a.SetSettings(next); err == nil {
+		t.Fatal("expected SetSettings to fail when the config path is unwritable")
+	}
+	if got := a.GetSettings(); got != before {
+		t.Errorf("GetSettings() = %+v after a failed save, want unchanged %+v", got, before)
+	}
+	if contains(em.events, events.EventSettingsChanged) {
+		t.Error("settings:changed must not fire when persistence fails")
+	}
+}
+
+func TestSetKeybindFailsWithoutMutatingOnPersistError(t *testing.T) {
+	a, em, _ := newTestAppWithPath(t, unwritablePath(t))
+
+	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err == nil {
+		t.Fatal("expected SetKeybind to fail when the config path is unwritable")
+	}
+	for _, k := range a.GetKeybinds() {
+		if k.ActionID == "global.ptt" && k.Chord != "" {
+			t.Errorf("chord = %q, want empty after a failed SetKeybind", k.Chord)
+		}
+	}
+	if contains(em.events, events.EventKeybindsChanged) {
+		t.Error("keybinds:changed must not fire when persistence fails")
+	}
+}
+
+// TestSetKeybindStealFailsRestoresVictim is the case that matters most: a
+// failed SetKeybind that stole a chord must not leave the victim unbound.
+func TestSetKeybindStealFailsRestoresVictim(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	a, em, _ := newTestAppWithPath(t, cfgPath)
+
+	// Seed a real binding while the path is still writable.
+	if _, err := a.SetKeybind("global.mute_toggle", CaptureDTO{Code: "F1"}); err != nil {
+		t.Fatalf("seed SetKeybind: %v", err)
+	}
+
+	// Break persistence by removing the directory config.toml lives in.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt to steal F1 for global.ptt; the write must fail.
+	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err == nil {
+		t.Fatal("expected the steal to fail once the config directory is gone")
+	}
+
+	for _, k := range a.GetKeybinds() {
+		switch k.ActionID {
+		case "global.mute_toggle":
+			if k.Chord != "F1" {
+				t.Errorf("victim chord = %q, want F1 restored after the failed steal", k.Chord)
+			}
+		case "global.ptt":
+			if k.Chord != "" {
+				t.Errorf("thief chord = %q, want empty after the failed steal", k.Chord)
+			}
+		}
+	}
+	// The seed call legitimately emitted once; the failed steal must not add
+	// a second, incorrect emission.
+	count := 0
+	for _, e := range em.events {
+		if e == events.EventKeybindsChanged {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("keybinds:changed fired %d times, want exactly 1 (from the seed call only)", count)
+	}
+}
+
+func TestClearKeybindFailsWithoutMutatingOnPersistError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	a, em, _ := newTestAppWithPath(t, cfgPath)
+
+	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+		t.Fatalf("seed SetKeybind: %v", err)
+	}
+	seedEvents := len(em.events)
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.ClearKeybind("global.ptt"); err == nil {
+		t.Fatal("expected ClearKeybind to fail once the config directory is gone")
+	}
+	for _, k := range a.GetKeybinds() {
+		if k.ActionID == "global.ptt" && k.Chord != "F1" {
+			t.Errorf("chord = %q, want F1 still present after a failed ClearKeybind", k.Chord)
+		}
+	}
+	if len(em.events) != seedEvents {
+		t.Error("keybinds:changed must not fire when persistence fails")
 	}
 }
 
