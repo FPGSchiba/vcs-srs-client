@@ -129,7 +129,7 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 - Route hotkey-registration failures through the notification channel,
   replacing Phase 3's inline banner in the Keybinds section. Two distinct
   cases, and they must stay distinct: a GLOBAL failure (nothing registered at
-  all -- a denied macOS Input Monitoring grant, a missing backend) notifies
+  all -- a denied macOS Accessibility grant, a missing backend) notifies
   **once**, carrying the permission state and its remedial action; a
   PER-BINDING failure (a chord `internal/chord` accepts but the OS cannot
   register, e.g. `Numpad7`) notifies **per action**, naming the action. The

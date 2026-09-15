@@ -409,6 +409,44 @@ close→hide; tray click restores; start-minimized; clean disconnect on quit;
 a bound hotkey fires `hotkey:pressed` while another application is focused;
 macOS permission prompt appears, and the banner shows when denied.
 
+**macOS Accessibility permission — mandatory manual pass (R12).** Nothing in
+this flow has ever met a real TCC: `go test` binaries are never trusted, so
+both Accessibility and Input Monitoring read false for them and the two
+services cannot even be told apart at runtime in CI. Run these on a machine
+that has **never** granted VCS Accessibility (revoke it first, or use a fresh
+user account) — on a machine that already holds the grant, every one of these
+passes vacuously.
+
+1. **Denied state.** Launch with no grant. Keybinds shows the banner with
+   `permission: "denied"`, the Accessibility explanation, and GRANT ACCESS.
+2. **The prompt.** Click GRANT ACCESS. The system sheet appears and names
+   *Accessibility*, not Input Monitoring.
+3. **The `prompted` wrinkle.** Note what the banner does while that sheet is
+   still open — `AXIsProcessTrustedWithOptions` returns the *current* trust
+   state, so a first request returns false and the banner swaps to OPEN
+   SETTINGS with the sheet still up. Judged acceptable (the sheet's own
+   button is literally "Open System Settings"), but confirm it is not
+   confusing in practice.
+4. **The deep link actually opens.** Click OPEN SETTINGS. System Settings
+   must land on Privacy & Security → **Accessibility**. The URL
+   (`x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`)
+   is verified well-formed against the shipping pane bundle, but has never
+   been dispatched.
+5. **Live grant end to end.** Grant Accessibility, return to VCS. The
+   window-focus re-check must flip the banner away without any further
+   clicking.
+6. **Does `applyHotkeys()` alone revive the tap?** Immediately after step 5,
+   without restarting, press a bound hotkey while another app is focused. If
+   it fires, the re-apply is sufficient and the "restart VCS" line is
+   belt-and-braces. **If it does not**, the restart guidance is load-bearing
+   and this must be recorded here.
+7. **Wrong-service regression check.** Grant *Input Monitoring only* and
+   leave Accessibility off. The banner must stay denied and hotkeys must stay
+   dead. (An earlier revision gated on Input Monitoring and reported
+   "granted" here while every registration still failed.)
+8. **Quit during the poll.** Click GRANT ACCESS and quit within 30 s. No
+   panic, no event emitted after teardown, no hang.
+
 ## 12. Risks
 
 Numbering continues from the parent spec (R1–R10).
@@ -416,7 +454,7 @@ Numbering continues from the parent spec (R1–R10).
 | # | Risk | Likelihood | Mitigation |
 |---|---|---|---|
 | R11 | `golang.design/x/hotkey` may not expose key-release, making hold-to-talk PTT impossible with it | **RESOLVED 2026-09-15 (Task 5, Step 1)** | **`golang.design/x/hotkey` v0.6.1 DOES support key release, confirmed against real library source, not just its doc comments.** `Keyup()` returns `<-chan Event` and is backed by a genuine OS-delivered release signal on every platform, not a synthesized press-toggle: **macOS** — `hotkey_darwin.go` registers a `CGEventTap` whose key-up callback sends directly on `keyupIn` (a real Quartz event); **Windows** — `hotkey_windows.go` polls `win.GetAsyncKeyState` on a 100 Hz ticker and fires an independent release signal when a previously-down key reads not-pressed (polled, but genuinely OS-sourced, not a toggle derived from the press channel); **Linux/X11** — `hotkey_x11.go` registers an `XRecord` callback whose exported `hotkeyUp` C function sends on `keyupIn` from a real X11 key-release event (with the library's own doc noting X11 auto-repeat can re-trigger it — a known X11 quirk, not a fabricated signal). All three backends are independent of their press-side signal. **Outcome: hold-to-talk PTT shipped, not deferred.** `internal/hotkeys.osRegistrar.watch` wires `Keyup()` for every `Binding{Hold: true}` (kept as a `nil` channel — never selected — for `Press` bindings, which structurally prevents any accidental release firing on non-PTT actions) and emits `hotkey:released` on it. The R11 fallback described here (`Kind: Hold` captured-but-unregistered with a UI banner) was **never implemented and is not needed** — it remains a documented contingency only, not code. See `internal/hotkeys/registrar_x.go` and Task 5's report for the full verification trail. **Residual, separate gap** (not R11 itself, tracked for Phase 4/5): the library's named-key set is smaller than `internal/chord`'s canonical list — `Numpad0`–`9`, `F21`–`F24`, `Backspace`, and most punctuation keys have no OS-hotkey mapping on any of the three backends, so `Register` returns a clear per-binding error for those rather than silently failing (see Task 12's manual checklist item on `Numpad7`) |
-| R12 | macOS Input Monitoring / Accessibility permission blocks registration | H | **MITIGATED.** `hotkeys:state` now carries a `permission` field (`unknown` \| `granted` \| `denied` \| `not_applicable`) so the UI branches on a state rather than parsing an error string, and `internal/hotkeys`' `PermissionChecker` seam wraps `CGPreflightListenEventAccess` / `CGRequestListenEventAccess` (macOS 10.15+). The banner offers GRANT ACCESS, falls back to OPEN SETTINGS (deep-linking `x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent`) once the one-shot TCC prompt is spent, and offers RE-CHECK. **A grant is only ever concluded from `CGPreflightListenEventAccess`** — `CGRequestListenEventAccess`'s return value is not the user's answer and is used solely to pick the next button label. Detection is a window-focus re-check (primary) plus a bounded 500 ms/30 s poll armed only by an explicit user request; macOS publishes no notification for a TCC change, so there is no third option. Failure still never blocks startup. **Deferred to Phase 7:** replacing the inline banner with the notification channel — see `docs/ROADMAP.md` Phase 7. A global failure must notify once; per-binding failures notify per action |
+| R12 | macOS Accessibility permission blocks registration | H | **MITIGATED.** `hotkeys:state` now carries a `permission` field (`unknown` \| `granted` \| `denied` \| `not_applicable`) so the UI branches on a state rather than parsing an error string, and `internal/hotkeys`' `PermissionChecker` seam wraps `AXIsProcessTrusted` / `AXIsProcessTrustedWithOptions` (ApplicationServices, macOS 10.9+). **The gate is ACCESSIBILITY (`kTCCServiceAccessibility`), not Input Monitoring.** `golang.design/x/hotkey`'s `registerTap` (`hotkey_darwin.m:110-116`) returns NULL unless `AXIsProcessTrusted()`, and the library's package doc says to grant it in System Settings → Privacy & Security → Accessibility. An earlier revision of this work gated on `CGPreflightListenEventAccess` (Input Monitoring); that is silently correct on any machine already holding Accessibility — which also satisfies the preflight — and silently broken for a fresh user, who could grant Input Monitoring, see the UI report "granted", and still have every `Register` fail. The banner offers GRANT ACCESS, falls back to OPEN SETTINGS (deep-linking `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`) and offers RE-CHECK. **A grant is only ever concluded from `AXIsProcessTrusted`** — the request call returns the *current* trust state, not the user's answer, and is used solely to pick the next button label. Detection is a window-focus re-check (primary) plus a bounded 500 ms/30 s poll armed only by an explicit user request; macOS publishes no notification for a TCC change, so there is no third option. Failure still never blocks startup. **Not yet met a real TCC — see §11's mandatory manual pass.** **Deferred to Phase 7:** replacing the inline banner with the notification channel — see `docs/ROADMAP.md` Phase 7. A global failure must notify once; per-binding failures notify per action |
 | R13 | Linux tray needs a StatusNotifier/AppIndicator host; some desktops have none. A silent tray failure with `minimize_to_tray` on hides the app with no way back | M | **PARTIALLY MITIGATED — the specified mitigation is not implementable on Wails beta.22.** `SystemTray.New()` never returns an error, and `systemtray_linux.go` discards `register()`'s bool at both initial registration and `NameOwnerChanged` reconnection, so a missing `org.kde.StatusNotifierWatcher` fails silently at the DBus layer with zero propagation to Go. `TrayAvailable()` therefore reports true even when the tray never registered. **What is in place:** close-to-quit is forced if `SystemTray.New()` panics, and `minimize_to_tray` is user-editable in `config.toml`, which is the recovery path if a user does get stranded. **Identified concrete fix, not yet applied:** a Linux-only preflight calling `dbus.SessionBus()` + `org.freedesktop.DBus.NameHasOwner("org.kde.StatusNotifierWatcher")` before `SetupTray`, treating false/error as tray-unavailable. `godbus/dbus/v5` is already present as an indirect dependency; applying this promotes it to direct and so needs owner approval. Task 12's manual pass must target a bare X11 session with no notification daemon |
 | R14 | Global hotkeys collide with other apps; Star Citizen runs fullscreen and may grab input exclusively | H | Not solvable client-side. Resolve conflicts within our own bindings, document the cross-app case, ship defaults on less-contested keys |
 | R15 | Capture suspends every hotkey; a frontend crash mid-capture leaves them all dead | L | 10-second auto-resume timeout on `BeginCapture` (§7) |

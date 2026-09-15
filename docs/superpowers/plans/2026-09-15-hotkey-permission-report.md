@@ -388,3 +388,345 @@ covered in both directions by the two new tests.
 the frontend, even though it is a test-only knob. This exactly mirrors the
 existing `SetCaptureTimeout`, and the brief asked for that parity, so I kept
 it — but if either should become unexported, both should, together.
+
+---
+
+# Round 2 — review response
+
+Changes 1 and 2 were approved as-is and are untouched. This round addresses a
+Critical, three Importants and five Minors raised against Change 3.
+
+## CRITICAL — we were asking the OS for the wrong permission
+
+**Confirmed, and it was as bad as described.** I verified the claim at the
+source before touching anything:
+
+`golang.design/x/hotkey@v0.6.1/hotkey_darwin.m:110-116`:
+
+```c
+void* registerTap(uintptr_t handle, int isMedia, int code, uint64_t flags) {
+	// A keyboard event tap requires Accessibility trust. Check explicitly:
+	// CGEventTapCreate can otherwise return a non-NULL but inert tap when
+	// untrusted, which would look like success but never fire.
+	if (!AXIsProcessTrusted()) {
+		return NULL;
+	}
+```
+
+and `hotkey.go:23-25`: *"hotkeys are delivered through a CGEventTap, which
+requires the application to be trusted for Accessibility... Grant it in System
+Settings → Privacy & Security → Accessibility."*
+
+So the registrar gates on `kTCCServiceAccessibility`, and the shipped checker
+gated on `kTCCServiceListenEvent`. On a machine already holding Accessibility
+the two agree, so it was invisible locally and broken for exactly the users
+the feature exists for.
+
+### The fix — confined to `permission_darwin.go` as specified
+
+Nothing above the seam moved: the `PermissionChecker` interface, the enum, the
+poll, the focus hook, the DTOs and the entire frontend state machine are
+unchanged.
+
+| | before | after |
+|---|---|---|
+| `Status()` | `CGPreflightListenEventAccess()` | `AXIsProcessTrusted() != 0` |
+| `Request()` | `CGRequestListenEventAccess()` | `AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: true})` |
+| `OpenSettings()` | `...?Privacy_ListenEvent` | `...?Privacy_Accessibility` |
+| framework | `-framework CoreGraphics` | `-framework ApplicationServices` |
+
+Gated on Accessibility **only** — not both services — matching the library, so
+users for whom registration already works are never blocked.
+
+Two implementation details worth recording, both found by compiling rather
+than assumed:
+
+1. **`AXIsProcessTrusted` returns `Boolean`, not C99 `bool.`** It is a `uint8`
+   from `MacTypes.h`, so cgo surfaces it as `C.uchar` and `bool(...)` is a
+   compile error: `cannot convert ... (value of uint8 type _Ctype_Boolean) to
+   type bool`. The code uses `!= 0`.
+2. **The option dictionary is built in plain C over CoreFoundation**
+   (`CFDictionaryCreate` with `kAXTrustedCheckOptionPrompt` / `kCFBooleanTrue`,
+   `CFRelease`d before return) rather than with the suggested Objective-C
+   literal and `__bridge` cast. The dictionary was the only thing needing ObjC,
+   and this keeps the file compiling without `-x objective-c` and sidesteps ARC
+   bridging entirely. Behaviourally identical.
+
+`Request()` still returns only `prompted`, and the doc now states the actual
+semantics: `AXIsProcessTrustedWithOptions` returns the *current trust state*,
+so the design's "grant is concluded from `Status()` only" rule survives the
+switch unchanged — if anything it fits better than before.
+
+### `Privacy_Accessibility` anchor — VERIFIED, by a different route
+
+Same machine as before (macOS 26.6.2, build 25G83). The pane identifier is
+unchanged and already verified: `Security.prefPane/Contents/Info.plist` →
+`CFBundleIdentifier = com.apple.preference.security`.
+
+The anchor needed a different method, and this is the part worth reading. As
+the review predicted, `kTCCServiceAccessibility` is **not** in
+`PrivacyTCCServices.plist` at all:
+
+```
+$ plutil -p .../PrivacyTCCServices.plist | grep -c kTCCServiceAccessibility
+0
+```
+
+so the plist route that verified `Privacy_ListenEvent` could never have
+surfaced this. Instead, `Privacy_Accessibility` is a literal in the pane's own
+binary, `Contents/MacOS/Security`:
+
+```
+$ strings .../Contents/MacOS/Security | grep -E '^Privacy' | sort -u
+Privacy
+Privacy_Accessibility
+Privacy_LocationServices
+Privacy_SystemServices
+PrivacyAccessibilityServicesType
+...
+PrivacyTCCServicesType
+```
+
+That listing also explains *why* the two live in different places:
+`Privacy_Accessibility` sits with `Privacy_LocationServices` and
+`Privacy_SystemServices` — the anchors for panes that are **not** generic TCC
+service tables — and the binary carries a distinct
+`PrivacyAccessibilityServicesType` alongside `PrivacyTCCServicesType`.
+Accessibility has its own service type, so it is handled by dedicated code
+rather than driven from the plist. Same anchor namespace, different source.
+
+**Result: verified, fallback not needed.** As before, I did not *dispatch* the
+URL (that would seize the GUI); it is now item 4 on the spec's mandatory
+manual pass.
+
+### Making the switch load-bearing
+
+This is the one place I could not do what I did for every other fix, and I
+want to be explicit about why rather than imply a stronger check than exists.
+
+I probed the live machine first. A `go test` binary is never a trusted app, so
+**both** services read false here:
+
+```
+AXIsProcessTrusted()           = false
+CGPreflightListenEventAccess() = false
+```
+
+The two cannot be told apart at runtime in this environment — which is
+precisely the mechanism by which the original mistake survived. (Also learned:
+cgo is not permitted in `_test.go` files, so the probe needed a scratch
+package.)
+
+So `internal/hotkeys/permission_darwin_test.go` (`//go:build darwin && cgo`)
+pins what *can* be pinned without the OS:
+
+- `TestDarwinPermissionGatesOnAccessibility` — asserts the implementation
+  gates on `C.AXIsProcessTrusted()`, prompts via
+  `AXIsProcessTrustedWithOptions`, links `ApplicationServices`, and contains
+  **no** call to `C.CGPreflightListenEventAccess` / `C.CGRequestListenEventAccess`.
+  A source-level assertion, used deliberately and labelled as such: it is the
+  only available guard for a seam a unit test cannot execute. It checks calls,
+  not prose, so the doc comments stay free to discuss the old service.
+- `TestAccessibilityPaneURL` — pins the deep link and rejects any `ListenEvent`
+  anchor. A well-formed URL for the wrong pane is worse than no button.
+- `TestDarwinPermissionStatusIsBinary` — `Status()` must commit to
+  granted/denied and never leak `PermissionUnknown`.
+
+**Breakage check** (revert `Status()` to the preflight and the anchor to
+`Privacy_ListenEvent`) — both tests fail with the right messages:
+
+```
+--- FAIL: TestDarwinPermissionGatesOnAccessibility
+    Status() must gate on AXIsProcessTrusted -- the exact predicate
+    golang.design/x/hotkey's registerTap uses; anything else can report
+    granted while every Register still fails
+    C.CGPreflightListenEventAccess gates Input Monitoring
+    (kTCCServiceListenEvent), not the Accessibility trust the CGEventTap
+    actually requires
+--- FAIL: TestAccessibilityPaneURL
+    accessibilityPaneURL = "...?Privacy_ListenEvent", want "...?Privacy_Accessibility"
+```
+
+The behavioural check — grant Input Monitoring only, confirm hotkeys stay dead
+— is item 7 on the manual pass, because only a real TCC can run it.
+
+### Naming swept
+
+Every `Input Monitoring` reference in code, tests, banner copy, store/client
+docs, the ROADMAP entry and the spec's R12 now says Accessibility. The only
+surviving mentions are deliberate: `permission_darwin.go` and `permission.go`
+explaining what went wrong, and the spec's wrong-service regression check.
+
+---
+
+## IMPORTANT — the two new `applyHotkeys()` callers skipped `writeMu`
+
+Both now take it, matching every pre-existing caller.
+
+`RecheckHotkeyPermission` takes it *after* its cheap early-out, deliberately:
+window focus fires constantly and the common case must not queue behind a
+keybind write. Lock order is `writeMu -> mu` throughout, as the existing
+callers established — the `lastPerm` read releases `mu` before `writeMu` is
+acquired, so the two are never held in the opposite order.
+
+The poll goroutine applies through a new helper, `applyGrantedHotkeys(cancel)`,
+which takes `writeMu` and then **re-checks `cancel` after winning the lock**.
+That second check is not decoration: by the time the goroutine acquires
+`writeMu`, the focus re-check may already have detected the same grant and
+applied, and skipping is what stops that becoming a redundant
+teardown-and-recreate.
+
+Tests: `TestRecheckHotkeyPermissionHoldsWriteMu` and
+`TestPermissionPollHoldsWriteMu` hold `writeMu` as a stand-in for an in-flight
+`SetKeybind`, flip the permission, and assert no apply happens until the lock
+is released. Applies are counted via `UnregisterAll`, which `Manager` calls
+exactly once per `registerLocked` — a per-apply counter rather than a
+per-`Register` one.
+
+## IMPORTANT — the focus re-check did not cancel the poll
+
+`RecheckHotkeyPermission` now calls `cancelPermissionPoll()` before applying.
+
+`cancelPermissionPoll` takes **and nils** `permCancel` in one step under
+`sb.mu`, so exactly one caller can ever observe a non-nil channel and exactly
+one `close` happens. That matters specifically because Wails dispatches window
+hooks with `go a.handleWindowEvent(...)`, so two rapid focus events genuinely
+can run this concurrently. It never waits for the goroutine — the focus path
+holds `writeMu`, which that goroutine may itself be blocked acquiring, and
+waiting would deadlock.
+
+**This is where I found a test that proved nothing.** My first
+`TestRecheckHotkeyPermissionCancelsPoll` waited up to 5s for the poll to
+finish and then counted applies. With the cancellation removed it still
+**passed** — the poll simply finished on its own 2s tick, applying a second
+time on the way out, comfortably inside the 5s window, and the apply count was
+sampled after that. The breakage matrix caught it; the review's instruction to
+verify each fix is what surfaced it.
+
+Rewritten so both assertions are framed against the tick interval:
+
+1. the poll must end far sooner than one tick could arrive (`tick/4`);
+2. after a **full tick interval** has elapsed, there must still be exactly one
+   apply — the direct statement of "the freshly granted tap was not rebuilt".
+
+Each was then verified to discriminate **independently**:
+
+```
+BREAK (no cancellation):                     FAIL — "re-check poll did not finish within 500ms"
+BREAK (no cancellation, assertion 1 neutered):FAIL — "2 applies after a full tick interval, want exactly 1;
+                                                     a late poll tick tore down and rebuilt the freshly
+                                                     granted event tap"
+```
+
+## IMPORTANT — the poll was not cancelled on shutdown
+
+`ServiceShutdown` now calls `stopPermissionPoll(shutdownPollStopTimeout)`,
+before the disconnect.
+
+I went slightly beyond the suggested one line: it cancels **and waits**,
+bounded at 1s. Cancel alone still leaves a window in which the goroutine is
+mid-apply, which is the stated hazard (calling into the hotkey library or
+emitting a Wails event after teardown). The wait is bounded because the
+goroutine may be blocked on `writeMu` behind an in-flight keybind write, and a
+quit must never hang on that. Shutdown holds no locks, so waiting here cannot
+deadlock the way it would on the focus path.
+
+Tests: `TestServiceShutdownStopsPermissionPoll` asserts the poll is already
+finished when shutdown returns (a non-blocking check, valid precisely because
+shutdown waits); `TestStopPermissionPollIsBounded` wedges the goroutine on
+`writeMu` and asserts the stop returns promptly anyway.
+
+## MINORS
+
+1. **`SetHotkeyPermissionPoll` and `SetCaptureTimeout` are now unexported**
+   (`setHotkeyPermissionPoll`, `setCaptureTimeout`). Resolved downward, as
+   directed — the parity argument was right and the fix was to fix both.
+   Confirmed no frontend caller existed in `frontend/src`. Verified on the
+   IPC surface: regenerating bindings went from **36 methods to 34**, and
+   `grep -cE 'export function (SetCaptureTimeout|SetHotkeyPermissionPoll)'`
+   over the generated `app.ts` returns **0**. The doc comment records the
+   sharper reason for the new one: an exported poll-interval setter would let
+   the webview call `setHotkeyPermissionPoll(1, 1e12)` and spin.
+2. **Doc inconsistency fixed.** `permission.go`'s interface doc no longer
+   states that a false `Request()` result means the prompt is spent. It now
+   matches the darwin file: false means "not granted at the moment of the
+   call", covering both "sheet on screen, unanswered" and "already refused" —
+   *evidence* that System Settings may be the route, not proof. The same
+   correction was applied to `HotkeyPermissionResult`'s doc in the store.
+3. **The fake-only branch is labelled.** `{prompted: true, permission:
+   "denied"}` cannot occur in production (`AXIsProcessTrustedWithOptions`
+   returns current trust, so `prompted: true` implies granted). The test is
+   kept, with a comment saying exactly that and why it still earns its place:
+   it isolates the branch, proving the component keys OPEN SETTINGS off
+   `prompted` rather than off `permission`. The shared `beforeEach` default
+   carries a pointer to that note.
+4. **Banner helper text now carries `fontSize: 10`**, matching the sibling
+   `cap-dim` helper on the keybind rows. Both banner helpers were rendering
+   noticeably larger than every other dim helper in the section.
+5. **Manual-verification items are in the spec**, not only in this report:
+   `§11` gains a mandatory eight-item macOS Accessibility pass, prefaced with
+   the reason it cannot be automated (test binaries are never trusted, so both
+   services read false and CI cannot tell them apart) and the instruction to
+   run it on a machine that has *never* granted VCS Accessibility, since
+   otherwise every item passes vacuously. It covers the deep link actually
+   opening, the live grant end to end, whether `applyHotkeys()` alone revives
+   the tap or the restart is genuinely needed, the `prompted` wrinkle, the
+   wrong-service regression check, and quitting during the poll.
+
+**Not changed, as instructed:** the button logic still offers OPEN SETTINGS on
+a first request rather than suppressing it.
+
+## Round 2 test results
+
+`gofmt -l .` empty. `go vet ./...` exit 0.
+
+```
+go test -race -count=1 ./...        14 packages, all ok, 0 failures
+```
+
+New/changed tests, all passing:
+
+```
+internal/app        (16)  ...PollDetectsGrant, ...NonPromptingStaysDenied,
+                          ...PollStopsOnGrant, ...PollStopsAtTimeout,
+                          ...FlipsState, ...IsIdleOnceGranted,
+                          ...AppliesWhenAlreadyGranted, ...SettingsDelegates,
+                          ...CarriesPermission, ...StringWireForms,
+                          ...HoldsWriteMu (x2), ...CancelsPoll,
+                          ...CancelIsSafeConcurrently,
+                          ...ShutdownStopsPermissionPoll, ...StopIsBounded
+internal/hotkeys     (3)  ...GatesOnAccessibility, ...PaneURL, ...StatusIsBinary
+```
+
+```
+npx tsc --noEmit    clean
+npx vitest run      10 files, 57 tests passed
+npm run build       ✓ built in 381ms
+```
+
+### Round 2 breakage matrix
+
+| Breakage | Result |
+|---|---|
+| `Status()` reads Input Monitoring + anchor reverted | ✗ `TestDarwinPermissionGatesOnAccessibility`, ✗ `TestAccessibilityPaneURL` |
+| `RecheckHotkeyPermission` drops `writeMu` | ✗ `the focus re-check applied hotkeys (2 applies, was 1) while writeMu was held` |
+| Poll applies without `writeMu` | ✗ `the poll applied hotkeys (2 applies, was 1) while writeMu was held` |
+| Focus re-check does not cancel the poll | ✗ (after the test was rewritten — **passed** before; see above) |
+| `cancelPermissionPoll` closes without nilling | ✗ panic on double close, caught by `TestCancelPermissionPollIsSafeConcurrently` |
+| `ServiceShutdown` does not stop the poll | ✗ `ServiceShutdown returned with the permission poll still running` |
+| Focus cancel removed **and** assertion (1) neutered | ✗ assertion (2) alone still catches it |
+
+## Still unverifiable here
+
+Unchanged from round 1 in kind, but the list is now shorter and sharper, and
+the items are written into the spec rather than only this report:
+
+1. The deep link actually dispatching (URL verified well-formed, never opened).
+2. Any live TCC behaviour: the Accessibility sheet, a real grant, and whether
+   `applyHotkeys()` alone revives the tap or the restart guidance is
+   load-bearing. **Nothing in this flow has yet met a real TCC.**
+3. The wrong-service regression check (Input Monitoring granted, Accessibility
+   not) — the one behavioural proof that the Critical is actually fixed. It
+   needs a real TCC and is item 7 on the manual pass.
+4. Final binary link and `GOOS=linux` full build — documented environment
+   limits, unrelated to these changes.
