@@ -102,15 +102,32 @@ Go is the single source of truth. Each window's React app has its own Zustand st
 
 ### 4.3 Persistence
 
-| Kind | Location | Format |
+**The rule: default to a section in `config.toml`.** A separate file is the
+exception and must cite one of four justifications. Adding a file "because it is
+a different concern" is not a justification — that is what TOML tables are for.
+
+| # | Justification | Meaning |
 |---|---|---|
-| App config (server URL, audio defaults, last login) | `%APPDATA%/VCS/config.toml` (+ OS equivalents) | TOML |
-| Keybinds | `%APPDATA%/VCS/keybinds.toml` | TOML |
-| Ship & role catalog | `%APPDATA%/VCS/ships.toml`, `roles.toml` | TOML |
-| Radio profiles | user-chosen dir; default `%APPDATA%/VCS/profiles/` | JSON |
-| Window geometry per window | `%APPDATA%/VCS/windows.json` | JSON |
-| Token from last successful login | `%APPDATA%/VCS/session.json` (chmod 0600 on Unix) | JSON |
-| Ephemeral runtime state | in-memory only | n/a |
+| J1 | **Portability** | The user is meant to share, import or export it independently of their own settings |
+| J2 | **Write frequency** | It changes far more often than settings; merging would rewrite the whole config on every change |
+| J3 | **Security / lifetime** | Secret material, different file permissions, or data destined for a different store entirely |
+| J4 | **Not user intent** | Cached or catalog data the app can refetch or regenerate, which must not live in the file the user hand-edits and backs up |
+
+| Kind | Location | Format | Separate? |
+|---|---|---|---|
+| App config (server URL, log level, ping interval) | `%APPDATA%/VCS/config.toml` (+ OS equivalents) | TOML | base file |
+| General settings (tray, transmitter name, …) | `config.toml` → `[general]` | TOML | no |
+| Keybinds | `config.toml` → `[keybinds]` | TOML | no |
+| Window geometry per window | `%APPDATA%/VCS/windows.json` | JSON | **J2** — written on every move/resize; would rewrite config on every window drag |
+| Session token from last login | `%APPDATA%/VCS/session.json` (chmod 0600 on Unix) | JSON | **J3** — secret; needs 0600, must not appear in a config a user might paste into a bug report, and migrates to the OS keychain in Phase 7 (R4) |
+| Radio profiles | user-chosen dir; default `%APPDATA%/VCS/profiles/` | JSON | **J1** — import/export is an explicit Phase 7 deliverable |
+| Ship & role catalog | `%APPDATA%/VCS/ships.toml`, `roles.toml` | TOML | **J4** — local mirror of data destined for a server RPC (see `PROTO_GAPS.md` §Ships/Roles); a catalog refresh must not touch user settings |
+| Ephemeral runtime state | in-memory only | n/a | n/a |
+
+Any future phase adding persistent state **must name its justification in the
+phase design doc, or put it in a `config.toml` section.** Keybinds originally
+had a `keybinds.toml` of its own for no stated reason; re-examined in the Phase 3
+design (§5.3), it cited none of J1–J4 and was folded into `[keybinds]`.
 
 Token storage is not OS-keychain-protected in v1; this is a known security gap (R4) tracked in Risks.
 

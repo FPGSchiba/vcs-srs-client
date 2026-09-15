@@ -41,7 +41,7 @@ issues").
 | Conflict policy | **Steal and report** — new binding wins, previous owner is unbound, UI names what lost it |
 | Key capture source | `KeyboardEvent.code` (physical key), **not** `.key` |
 | Chord canonical form | `Ctrl+Alt+Shift+Super+<Key>`, modifiers always in that order |
-| Persistence | `config.toml` (`[general]` table) and `keybinds.toml`, both written immediately on change |
+| Persistence | **A single `config.toml`** — `[general]` for settings, `[keybinds]` for bindings. Written immediately on change |
 | Prerequisite | Wails v3 `alpha.96` → `beta.22` upgrade lands **before** any Phase 3 code (§10) |
 
 ### Why `e.code` and not `e.key`
@@ -60,23 +60,22 @@ internal/
   chord/                pure value type — NO external dependencies
     chord.go              Chord{Mods, Key}, Parse, String (canonical form)
     keycode.go            KeyboardEvent.code → chord.Key table
-  keybinds/             depends on chord
+  keybinds/             depends on chord — pure in-memory, NO file access
     actions.go            canonical action registry
     store.go              action→Chord map, Set/Clear, conflict resolution, change fan-out
-    persist.go            keybinds.toml load/save (atomic)
+                          Snapshot() map[string]string for the config layer
   hotkeys/              depends on chord; owns golang.design/x/hotkey
     hotkeys.go            Manager.Apply(map[ActionID]chord.Chord), Suspend/Resume
     keymap.go             chord.Key → hotkey.Key constants
     registrar.go          interface seam so tests never touch the OS
   config/               existing, extended
-    config.go             + General settings table
-    paths.go              + KeybindsFilePath()
+    config.go             + [general] and [keybinds] tables
   app/                  existing, extended
     bindings.go           + settings & keybind bindings
     tray.go               tray construction + window lifecycle rules
 ```
 
-Two boundaries are deliberate and should not be collapsed:
+Three boundaries are deliberate and should not be collapsed:
 
 **`chord` has no external dependencies.** The parser and canonical-string logic
 are where bugs will concentrate, and keeping them free of `x/hotkey` means they
@@ -88,6 +87,11 @@ are testable on any platform with no OS involvement. Translation to
 `internal/app` subscribes to keybind changes and calls `Apply`. This keeps the
 registrar testable with a literal map and leaves `keybinds` with no OS-side
 dependency at all.
+
+**`keybinds` does not touch the filesystem.** It is a pure in-memory domain
+package. `internal/app` reads `Store.Snapshot()`, writes it into
+`config.Config.Keybinds`, and calls the existing `config.Save`. So `keybinds`
+imports neither `config` nor `os`, and is testable with no temp directories.
 
 ## 5. Data model
 
@@ -133,20 +137,45 @@ the key — e.g. `Ctrl+Alt+Delete`, `F1`, `Alt+1`. Keys are normalised: letters
 uppercase, digits bare, function keys `F1`–`F24`, named keys spelled out
 (`Space`, `Escape`, `ArrowUp`). A modifier-only chord is invalid and rejected.
 
-### 5.3 `keybinds.toml`
+### 5.3 `[keybinds]` in `config.toml`
 
-One flat table; structure comes from the registry, not the file:
+Bindings live in the **same `config.toml`** as everything else, as one flat
+table. Structure comes from the registry, not the file:
 
 ```toml
-[bindings]
+log_level = "INFO"
+server_url = ""
+ping_interval_seconds = 5
+
+[general]
+minimize_to_tray = true
+# ...
+
+[keybinds]
 "global.ptt" = "F1"
 "global.emergency_broadcast" = "Ctrl+E"
 "radio.1.ptt" = "F2"
 "radio.1.select" = "1"
 ```
 
-Round-tripped as `map[string]string`, so **unknown IDs from a future version
-survive a save** rather than being silently dropped.
+Held on `Config` as `Keybinds map[string]string` and round-tripped whole, so
+**unknown IDs from a future version survive a save** rather than being silently
+dropped.
+
+**Why one file rather than a separate `keybinds.toml`** (which the parent spec
+§4.3 and the roadmap originally specified): the only real argument for splitting
+is portability of keybind sets, and profiles/presets are out of scope this phase
+(§14) — if they land later they want an export function, not a particular path
+on disk. Against splitting: a second loader, a second atomic-save path and a
+second path helper, all duplicating `internal/config`. Merging also produces the
+cleaner boundary described in §4 — `keybinds` ends up with no file access at all.
+
+**Trade-off, recorded:** a malformed `[keybinds]` table now makes the *whole*
+config fail to decode, so one bad entry costs the user their `server_url` and
+`log_level` too. `config.Load` returns the error and `main.go` falls back to
+in-memory defaults, leaving the file on disk intact and hand-fixable — but the
+next settings change overwrites it. Atomic writes rule out partial writes, so
+this only triggers on hand-editing. See R16.
 
 ### 5.4 `config.toml` — `[general]`
 
@@ -351,9 +380,9 @@ part of this commit.
 | Package | Covers |
 |---|---|
 | `chord` | Parse/String round-trip, canonical modifier ordering, invalid input, `e.code`→key table, modifier-only rejection |
-| `keybinds` | Set/Clear, steal semantics, TOML round-trip, unknown-ID preservation, per-radio action generation, absent-radio bindings retained but not registered |
+| `keybinds` | Set/Clear, steal semantics, `Snapshot()` shape, unknown-ID preservation, per-radio action generation, absent-radio bindings retained but not registered |
 | `hotkeys` | `Apply`/`Suspend`/`Resume` against a fake registrar — tests never touch the OS |
-| `config` | `[general]` defaults; pre-Phase-3 `config.toml` with no `[general]` loads to defaults |
+| `config` | `[general]` defaults; `[keybinds]` round-trip incl. unknown IDs; pre-Phase-3 `config.toml` with neither table loads to defaults |
 | `app` | `SetKeybind` surfaces `Stolen`; `BeginCapture` suspends; capture timeout auto-resumes |
 
 ### Frontend (vitest + testing-library)
@@ -382,6 +411,7 @@ Numbering continues from the parent spec (R1–R10).
 | R13 | Linux tray needs a StatusNotifier/AppIndicator host; some desktops have none. A silent tray failure with `minimize_to_tray` on hides the app with no way back | M | Detect tray-creation failure and **force close-to-quit regardless of the setting**, with a one-time notice |
 | R14 | Global hotkeys collide with other apps; Star Citizen runs fullscreen and may grab input exclusively | H | Not solvable client-side. Resolve conflicts within our own bindings, document the cross-app case, ship defaults on less-contested keys |
 | R15 | Capture suspends every hotkey; a frontend crash mid-capture leaves them all dead | L | 10-second auto-resume timeout on `BeginCapture` (§7) |
+| R16 | Keybinds share `config.toml`, so a malformed `[keybinds]` table makes the whole config undecodable — losing `server_url` and `log_level` with it | L | Atomic writes make partial writes impossible, so this only occurs on hand-editing. `config.Load` surfaces the error and leaves the file intact for repair. If it proves a nuisance, decode `[keybinds]` into `map[string]string` leniently and drop unparseable entries rather than failing the whole load |
 
 ## 13. Definition of Done
 
@@ -390,7 +420,7 @@ Numbering continues from the parent spec (R1–R10).
 3. Tray present on all three platforms; close-to-tray, click-to-restore and start-minimized honour their settings
 4. Quit via tray disconnects cleanly — the server logs a proper leave, not a stream drop
 5. Keybinds section lists Global, Channel, Per-Radio (from live radios) and Quick-Status with current bindings
-6. Chip capture reads physical key codes; Escape cancels; the chord persists to `keybinds.toml` and survives restart
+6. Chip capture reads physical key codes; Escape cancels; the chord persists to `config.toml`'s `[keybinds]` table and survives restart
 7. Binding an already-used key steals it — the previous owner shows unbound and an inline note names it
 8. Bound hotkeys emit `hotkey:pressed` **while another application has focus**; `Hold` actions also emit `hotkey:released`, or R11's fallback is in effect and visible in the UI
 9. Registration failure shows the banner and does not prevent startup
@@ -422,3 +452,7 @@ Performed inline before commit.
   its own commit first.
 - **Ambiguity:** "settings without effect yet" (§5.4) is called out explicitly so
   it is not confused with the stub sections of §3.
+- **Revision 2026-09-15:** keybinds moved from a separate `keybinds.toml` into a
+  `[keybinds]` table in `config.toml` at the user's request. Parent spec §4.3 and
+  the roadmap's Phase 3 row updated to match; new risk R16 records the
+  shared-file blast radius.

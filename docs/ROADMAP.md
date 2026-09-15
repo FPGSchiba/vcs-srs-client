@@ -60,7 +60,7 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 - Settings popout/section with audio, network, appearance, profiles sub-sections
 - Keybind capture UI (listening state visible in design as `.kbd.listening`)
 - Per-radio PTT + Select bindings, plus global PTT
-- TOML persistence (`config.toml`, `keybinds.toml`)
+- TOML persistence — single `config.toml` with `[general]` and `[keybinds]` tables
 - Settings exposed via Wails bindings; subscriber updates in all windows
 
 **Blocking deps:** none
