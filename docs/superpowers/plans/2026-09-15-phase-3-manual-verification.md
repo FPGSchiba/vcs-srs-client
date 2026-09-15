@@ -98,16 +98,31 @@ have available.**
    the actual failure mode matches what R13 predicts, not to pass/fail it
    against a fixed bar.
 
-### 4. Clean disconnect on tray quit — DoD 4
+### 4. Clean disconnect on EVERY quit path — DoD 4, spec §8.2
 
-1. With the app connected to a live server, open the tray menu and click
-   `Quit` (not window-close).
-2. Immediately check the server's log output for this session.
-   **Expected:** the log shows a proper client leave/disconnect (whatever the
-   server logs for `sess.Disconnect`/graceful session teardown), not a
-   dropped-stream / timeout / abrupt-EOF style log line. Compare against what
-   a window-close-without-tray (if `minimize_to_tray` is off) or a killed
-   process logs, to confirm there's a real difference.
+The clean leave runs in `App.ServiceShutdown`, which Wails calls on every
+orderly termination — not in the tray's Quit handler — so all three paths
+below must behave identically. Run each one connected to a live server and
+check the server log immediately afterwards.
+
+1. **Tray menu → Quit.**
+2. **Cmd+Q** (macOS) / the platform's application-quit shortcut.
+3. **Closing the main window with `minimize_to_tray = false`** — the ordinary
+   quit on Windows and Linux.
+
+**Expected, for each:** the server log shows a proper client leave/disconnect
+(whatever it logs for `sess.Disconnect`/graceful session teardown), not a
+dropped-stream / timeout / abrupt-EOF line. **Fail** if any one of the three
+produces a different log shape from the others. Compare against a `kill -9` of
+the process to confirm what a genuinely dropped stream looks like in this
+server's log, so the three above can be told apart from it.
+
+4. **Unresponsive server (bounded quit).** With the app connected, suspend the
+   server process (`kill -STOP <pid>`) so it accepts no RPC, then quit the
+   client by any of the three paths above.
+   **Expected:** the client exits within ~2–3 seconds (the disconnect carries
+   a 2s timeout). **Fail** if the app hangs indefinitely on quit. Resume the
+   server afterwards (`kill -CONT <pid>`).
 
 ### 5. Keybinds section lists all four categories — DoD 5
 
@@ -122,9 +137,17 @@ have available.**
    number of radios, and disappears/appears if radios change), and
    Quick-Status (4 — `status.available`, `status.combat`, `status.discipline`,
    `status.afk`).
-2. Change the server-side radio assignment (add/remove a radio) without
-   restarting the client, if the test harness allows it.
-   **Expected:** the Per-Radio row set updates to match.
+2. **Open Settings → Keybinds BEFORE connecting, then connect** while the
+   section is still on screen.
+   **Expected:** the PER-RADIO BINDINGS panel appears on its own once radios
+   arrive, with no navigation away and back and no unrelated keybind change
+   needed to shake it loose. **Fail** if the panel only shows up after
+   reopening Settings — that is the bug `App.RefreshKeybinds` closes.
+3. Change the server-side radio assignment (add/remove or rename a radio)
+   without restarting the client, if the test harness allows it.
+   **Expected:** the Per-Radio row set updates to match, live.
+4. Disconnect (logout) while the Keybinds section is open.
+   **Expected:** the PER-RADIO BINDINGS panel disappears again.
 
 ### 6. Chip capture reads physical key codes, non-US layout — DoD 6, spec §3 "why e.code"
 
@@ -223,15 +246,59 @@ in the spec) is still unapplied, not as a new bug.
 
 ### 12. Settings/keybind changes reach the Comms popout live — DoD 10
 
-1. Open the Comms popout (separate OS window) alongside the main window.
-2. In the main window, change a General toggle (e.g. flip
-   `show_transmitter_name`).
-   **Expected:** if the Comms popout renders anything driven by that setting,
-   it updates without the popout being closed/reopened (via the
-   `settings:changed` event, per spec §6.1).
-3. In the main window, rebind or clear a keybind.
-   **Expected:** if the Comms popout displays any keybind-derived UI, it
-   updates live via `keybinds:changed` without reopening.
+**What the popout actually observes.** The Comms popout mounts
+`useSettingsSync()` (`frontend/src/shared/store/useSettingsSync.ts`) from
+`CommsApp`, so for as long as the popout is open it subscribes to
+`settings:changed`, `keybinds:changed` and `hotkeys:state` and writes each into
+the shared `useSettings` store. It does **not yet render** anything from that
+store — no popout UI is driven by a General setting or a keybind until PTT
+lands in Phase 5. So the check below verifies the two things that are real
+today: that the events are delivered to the popout's webview, and that the
+popout's store actually takes them. Do not accept "nothing visibly changed" as
+either a pass or a fail; run the steps.
+
+1. Open the Comms popout (separate OS window) alongside the main window, with
+   the app connected.
+2. Open the popout's webview devtools (right-click → Inspect in a `wails3 dev`
+   run) and install a temporary tap on the event bus the Wails runtime uses to
+   deliver events into this window:
+   ```js
+   const seen = [];
+   const orig = window._wails.dispatchWailsEvent;
+   window._wails.dispatchWailsEvent = (e) => { seen.push(e); return orig(e); };
+   ```
+3. In the **main** window, open Settings → General and flip
+   `show_transmitter_name`.
+   **Expected:** within ~1s, and with the popout never closed or reopened,
+   `seen.filter(e => e.name === "settings:changed")` has at least one entry
+   whose payload carries all five General fields with
+   `show_transmitter_name` at its **new** value. **Fail** if the array stays
+   empty (the event never reached this window) or if the payload still shows
+   the old value.
+4. In the **main** window, open Settings → Keybinds and rebind any action (or
+   click UNBIND on one).
+   **Expected:** `seen.filter(e => e.name === "keybinds:changed")` gains at
+   least one entry, and its payload is the **full** binding list (roughly 13
+   static rows plus two per live radio — not a delta), with the row you just
+   touched showing its new `chord` (or `""` after UNBIND). **Fail** if no
+   entry appears, or if the row still shows the previous chord.
+5. Negative control — this is what the bug looked like: close the popout,
+   repeat steps 3–4 with only the main window open, then reopen the popout.
+   The popout must come up already showing the new values via its own
+   one-shot hydrate. If step 3 or 4 only "works" after this reopen, DoD 10 is
+   **not** met.
+6. Close the popout and confirm no further `settings:changed` handling occurs
+   in it (the subscriptions are torn down on unmount). A practical check:
+   reopen it and flip a toggle once — exactly one `settings:changed` entry
+   must appear per flip, not two, which is what a leaked subscription from the
+   previous open would produce.
+
+Automated coverage for the store half of this lives in
+`frontend/src/windows/comms/CommsApp.test.tsx` and
+`frontend/src/shared/store/useSettingsSync.test.tsx`; the manual run is what
+confirms the events actually cross the process boundary into a second webview.
+Once the popout renders a keybind-derived control (Phase 5 PTT), replace steps
+2–4 with the visible-UI check that will then be possible.
 
 ### 13. OS cannot register a key — per-row failure reason — spec Task 5 findings
 
@@ -243,11 +310,21 @@ platform backends.
 1. Attempt to bind any action to `Numpad7` (or another key from the
    unsupported list above, if `Numpad7` isn't capturable on your keyboard).
 2. **Expected:** the row shows a specific, per-row failure reason (surfaced via
-   `Manager.Failed()` → some UI element on that specific Keybinds row) — e.g.
-   something like "no OS key mapping for Numpad7" — not a generic top-level
-   banner that doesn't say which binding failed or why. Other, unaffected
-   bindings must continue to show as registered/working.
-3. Confirm the chord is still saved to `config.toml` (capture-and-persist
+   the `hotkeys:state` event's `failed` map → the inline note under that
+   specific Keybinds row) — e.g. something like "no OS key mapping for
+   Numpad7". The reason must appear **without navigating away from and back
+   to** the Keybinds section, since `hotkeys:state` is emitted after the
+   capture ends.
+3. **Expected, same screen:** the top-level "Global hotkeys unavailable"
+   banner must **not** appear, and every other row must keep its chord and
+   show no failure note. That banner means "no global hotkeys are registered
+   at all" (missing backend / denied permission), never "one binding failed".
+   **Fail** if one bad binding blanks the banner across the whole section.
+4. Take a still-working binding from another row (one bound to an ordinary
+   key) and press it with another application focused.
+   **Expected:** it still fires — the unsupported binding must not have taken
+   the others down with it.
+5. Confirm the chord is still saved to `config.toml` (capture-and-persist
    succeeds even though OS registration fails) so the user doesn't lose the
    intended binding if key support improves later.
 

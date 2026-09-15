@@ -3,6 +3,7 @@ import { api } from "../../shared/api/client";
 import type { RadioInfoDTO } from "../../shared/api/client";
 import { on, EV } from "../../shared/api/events";
 import { useRadios } from "../../shared/store/radios";
+import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { Icon } from "../../shared/components/Icon";
 import { RadioCard } from "./RadioCard";
 
@@ -16,7 +17,8 @@ interface RadioUpdatePayload {
  * store from a one-shot snapshot and subscribes to the backend `state:radio_update`
  * echo, mapping each into the radios Zustand store (the store is the single source
  * of truth — RadioCard edits round-trip through the server, never mutating the
- * store optimistically).
+ * store optimistically). It also mounts `useSettingsSync`, so the shared
+ * settings/keybind store stays live in this window for as long as it is open.
  *
  * Phase-1 simplification: this window renders the first entry of the radios store.
  * If there are no radios it shows an empty state. The window chrome (title + close)
@@ -26,6 +28,12 @@ interface RadioUpdatePayload {
  */
 export function CommsApp() {
   const radios = useRadios((s) => s.radios);
+
+  // Subscribes this window to settings:changed / keybinds:changed /
+  // hotkeys:state. Without it the popout only ever saw the state it was
+  // opened with, and a settings or keybind change made in the main window
+  // required closing and reopening it (spec DoD 10).
+  useSettingsSync();
 
   useEffect(() => {
     api

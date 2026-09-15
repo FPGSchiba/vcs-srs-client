@@ -1,8 +1,4 @@
-import { useEffect, useState } from "react";
-import { api } from "../../../../shared/api/client";
-import { on, EV } from "../../../../shared/api/events";
-import { useSettings } from "../../../../shared/store/settings";
-import type { Settings, Keybind, HotkeyState } from "../../../../shared/store/settings";
+import { useState } from "react";
 import { General } from "./sections/General";
 import { Keybinds } from "./sections/Keybinds";
 import { Deferred } from "./sections/Deferred";
@@ -55,43 +51,18 @@ function renderSection(key: string) {
  * SettingsScreen is the Settings screen shell, ported from the design
  * prototype's ScreenSettings: a 200px `.nav-item` rail on the left and a
  * scrolling body on the right, with the active section held in local state
- * (no router this phase). On mount it hydrates the settings store from a
- * one-shot fetch and subscribes to the settings/keybinds/hotkeys events,
- * unsubscribing on unmount so re-opening this screen never accumulates
- * duplicate handlers. General and Keybinds render live controls; the
- * remaining sections render an honest `Deferred` stub until their
- * subsystems land.
+ * (no router this phase).
+ *
+ * It only READS the shared settings store. Hydrating and subscribing is
+ * `useSettingsSync`'s job, mounted once per window shell: doing it here tied
+ * the store's liveness to this screen being open, which is why keybind and
+ * settings changes never reached the Comms popout (spec DoD 10).
+ *
+ * General and Keybinds render live controls; the remaining sections render an
+ * honest `Deferred` stub until their subsystems land.
  */
 export function SettingsScreen() {
   const [section, setSection] = useState("general");
-
-  useEffect(() => {
-    api
-      .getSettings()
-      .then((s) => useSettings.getState().setSettings(s))
-      .catch(() => {
-        /* not available yet — ignore */
-      });
-    api
-      .getKeybinds()
-      .then((k) => useSettings.getState().setKeybinds(k))
-      .catch(() => {
-        /* not available yet — ignore */
-      });
-    api
-      .getHotkeyState()
-      .then((h) => useSettings.getState().setHotkeyState(h))
-      .catch(() => {
-        /* not available yet — ignore */
-      });
-
-    const offs = [
-      on<Settings>(EV.settingsChanged, (s) => useSettings.getState().setSettings(s)),
-      on<Keybind[]>(EV.keybindsChanged, (k) => useSettings.getState().setKeybinds(k)),
-      on<HotkeyState>(EV.hotkeysState, (h) => useSettings.getState().setHotkeyState(h)),
-    ];
-    return () => offs.forEach((off) => off());
-  }, []);
 
   return (
     <div style={{ height: "100%", display: "grid", gridTemplateColumns: "200px 1fr", minHeight: 0 }}>

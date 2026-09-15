@@ -7,6 +7,7 @@ import type { Conn } from "../../shared/store/session";
 import { useClients } from "../../shared/store/clients";
 import { useRadios } from "../../shared/store/radios";
 import { useWindows } from "../../shared/store/windows";
+import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { TopBar } from "../../shared/components/TopBar";
 import { NavRail } from "../../shared/components/NavRail";
 import { StatusBar } from "../../shared/components/StatusBar";
@@ -43,6 +44,10 @@ interface RadioUpdatePayload {
 export function MainApp() {
   const phase = useSession((s) => s.phase);
   const [view, setView] = useState("home");
+
+  // Keeps the shared settings/keybinds store live for this window's whole
+  // lifetime, not just while the Settings screen happens to be open.
+  useSettingsSync();
 
   useEffect(() => {
     // Pull the full snapshot (clients, radios, self) and replace the stores.
