@@ -86,8 +86,9 @@ func (f *fakePermission) openCalls() int {
 // goroutine, so an unguarded counter would be a genuine data race rather
 // than a test-harness detail.
 type lockedRegistrar struct {
-	mu sync.Mutex
-	n  int
+	mu      sync.Mutex
+	n       int
+	applies int
 }
 
 func (r *lockedRegistrar) Register(string, chord.Chord, bool, hotkeys.Handler) error {
@@ -97,12 +98,25 @@ func (r *lockedRegistrar) Register(string, chord.Chord, bool, hotkeys.Handler) e
 	return nil
 }
 
-func (r *lockedRegistrar) UnregisterAll() {}
+// UnregisterAll doubles as the per-APPLY counter: hotkeys.Manager calls it
+// exactly once at the top of every registerLocked, so counting it counts
+// applies rather than individual Register calls.
+func (r *lockedRegistrar) UnregisterAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.applies++
+}
 
 func (r *lockedRegistrar) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.n
+}
+
+func (r *lockedRegistrar) applyCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.applies
 }
 
 // newPermTestApp wires an App whose permission seam is the supplied fake, and
@@ -118,7 +132,7 @@ func newPermTestApp(t *testing.T, perm *fakePermission) (*App, *recordingEmitter
 	kb := keybinds.New()
 	kb.Load(map[string]string{})
 	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(reg, a), em)
-	a.SetHotkeyPermissionPoll(time.Millisecond, 10*time.Second)
+	a.setHotkeyPermissionPoll(time.Millisecond, 10*time.Second)
 	return a, em, reg
 }
 
@@ -224,7 +238,7 @@ func TestPermissionPollStopsOnGrant(t *testing.T) {
 func TestPermissionPollStopsAtTimeout(t *testing.T) {
 	perm := &fakePermission{status: hotkeys.PermissionDenied, prompted: true}
 	a, em, reg := newPermTestApp(t, perm)
-	a.SetHotkeyPermissionPoll(time.Millisecond, 60*time.Millisecond)
+	a.setHotkeyPermissionPoll(time.Millisecond, 60*time.Millisecond)
 
 	registersBefore := reg.count()
 	emitsBefore := em.count(events.EventHotkeysState)
@@ -411,5 +425,219 @@ func TestPermissionStringWireForms(t *testing.T) {
 		if got := tc.p.String(); got != tc.want {
 			t.Errorf("Permission(%d).String() = %q, want %q", tc.p, got, tc.want)
 		}
+	}
+}
+
+// ---- writeMu, poll cancellation and shutdown ----------------------------
+
+// waitFor polls cond until it holds or d elapses. Used instead of a fixed
+// sleep so the assertions do not encode a timing guess.
+func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%s: condition never held within %s", what, d)
+}
+
+// TestRecheckHotkeyPermissionHoldsWriteMu: every other applyHotkeys caller
+// holds writeMu, and this one must too.
+//
+// The hazard is concrete. SetKeybind takes writeMu, mutates the store,
+// persists, and rolls back if the persist fails. A window-focus event landing
+// between the failed persist and the rollback would, without this lock,
+// register the OS against a binding that is about to be undone -- leaving the
+// OS holding a hotkey that neither the store nor disk believes in.
+func TestRecheckHotkeyPermissionHoldsWriteMu(t *testing.T) {
+	perm := &fakePermission{status: hotkeys.PermissionDenied}
+	a, _, reg := newPermTestApp(t, perm)
+	sb := a.settings
+
+	perm.set(hotkeys.PermissionGranted)
+	before := reg.applyCount()
+
+	sb.writeMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.RecheckHotkeyPermission()
+	}()
+
+	// While writeMu is held by a stand-in for SetKeybind, the re-check must
+	// not have applied anything.
+	time.Sleep(30 * time.Millisecond)
+	if got := reg.applyCount(); got != before {
+		sb.writeMu.Unlock()
+		t.Fatalf("the focus re-check applied hotkeys (%d applies, was %d) while writeMu was held", got, before)
+	}
+
+	sb.writeMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecheckHotkeyPermission never completed after writeMu was released")
+	}
+	if got := reg.applyCount(); got <= before {
+		t.Errorf("the focus re-check never applied (%d applies, was %d) once the lock was free", got, before)
+	}
+}
+
+// TestPermissionPollHoldsWriteMu is the same guard for the poll goroutine,
+// which is the likelier of the two to collide: it ticks every 500ms in
+// production, entirely unsynchronised with whatever the user is doing in the
+// Keybinds section.
+func TestPermissionPollHoldsWriteMu(t *testing.T) {
+	perm := &fakePermission{status: hotkeys.PermissionDenied, prompted: true}
+	a, _, reg := newPermTestApp(t, perm)
+	sb := a.settings
+
+	sb.writeMu.Lock()
+	before := reg.applyCount()
+
+	a.RequestHotkeyPermission()
+	perm.set(hotkeys.PermissionGranted)
+
+	// The poll will detect the grant almost immediately at the 1ms test
+	// interval, but must block on writeMu rather than applying through it.
+	time.Sleep(30 * time.Millisecond)
+	if got := reg.applyCount(); got != before {
+		sb.writeMu.Unlock()
+		t.Fatalf("the poll applied hotkeys (%d applies, was %d) while writeMu was held", got, before)
+	}
+
+	sb.writeMu.Unlock()
+	waitClosed(t, a.permissionPollDone(), 5*time.Second, "poll blocked on writeMu")
+	if got := reg.applyCount(); got <= before {
+		t.Errorf("the poll never applied (%d applies, was %d) once the lock was free", got, before)
+	}
+}
+
+// TestRecheckHotkeyPermissionCancelsPoll covers the realistic sequence: click
+// GRANT ACCESS (poll armed), leave for System Settings, grant, come back.
+// Focus detects the grant and applies -- and the poll must be STOPPED by it,
+// not left to tick later and tear down the event tap that was just built.
+// Manager.mu makes the end state right either way, which is exactly why this
+// needs its own assertion: the bug is invisible in the final state.
+//
+// The timings are the whole test, so they are chosen to discriminate rather
+// than to pass. The tick interval is 2s and the grant is applied by the focus
+// path at t=0; the poll therefore cannot have ticked yet. An earlier version
+// of this test waited up to 5s for the poll to finish and then counted
+// applies -- which passed with the cancellation removed, because the poll
+// simply finished on its own 2s tick (applying a second time on the way out)
+// well inside that window. It proved nothing. Both assertions below are now
+// framed against the tick:
+//
+//	(1) the poll must end FAST -- far sooner than one tick could arrive;
+//	(2) after a full tick interval has elapsed, there must still be exactly
+//	    one apply, which is the direct statement of "the tap was not rebuilt".
+func TestRecheckHotkeyPermissionCancelsPoll(t *testing.T) {
+	const tick = 2 * time.Second
+
+	perm := &fakePermission{status: hotkeys.PermissionDenied, prompted: true}
+	a, _, reg := newPermTestApp(t, perm)
+	a.setHotkeyPermissionPoll(tick, 30*time.Second)
+
+	a.RequestHotkeyPermission()
+	done := a.permissionPollDone()
+	if done == nil {
+		t.Fatal("no poll was armed")
+	}
+
+	before := reg.applyCount()
+	perm.set(hotkeys.PermissionGranted)
+	a.RecheckHotkeyPermission()
+
+	if got := reg.applyCount(); got != before+1 {
+		t.Fatalf("the focus re-check produced %d applies, want exactly 1", got-before)
+	}
+
+	// (1) Cancelled, not merely destined to finish. A poll left running would
+	// still be asleep in its 2s tick here.
+	waitClosed(t, done, tick/4, "poll cancelled by the focus re-check")
+
+	// (2) The real statement: let a full tick go by and confirm the tap was
+	// never rebuilt. This is what fails if the cancellation is removed.
+	time.Sleep(tick + 250*time.Millisecond)
+	if got := reg.applyCount(); got != before+1 {
+		t.Errorf("%d applies after a full tick interval, want exactly 1; a late poll tick "+
+			"tore down and rebuilt the freshly granted event tap", got-before)
+	}
+}
+
+// TestCancelPermissionPollIsSafeConcurrently: Wails dispatches window hooks
+// with `go a.handleWindowEvent(...)`, so two rapid focus events really can
+// run the re-check at once. A naive close-if-non-nil would panic on the
+// second close; taking and nilling the channel in one step under sb.mu is
+// what prevents that.
+func TestCancelPermissionPollIsSafeConcurrently(t *testing.T) {
+	perm := &fakePermission{status: hotkeys.PermissionDenied, prompted: true}
+	a, _, _ := newPermTestApp(t, perm)
+	a.setHotkeyPermissionPoll(time.Second, 30*time.Second)
+
+	a.RequestHotkeyPermission()
+	done := a.permissionPollDone()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.cancelPermissionPoll() // a double close would panic here
+		}()
+	}
+	wg.Wait()
+	waitClosed(t, done, 5*time.Second, "concurrent cancel")
+}
+
+// TestServiceShutdownStopsPermissionPoll: quitting within the 30s window
+// after clicking GRANT ACCESS must not leave a goroutine free to call into
+// the hotkey library and emit a Wails event after teardown.
+func TestServiceShutdownStopsPermissionPoll(t *testing.T) {
+	perm := &fakePermission{status: hotkeys.PermissionDenied, prompted: true}
+	a, _, _ := newPermTestApp(t, perm)
+	a.setHotkeyPermissionPoll(time.Second, 30*time.Second)
+
+	a.RequestHotkeyPermission()
+	done := a.permissionPollDone()
+	if done == nil {
+		t.Fatal("no poll was armed")
+	}
+
+	if err := a.ServiceShutdown(); err != nil {
+		t.Fatalf("ServiceShutdown: %v", err)
+	}
+	// stopPermissionPoll waits for the goroutine, so by the time shutdown
+	// returns the channel is already closed -- no polling for it here.
+	select {
+	case <-done:
+	default:
+		t.Error("ServiceShutdown returned with the permission poll still running")
+	}
+}
+
+// TestStopPermissionPollIsBounded: the goroutine may be blocked acquiring
+// writeMu behind an in-flight keybind write. Quit must not hang on that.
+func TestStopPermissionPollIsBounded(t *testing.T) {
+	perm := &fakePermission{status: hotkeys.PermissionDenied, prompted: true}
+	a, _, _ := newPermTestApp(t, perm)
+	sb := a.settings
+
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
+	a.RequestHotkeyPermission()
+	perm.set(hotkeys.PermissionGranted)
+	// Let the poll detect the grant and wedge itself on writeMu.
+	waitFor(t, 2*time.Second, "poll reaching writeMu", func() bool { return perm.statusCalls() > 2 })
+
+	start := time.Now()
+	a.stopPermissionPoll(100 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("stopPermissionPoll blocked for %s on a wedged goroutine; quit would hang", elapsed)
 	}
 }

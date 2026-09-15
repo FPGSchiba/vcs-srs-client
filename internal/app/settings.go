@@ -302,8 +302,11 @@ func (a *App) resumeCapture(token int64) {
 	a.emitHotkeyState()
 }
 
-// SetCaptureTimeout overrides the auto-resume timeout. For tests only.
-func (a *App) SetCaptureTimeout(d time.Duration) {
+// setCaptureTimeout overrides the auto-resume timeout. For tests only, and
+// UNEXPORTED for that reason: an exported method on the service is bound and
+// reachable from the webview, and a timing knob is not something the
+// frontend has any business setting.
+func (a *App) setCaptureTimeout(d time.Duration) {
 	sb := a.settings
 	sb.mu.Lock()
 	sb.captureTimeout = d
@@ -391,6 +394,9 @@ func (a *App) RecheckHotkeyPermission() {
 		return // settings backend not wired (tests that only exercise session bindings)
 	}
 
+	// Cheap early-out FIRST, deliberately outside writeMu. Window focus fires
+	// constantly; the overwhelmingly common case must not queue behind a
+	// keybind write.
 	sb.mu.Lock()
 	last := sb.lastPerm
 	sb.mu.Unlock()
@@ -398,20 +404,97 @@ func (a *App) RecheckHotkeyPermission() {
 		return // nothing a re-check could improve
 	}
 
+	// writeMu for the rest, matching every other applyHotkeys caller. Without
+	// it this races the snapshot -> mutate -> persist -> rollback sequence in
+	// SetKeybind: a focus event landing between a failed persist and its
+	// rollback would register the OS against a binding that is about to be
+	// undone, leaving the OS holding a hotkey both the store and disk deny.
+	// Lock order is writeMu -> mu, as established by the existing callers;
+	// the read above released mu before this line, so the two are never held
+	// in the opposite order.
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
 	if a.permissionStatus() != hotkeys.PermissionGranted {
 		return
 	}
+
+	// Stop the bounded poll before applying. The realistic path -- click
+	// GRANT, leave for System Settings, grant, come back -- fires this hook
+	// with the poll still armed, and a tick within the next 500 ms would
+	// otherwise tear down and recreate the event tap that was just built.
+	// Manager.mu makes the end state correct either way, but a duplicate
+	// teardown of a freshly granted tap is the worst possible moment for one.
+	a.cancelPermissionPoll()
+
 	// Re-apply rather than merely re-emitting: Apply tears down and recreates
 	// the OS registrations, which on macOS means a fresh CGEventTap built
-	// under the new permission. That is what can pick the grant up without a
+	// under the new trust. That is what can pick the grant up without a
 	// restart. applyHotkeys emits hotkeys:state itself.
 	a.applyHotkeys()
 }
 
-// SetHotkeyPermissionPoll overrides the bounded re-check's interval and
-// timeout. For tests only, mirroring SetCaptureTimeout. Non-positive values
-// leave the corresponding default in place.
-func (a *App) SetHotkeyPermissionPoll(interval, timeout time.Duration) {
+// cancelPermissionPoll stops the in-flight bounded re-check, if any.
+//
+// Safe to call concurrently and repeatedly: the channel is taken and nilled
+// under sb.mu in one step, so exactly one caller can ever observe a non-nil
+// value and therefore exactly one close happens. That matters because Wails
+// dispatches window hooks on their own goroutine (`go a.handleWindowEvent`),
+// so two rapid focus events genuinely can run RecheckHotkeyPermission at the
+// same time.
+//
+// Never waits for the goroutine to finish. Callers on the focus path hold
+// writeMu, which the poll goroutine may itself be blocked acquiring --
+// waiting here would deadlock. Shutdown, which holds nothing, uses
+// stopPermissionPoll instead.
+func (a *App) cancelPermissionPoll() {
+	sb := a.settings
+	if sb == nil {
+		return
+	}
+	sb.mu.Lock()
+	ch := sb.permCancel
+	sb.permCancel = nil
+	sb.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+// stopPermissionPoll cancels the re-check and waits, bounded, for its
+// goroutine to return. Called from ServiceShutdown so a poll armed moments
+// before quit cannot call into the hotkey library or emit a Wails event
+// after teardown.
+//
+// The wait is bounded because the goroutine may be blocked acquiring writeMu
+// behind an in-flight keybind write; a quit must not hang on that. Safe to
+// call with no poll armed.
+func (a *App) stopPermissionPoll(wait time.Duration) {
+	sb := a.settings
+	if sb == nil {
+		return
+	}
+	a.cancelPermissionPoll()
+
+	sb.mu.Lock()
+	done := sb.permDone
+	sb.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(wait):
+	}
+}
+
+// setHotkeyPermissionPoll overrides the bounded re-check's interval and
+// timeout. For tests only, mirroring setCaptureTimeout, and unexported for
+// the same reason -- with more force here: this one sets a POLL INTERVAL, so
+// an exported binding would let the webview call
+// setHotkeyPermissionPoll(1, 1e12) and turn the re-check into a spin loop.
+// Non-positive values leave the corresponding default in place.
+func (a *App) setHotkeyPermissionPoll(interval, timeout time.Duration) {
 	sb := a.settings
 	sb.mu.Lock()
 	if interval > 0 {
@@ -479,12 +562,32 @@ func (a *App) armPermissionPoll() {
 				return
 			case <-ticker.C:
 				if a.permissionStatus() == hotkeys.PermissionGranted {
-					a.applyHotkeys() // recreates the taps AND emits hotkeys:state
+					a.applyGrantedHotkeys(cancel)
 					return
 				}
 			}
 		}
 	}()
+}
+
+// applyGrantedHotkeys re-applies the OS registrations under writeMu, which
+// every other applyHotkeys caller also holds -- see RecheckHotkeyPermission
+// for what goes wrong without it.
+//
+// It re-checks cancel AFTER taking the lock, not just before: by the time
+// this goroutine wins writeMu, the focus re-check may already have detected
+// the same grant and applied. Skipping here is what keeps that from being a
+// second, redundant teardown-and-recreate of a tap built seconds ago.
+func (a *App) applyGrantedHotkeys(cancel <-chan struct{}) {
+	sb := a.settings
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+	select {
+	case <-cancel:
+		return // superseded by the focus re-check, or we are shutting down
+	default:
+	}
+	a.applyHotkeys() // recreates the taps AND emits hotkeys:state
 }
 
 // permissionPollDone is an unexported test helper returning the channel the

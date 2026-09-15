@@ -96,7 +96,7 @@ func (f *failingRegistrar) Register(actionID string, _ chord.Chord, _ bool, _ ho
 func (f *failingRegistrar) UnregisterAll() {}
 
 // deadRegistrar fails EVERY registration -- what a missing OS backend
-// (registrar_nocgo.go) or a denied macOS Input Monitoring permission looks
+// (registrar_nocgo.go) or a denied macOS Accessibility permission looks
 // like. This, and only this, is what the "global hotkeys unavailable" banner
 // is meant to describe.
 type deadRegistrar struct{}
@@ -295,7 +295,7 @@ func TestEndCaptureWithStaleTokenDoesNotResume(t *testing.T) {
 
 func TestCaptureAutoResumesAfterTimeout(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	a.SetCaptureTimeout(50 * time.Millisecond)
+	a.setCaptureTimeout(50 * time.Millisecond)
 	a.BeginCapture()
 	// Never call EndCapture — simulates the frontend dying mid-capture.
 	time.Sleep(150 * time.Millisecond)
@@ -315,11 +315,11 @@ func TestCaptureAutoResumesAfterTimeout(t *testing.T) {
 // itself is not reproducible on demand.
 func TestSupersededCaptureTimeoutDoesNotResume(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	a.SetCaptureTimeout(50 * time.Millisecond)
+	a.setCaptureTimeout(50 * time.Millisecond)
 
 	first := a.BeginCapture() // generation 1, times out in 50ms
 
-	a.SetCaptureTimeout(10 * time.Second) // generation 2 gets a long timeout
+	a.setCaptureTimeout(10 * time.Second) // generation 2 gets a long timeout
 	second := a.BeginCapture()
 
 	time.Sleep(150 * time.Millisecond) // long enough for generation 1's timer

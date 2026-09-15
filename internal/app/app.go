@@ -45,7 +45,7 @@ type App struct {
 	tray     *application.SystemTray
 
 	// perm is the OS seam for the global-hotkey capture permission (macOS
-	// Input Monitoring). Filled in by SetSettingsBackend with the platform
+	// Accessibility). Filled in by SetSettingsBackend with the platform
 	// implementation unless a test has already injected a fake through
 	// setPermissionChecker. Written once, before anything reads it.
 	perm hotkeys.PermissionChecker
@@ -141,6 +141,11 @@ func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) er
 // call the user cannot cancel.
 const shutdownDisconnectTimeout = 2 * time.Second
 
+// shutdownPollStopTimeout bounds how long quit waits for an armed
+// hotkey-permission re-check to return. Short: the goroutine returns
+// immediately on cancel unless it is mid-apply or waiting on writeMu.
+const shutdownPollStopTimeout = time.Second
+
 // ServiceShutdown is the Wails v3 lifecycle hook. It runs the clean
 // disconnect, so the server sees a proper leave rather than a dropped stream
 // on EVERY quit path -- tray Quit, Cmd+Q, and closing the window with
@@ -148,6 +153,11 @@ const shutdownDisconnectTimeout = 2 * time.Second
 // in the tray's Quit handler alone covered exactly one of those.
 func (a *App) ServiceShutdown() error {
 	a.logger.Info("App service shutting down")
+	// Stop any armed hotkey-permission re-check first. Quitting within 30s of
+	// clicking GRANT ACCESS would otherwise leave a goroutine free to call
+	// into the hotkey library and emit a Wails event after teardown. Bounded,
+	// so a poll blocked behind an in-flight keybind write cannot hang quit.
+	a.stopPermissionPoll(shutdownPollStopTimeout)
 	if a.sess != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownDisconnectTimeout)
 		defer cancel()
