@@ -15,6 +15,7 @@ import { Welcome } from "./screens/Welcome";
 import { Home } from "./screens/Home";
 import { Players } from "./screens/Players";
 import { Placeholder } from "./screens/Placeholder";
+import { SettingsScreen } from "./screens/settings/SettingsScreen";
 
 interface ClientUpdatePayload {
   guid: string;
@@ -102,6 +103,7 @@ export function MainApp() {
   const screen =
     view === "home" ? <Home /> :
     view === "players" ? <Players /> :
+    view === "settings" ? <SettingsScreen /> :
     <Placeholder />;
 
   const handleLogout = () => {
