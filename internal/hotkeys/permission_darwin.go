@@ -1,17 +1,40 @@
 //go:build darwin && cgo
 
-// This file is the macOS half of the PermissionChecker seam. Its build tag is
-// the exact complement of permission_other.go's (!darwin || !cgo), so the two
-// together cover every build with no overlap and no gap.
+// This file is the macOS PermissionChecker. Nothing about the PREDICATE below
+// has changed since it was written: Accessibility, AXIsProcessTrusted, for the
+// reasons documented at accessibilityPaneURL. Only the justification for the
+// build tag is new, and it is worth reading before touching either.
 //
-// `darwin && cgo` rather than plain `darwin` for two reasons. The obvious one
-// is that the ApplicationServices calls below ARE cgo. The substantive one is
-// that a darwin build without cgo has no working hotkey backend at all --
-// registrar_nocgo.go (!windows && !cgo) claims that build and fails every
-// registration with ErrBackendUnavailable -- so there is nothing for an
-// Accessibility grant to enable, and reporting "denied" there would send the
-// user to System Settings to fix a problem that granting cannot fix.
-// permission_other.go's PermissionNotApplicable is the honest answer for it.
+// `darwin && cgo` rather than plain `darwin`, for exactly one reason now: the
+// ApplicationServices calls below ARE cgo. That is the whole argument.
+//
+// It used to rest on a second, stronger claim -- that a cgo-less darwin build
+// had no hotkey backend at all, so an Accessibility grant would enable
+// nothing. THAT CLAIM IS DEAD. It described registrar_nocgo.go, which existed
+// because golang.design/x/hotkey had no usable no-cgo backend. Since the move
+// to robotn/gohook's purego backends the OS listener is genuinely cgo-free on
+// every target, and a cgo-less darwin build WOULD have a working listener --
+// one that still needs Accessibility, and that this file could no longer
+// report on.
+//
+// Left unhandled, that is the same shape as the Input Monitoring bug below:
+// a reported permission state that does not match what the backend actually
+// requires. It is closed, not merely documented -- permission_darwin_nocgo.go
+// claims `darwin && !cgo` and answers PermissionUnknown ("we cannot tell"),
+// rather than letting permission_other.go answer PermissionNotApplicable
+// ("this platform has no such permission"), which on macOS is simply false.
+//
+// The three-way split is exhaustive and disjoint by construction:
+//
+//	darwin && cgo   -> this file          (the real Accessibility probe)
+//	darwin && !cgo  -> permission_darwin_nocgo.go (PermissionUnknown)
+//	!darwin         -> permission_other.go        (PermissionNotApplicable)
+//
+// In practice only the first arm ever ships: Wails v3 requires cgo on macOS,
+// so a CGO_ENABLED=0 darwin build of this application cannot be produced at
+// all. The second arm exists so that `GOOS=darwin CGO_ENABLED=0` analysis
+// builds -- and anyone who later removes the Wails constraint -- get an
+// honest answer instead of a confident wrong one.
 package hotkeys
 
 /*
@@ -40,50 +63,6 @@ static Boolean requestAXTrust(void) {
 }
 */
 import "C"
-
-import (
-	"fmt"
-	"os/exec"
-)
-
-// accessibilityPaneURL deep-links System Settings to Privacy & Security ->
-// Accessibility.
-//
-// ACCESSIBILITY, not Input Monitoring. golang.design/x/hotkey's darwin
-// backend gates every registration on AXIsProcessTrusted():
-//
-//	// hotkey_darwin.m:110-116
-//	void* registerTap(uintptr_t handle, int isMedia, int code, uint64_t flags) {
-//		// A keyboard event tap requires Accessibility trust. Check explicitly:
-//		// CGEventTapCreate can otherwise return a non-NULL but inert tap when
-//		// untrusted, which would look like success but never fire.
-//		if (!AXIsProcessTrusted()) {
-//			return NULL;
-//		}
-//
-// and the library's own package doc (hotkey.go:23-25) says to grant it in
-// "System Settings -> Privacy & Security -> Accessibility". An earlier
-// revision of this file gated on Input Monitoring
-// (CGPreflightListenEventAccess / kTCCServiceListenEvent) instead. That was
-// silently wrong in the worst possible way: on a developer machine that
-// already holds Accessibility the two agree, so it looked fine; on a fresh
-// user's machine, granting Input Monitoring flipped our reported state to
-// "granted" while every Register still returned NULL, stranding the UI on
-// "permission granted -- restart VCS" forever with an OPEN SETTINGS button
-// aimed at a pane that could not fix it. See the report for the full trail.
-//
-// VERIFIED against the shipping OS rather than taken on trust (macOS 26.6.2,
-// build 25G83). The pane identifier comes from
-// /System/Library/PreferencePanes/Security.prefPane's Info.plist
-// (CFBundleIdentifier "com.apple.preference.security"). The anchor is a
-// literal in that pane's own binary (Contents/MacOS/Security), alongside
-// Privacy_LocationServices and Privacy_SystemServices -- the anchors for the
-// panes that are NOT generic TCC service tables. Accessibility has its own
-// service type there (PrivacyAccessibilityServicesType, distinct from
-// PrivacyTCCServicesType), which is exactly why -- unlike
-// kTCCServiceListenEvent -- it does not appear in
-// Contents/Resources/PrivacyTCCServices.plist.
-const accessibilityPaneURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 
 // darwinPermission implements PermissionChecker over the Accessibility trust
 // API (TCC's kTCCServiceAccessibility).
@@ -133,11 +112,6 @@ func (darwinPermission) Request() bool {
 }
 
 // OpenSettings opens System Settings at Privacy & Security -> Accessibility.
-// Uses `open`, which is how a URL scheme is dispatched to its handler from a
-// non-AppKit context.
-func (darwinPermission) OpenSettings() error {
-	if err := exec.Command("open", accessibilityPaneURL).Run(); err != nil {
-		return fmt.Errorf("hotkeys: open Accessibility settings: %w", err)
-	}
-	return nil
-}
+// The URL and the `open` call live in permission_darwin_pane.go so the
+// cgo-less checker can reach the same pane; see that file.
+func (darwinPermission) OpenSettings() error { return openAccessibilityPane() }

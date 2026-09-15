@@ -1,30 +1,24 @@
-//go:build !darwin || !cgo
+//go:build !darwin
 
-// This file backs PermissionChecker everywhere permission_darwin.go does not.
-// Its tag is the literal De Morgan complement of that file's `darwin && cgo`,
-// so the partition is exhaustive (every build matches one) and disjoint (no
-// build matches both) by construction rather than by enumeration. It covers:
+// This file backs PermissionChecker on every platform that genuinely has no
+// OS permission to grant for global key listening:
 //
 //   - windows: WH_KEYBOARD_LL needs no grant.
 //   - linux: XRecord needs no grant. An unreachable DISPLAY -- or a Wayland
 //     session, which has no global key-listening API at all -- is a session
 //     or connection failure, not a permission one, and surfaces as a
 //     registration error instead (see session_linux.go).
-//   - darwin without cgo: the Accessibility APIs in permission_darwin.go ARE
-//     cgo, so this build cannot observe the grant state and must not guess.
-//   - any other cgo-less build: same reasoning.
 //
-// That darwin arm is no longer "no hotkey backend exists in this build".
-// Since the move to robotn/gohook's purego backends, internal/hotkeys
-// compiles and functions with CGO_ENABLED=0 on every target; it is only the
-// PERMISSION probe that still needs cgo. A real darwin build of this app
-// always has cgo enabled anyway -- Wails v3 requires it -- so the arm is
-// unreachable in practice and exists only so the package still compiles.
+// The tag is `!darwin`, NOT the old `!darwin || !cgo`. That older, wider tag
+// also swept up cgo-less darwin, and answered PermissionNotApplicable for it
+// -- "this platform has no such permission". On macOS that is false: the
+// Accessibility grant applies and the (now cgo-free) gohook listener needs
+// it. Only the PROBE needs cgo. That case belongs to
+// permission_darwin_nocgo.go, which answers PermissionUnknown instead.
 //
-// Note this file's tag pair partitions on "is there an OS permission to ask
-// for", which is a different question from "is there a usable hotkey
-// backend". Windows and X11 have a backend and no permission, so they land on
-// the real registrar and on this no-op checker.
+// The three darwin/cgo arms are exhaustive and disjoint; the map is in
+// permission_darwin.go.
+
 package hotkeys
 
 // notApplicablePermission implements PermissionChecker for every platform
