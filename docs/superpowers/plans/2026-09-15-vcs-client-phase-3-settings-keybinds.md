@@ -1787,6 +1787,11 @@ type SetKeybindResult struct {
 type HotkeyStateDTO struct {
     Registered bool   `json:"registered"`
     Error      string `json:"error"`
+    // Failed maps action ID -> reason for every binding that could not be
+    // registered. Needed because chord accepts keys the OS layer cannot
+    // register (Numpad, F21-F24, punctuation, nav keys), so the UI must say
+    // WHICH binding did not take effect, not just that something failed.
+    Failed map[string]string `json:"failed"`
 }
 func (a *App) GetSettings() SettingsDTO
 func (a *App) SetSettings(s SettingsDTO) error
@@ -2064,7 +2069,7 @@ Requirements, all exercised by the tests above:
 - `BeginCapture` calls `hk.Suspend()` and arms a `time.AfterFunc` (default **10 seconds**, overridable via `SetCaptureTimeout` for tests) that calls `hk.Resume()`. `EndCapture` stops the timer and calls `hk.Resume()`. Both are safe to call repeatedly.
 - `hotkeysResumed()` is an unexported test helper returning `hk.Registered()`.
 - `App` implements `hotkeys.Handler`: `Pressed(id)` emits `hotkey:pressed`, `Released(id)` emits `hotkey:released`.
-- `GetHotkeyState()` returns `HotkeyStateDTO{Registered: hk.Registered(), Error: errString(hk.LastError())}`.
+- `GetHotkeyState()` returns `HotkeyStateDTO{Registered: hk.Registered(), Error: errString(hk.LastError()), Failed: hk.Failed()}`. `hotkeys.Manager.Failed()` returns `map[string]string` of action ID -> failure reason (added in Task 5's fix round).
 - Every mutation re-emits; **no method returns state the frontend is expected to cache on its own.**
 
 - [ ] **Step 5: Run the tests**
@@ -2678,6 +2683,7 @@ Requirements, all pinned by the tests:
 - On cancel (Escape/blur/unmount): `api.endCapture()`.
 - If the result carries `stolen`, render an inline `.cap` warning in `var(--ac-warn)`: `⚠ {chord} taken from {label}`. Clear it on the next capture.
 - When `hotkeys.registered` is false, render a banner above the panels: "Global hotkeys unavailable — {error}", styled with `var(--ac-alert)`.
+- **Per-binding failures:** for every action ID present in `hotkeys.failed`, mark that row with its reason in `var(--ac-warn)` — e.g. "not registerable: key Numpad7 unsupported". This matters because `internal/chord` accepts keys the OS layer cannot register, so a user can bind Numpad7, see it saved, and otherwise get no indication it will never fire. A row-level message is the only place that reads honestly.
 - If Task 5 Step 1 found no key-release support, additionally mark `kind === "hold"` rows with "hold-to-talk unavailable with the current backend".
 
 Then in `SettingsScreen.tsx`, replace the `keybinds` section's placeholder with `<Keybinds />`.
