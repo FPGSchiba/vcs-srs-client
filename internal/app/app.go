@@ -41,6 +41,7 @@ type App struct {
 	sess     sessionAPI
 	windows  windowsAPI
 	settings *settingsBackend
+	tray     *application.SystemTray
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.
