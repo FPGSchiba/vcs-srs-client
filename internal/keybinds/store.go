@@ -41,6 +41,9 @@ func knownIDs() map[ActionID]bool {
 
 // isPerRadioID reports whether id looks like "radio.<n>.ptt" / "radio.<n>.select".
 func isPerRadioID(id string) bool {
+	if len(id) < len("radio.0.ptt") {
+		return false
+	}
 	if !strings.HasPrefix(id, "radio.") {
 		return false
 	}
