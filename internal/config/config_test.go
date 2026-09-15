@@ -188,8 +188,10 @@ func TestGeneralRoundTripAllFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	cfg := config.Default()
-	// Every field flipped away from its default, so a mistyped toml tag on any
-	// one of them shows up as a value reverting rather than passing silently.
+	// Verify all General fields serialize/deserialize correctly through Save/Load.
+	// Sets each field to a non-default value as a sanity check for round-trip
+	// encoding/decoding (not tag verification — symmetric round trips cannot catch
+	// tag typos since Save and Load use the same struct tags).
 	cfg.General = config.General{
 		StartMinimized:       true,
 		MinimizeToTray:       false,
@@ -206,5 +208,62 @@ func TestGeneralRoundTripAllFields(t *testing.T) {
 	}
 	if got.General != cfg.General {
 		t.Errorf("General round trip = %+v, want %+v", got.General, cfg.General)
+	}
+}
+
+func TestGeneralKeyNamesMatchOnDiskContract(t *testing.T) {
+	// A literal fixture, not a Save() round trip: Save and Load share the same
+	// struct tags, so a round trip passes even when a tag is misspelled. Only
+	// asserting against hand-written key names pins the on-disk contract.
+	// Every value here is the OPPOSITE of its default, so a tag that fails to
+	// match leaves the field at its default and the assertion fails.
+	body := `
+[general]
+start_minimized = true
+minimize_to_tray = false
+show_transmitter_name = false
+play_connection_sounds = false
+radio_switch_as_ptt = true
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := config.General{
+		StartMinimized:       true,
+		MinimizeToTray:       false,
+		ShowTransmitterName:  false,
+		PlayConnectionSounds: false,
+		RadioSwitchAsPTT:     true,
+	}
+	if got.General != want {
+		t.Errorf("General from literal TOML = %+v, want %+v", got.General, want)
+	}
+}
+
+func TestKeybindsKeyNameMatchesOnDiskContract(t *testing.T) {
+	// Literal fixture to pin the on-disk key name for keybinds. A mistyped
+	// table name leaves Keybinds at its default empty map.
+	body := `
+[keybinds]
+"global.ptt" = "F1"
+"radio.1.select" = "Alt+1"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Keybinds["global.ptt"] != "F1" || got.Keybinds["radio.1.select"] != "Alt+1" {
+		t.Errorf("keybinds from literal TOML = %v, want F1 and Alt+1 present", got.Keybinds)
 	}
 }
