@@ -2114,7 +2114,7 @@ keybinds:changed ships the full list rather than a delta."
 **Files:**
 - Create: `internal/app/tray.go`
 - Create: `build/trayicon.png` (new asset)
-- Modify: `main.go`
+- Modify: `main.go` (tray setup, Mac terminate flag, start-minimized, AND the `SetSettingsBackend` wiring that Task 6 left with no caller)
 
 **Interfaces:**
 - Consumes: `App.GetSettings()`, `sessionAPI.Disconnect`, the Wails `*application.App`.
@@ -2181,6 +2181,29 @@ Mac: application.MacOptions{
 gui.SetupTray(trayIcon)
 ```
 and register the window close handler so it consults `gui.OnMainWindowClose()`, hiding the window instead of closing when it returns true. If `start_minimized` is set, hide the main window immediately after creation.
+
+4. **Wire the settings backend — without this the whole phase is inert.** Task 6 added `App.SetSettingsBackend`, but nothing calls it outside tests, so `App.settings` is nil in the running app and every settings/keybind binding panics on first use. Add, after `gui.SetBackend(sess, registry)`:
+
+```go
+// Keybind store, seeded from config (falls back to shipped defaults on a
+// fresh install), and the OS hotkey manager. App itself implements
+// hotkeys.Handler, so it receives Pressed/Released directly.
+kb := keybinds.New()
+hk := hotkeys.New(hotkeys.NewOSRegistrar(), gui)
+gui.SetSettingsBackend(cfg, cfgPath, kb, hk, emitter)
+```
+
+`cfgPath` is already resolved earlier in `main.go` (it may be `""` if resolution failed — `SetSettingsBackend` treats that as "do not persist", which is the correct degraded behaviour rather than a crash). Import `internal/keybinds` and `internal/hotkeys`.
+
+Registration failure here must NOT stop startup — `hotkeys.Manager` records it and the UI surfaces it via `hotkeys:state`.
+
+- [ ] **Step 3b: Verify the wiring is live, not just compiled**
+
+Confirm `SetSettingsBackend` now has a non-test caller:
+```bash
+grep -rn "SetSettingsBackend" --include='*.go' . | grep -v _test
+```
+Expected: one hit in `main.go`. Zero hits means the phase ships inert.
 
 - [ ] **Step 4: Verify it builds on all three platforms**
 
