@@ -123,6 +123,10 @@ func (t *Tagged) ClientState(snapshot any) { t.em.Emit(EventClientState, snapsho
 type HotkeyStatePayload struct {
 	Registered bool   `json:"registered"`
 	Error      string `json:"error"`
+	// Failed maps action ID -> reason for every binding that could not be
+	// registered, mirroring app.HotkeyStateDTO.Failed. The UI needs to know
+	// WHICH binding did not take effect, not just that something failed.
+	Failed map[string]string `json:"failed"`
 }
 
 // SettingsChanged emits EventSettingsChanged with the full settings struct.
@@ -148,7 +152,8 @@ func (t *Tagged) HotkeyReleased(actionID string) {
 }
 
 // HotkeysState emits EventHotkeysState so a failed registration is visible in
-// the UI rather than silent.
-func (t *Tagged) HotkeysState(registered bool, errMsg string) {
-	t.em.Emit(EventHotkeysState, HotkeyStatePayload{Registered: registered, Error: errMsg})
+// the UI rather than silent. failed maps action ID -> failure reason for
+// every binding that could not be registered.
+func (t *Tagged) HotkeysState(registered bool, errMsg string, failed map[string]string) {
+	t.em.Emit(EventHotkeysState, HotkeyStatePayload{Registered: registered, Error: errMsg, Failed: failed})
 }

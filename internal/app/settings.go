@@ -190,6 +190,7 @@ func (a *App) GetHotkeyState() HotkeyStateDTO {
 	return HotkeyStateDTO{
 		Registered: sb.hk.Registered(),
 		Error:      errString(sb.hk.LastError()),
+		Failed:     sb.hk.Failed(),
 	}
 }
 

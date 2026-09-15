@@ -148,7 +148,8 @@ func TestEmitter_HotkeyReleased(t *testing.T) {
 func TestEmitter_HotkeysState(t *testing.T) {
 	f := &fakeEmitter{}
 	e := events.New(f)
-	e.HotkeysState(false, "register F1: already bound")
+	failed := map[string]string{"global.ptt": "register global.ptt (F1): already bound"}
+	e.HotkeysState(false, "register F1: already bound", failed)
 
 	got := f.last()
 	if got.name != events.EventHotkeysState {
@@ -160,5 +161,8 @@ func TestEmitter_HotkeysState(t *testing.T) {
 	}
 	if p.Registered || p.Error == "" {
 		t.Fatalf("unexpected payload: %+v", p)
+	}
+	if reason, ok := p.Failed["global.ptt"]; !ok || reason == "" {
+		t.Fatalf("expected a failure reason for global.ptt, got %+v", p.Failed)
 	}
 }

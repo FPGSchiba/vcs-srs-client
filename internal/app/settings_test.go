@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -28,6 +29,21 @@ func (c *countingRegistrar) Register(string, chord.Chord, bool, hotkeys.Handler)
 	return nil
 }
 func (c *countingRegistrar) UnregisterAll() { c.unregisters++ }
+
+// failingRegistrar fails to register one specific action ID and succeeds for
+// everything else, so tests can exercise hotkeys.Manager.Failed() wiring.
+type failingRegistrar struct {
+	failActionID string
+}
+
+func (f *failingRegistrar) Register(actionID string, _ chord.Chord, _ bool, _ hotkeys.Handler) error {
+	if actionID == f.failActionID {
+		return errors.New("registrar: cannot register this key")
+	}
+	return nil
+}
+
+func (f *failingRegistrar) UnregisterAll() {}
 
 // newTestApp wires an App with in-memory settings deps and no Wails.
 func newTestApp(t *testing.T) (*App, *recordingEmitter, *countingRegistrar) {
@@ -179,6 +195,41 @@ func TestClearKeybind(t *testing.T) {
 		if k.ActionID == "global.ptt" && k.Chord != "" {
 			t.Errorf("chord = %q, want empty after clear", k.Chord)
 		}
+	}
+}
+
+func TestGetHotkeyStateReportsPerActionFailures(t *testing.T) {
+	em := &recordingEmitter{}
+	reg := &failingRegistrar{failActionID: "global.ptt"}
+	a := NewForTest(state.New(), nil, nil)
+	cfg := config.Default()
+	kb := keybinds.New()
+	kb.Load(map[string]string{})
+	hk := hotkeys.New(reg, a)
+	a.SetSettingsBackend(cfg, "", kb, hk, em)
+
+	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+		t.Fatalf("SetKeybind: %v", err)
+	}
+
+	got := a.GetHotkeyState()
+	if reason, ok := got.Failed["global.ptt"]; !ok || reason == "" {
+		t.Fatalf("expected a failure reason for global.ptt, got %+v", got.Failed)
+	}
+	if got.Registered {
+		t.Error("Registered should be false while a binding is failing")
+	}
+
+	// Clearing the failing binding and re-applying should leave Failed empty.
+	if err := a.ClearKeybind("global.ptt"); err != nil {
+		t.Fatalf("ClearKeybind: %v", err)
+	}
+	got = a.GetHotkeyState()
+	if len(got.Failed) != 0 {
+		t.Errorf("Failed should be empty after a clean apply, got %+v", got.Failed)
+	}
+	if !got.Registered {
+		t.Error("Registered should be true after a clean apply")
 	}
 }
 

@@ -132,4 +132,10 @@ type SetKeybindResult struct {
 type HotkeyStateDTO struct {
 	Registered bool   `json:"registered"`
 	Error      string `json:"error"`
+	// Failed maps action ID -> reason for every binding that could not be
+	// registered. Needed because internal/chord accepts keys the OS layer
+	// cannot register (Numpad, F21-F24, punctuation, navigation keys), so the
+	// UI must say WHICH binding did not take effect, not just that something
+	// failed.
+	Failed map[string]string `json:"failed"`
 }
