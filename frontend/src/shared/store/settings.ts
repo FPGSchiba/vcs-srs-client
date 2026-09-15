@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { Capture } from "../components/KeyChip";
 
 export interface Settings {
   start_minimized: boolean;
@@ -23,13 +24,7 @@ export interface HotkeyState {
   failed: Record<string, string>;
 }
 
-export interface Capture {
-  code: string;
-  ctrl: boolean;
-  alt: boolean;
-  shift: boolean;
-  super: boolean;
-}
+export type { Capture };
 
 export interface SetKeybindResult {
   stolen: { action_id: string; label: string; chord: string } | null;
