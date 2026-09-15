@@ -1,6 +1,9 @@
 package chord
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // codeToKey maps a browser KeyboardEvent.code (a PHYSICAL key, layout
 // independent) to our canonical key name. We use .code rather than .key because
@@ -78,6 +81,25 @@ func validKey(k string) bool {
 		}
 	}
 	return false
+}
+
+// Keys returns every canonical key name, sorted.
+//
+// Exported so the OS layer can prove its per-platform key tables cover this
+// set rather than asserting it against a second, hand-copied list that would
+// drift the moment a key is added here.
+func Keys() []string {
+	seen := make(map[string]bool, len(codeToKey))
+	out := make([]string, 0, len(codeToKey))
+	for _, v := range codeToKey {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // FromCode builds a Chord from a browser KeyboardEvent.code plus modifier flags.

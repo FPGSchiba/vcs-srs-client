@@ -1,5 +1,34 @@
 version: '3'
 
+# BUILD TAGS -- READ BEFORE ADDING A NEW GO INVOCATION
+#
+# Every `go build`, `go test`, `go vet` and `wails3 generate bindings` in this
+# repository (here, in build/**, and in .github/workflows/*.yml) MUST pass
+# `-tags purego`. It selects github.com/robotn/gohook's pure-Go backends,
+# which is what makes global hotkeys PASS THROUGH to the focused application
+# instead of being swallowed -- the whole point of internal/hotkeys. A build
+# that silently loses the tag still compiles and still runs; it just behaves
+# differently, which is the nastiest way for this to go wrong.
+#
+# What the tag changes, per github.com/robotn/gohook v1.0.0-beta1:
+#   with    -- macOS kCGEventTapOptionListenOnly (cannot consume, ever), no
+#              C toolchain, no X11 dev packages on Linux, event-driven.
+#   without -- the CGo/libuiohook backend: an ACTIVE macOS tap sitting
+#              synchronously in the system input path, a 50 ms default poll on
+#              press AND release, a log.Fatal on a malformed event, six extra
+#              apt packages on Linux, and a known GCC 14+/C23 build break.
+#
+# FALLBACK TO THE CGo BACKEND: delete `purego` from the BUILD_FLAGS in
+# build/{darwin,linux,windows}/Taskfile.yml (and from the workflows). Nothing
+# in our own code is tagged, so that is the only change needed -- but read the
+# list above first, and on Linux add libx11-dev libxtst-dev libx11-xcb-dev
+# libxcb1-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev to CI.
+#
+# NEVER set `-tags wayland`. gohook's CGo build constraint starts with
+# `!wayland`, so that tag removes the backend on EVERY OS, and its Wayland
+# backend only sees keys while OUR window has focus -- the exact inverse of
+# what push-to-talk needs.
+
 includes:
   common: ./build/Taskfile.yml
   windows: ./build/windows/Taskfile.yml
@@ -32,6 +61,12 @@ tasks:
     summary: Runs the application in development mode
     cmds:
       - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
+
+  test:
+    summary: Runs the Go test suite with the race detector
+    cmds:
+      - go vet -tags purego ./...
+      - go test -tags purego -race ./...
 
   proto:
     summary: Regenerate Go gRPC bindings from srs.proto into srspb/

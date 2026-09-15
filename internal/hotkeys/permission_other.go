@@ -5,22 +5,26 @@
 // so the partition is exhaustive (every build matches one) and disjoint (no
 // build matches both) by construction rather than by enumeration. It covers:
 //
-//   - windows: RegisterHotKey needs no grant.
-//   - linux/openbsd with cgo: XGrabKey needs no grant. An unreachable DISPLAY
-//     is a connection failure, not a permission one, and surfaces as a
-//     registration error instead.
-//   - darwin without cgo: no hotkey backend exists at all in that build
-//     (registrar_nocgo.go claims it and fails every Register with
-//     ErrBackendUnavailable), so an Accessibility grant would enable nothing.
-//     Reporting "denied" there would point the user at System Settings for a
-//     problem only a rebuild can fix.
+//   - windows: WH_KEYBOARD_LL needs no grant.
+//   - linux: XRecord needs no grant. An unreachable DISPLAY -- or a Wayland
+//     session, which has no global key-listening API at all -- is a session
+//     or connection failure, not a permission one, and surfaces as a
+//     registration error instead (see session_linux.go).
+//   - darwin without cgo: the Accessibility APIs in permission_darwin.go ARE
+//     cgo, so this build cannot observe the grant state and must not guess.
 //   - any other cgo-less build: same reasoning.
 //
-// Note this is a WIDER tag than registrar_x.go / registrar_nocgo.go's
-// `windows || cgo` split, and deliberately so: those two partition on "is
-// there a usable hotkey backend", this pair partitions on "is there an OS
-// permission to ask for". Windows and X11 have a backend and no permission,
-// so they land on the working registrar and on this no-op checker.
+// That darwin arm is no longer "no hotkey backend exists in this build".
+// Since the move to robotn/gohook's purego backends, internal/hotkeys
+// compiles and functions with CGO_ENABLED=0 on every target; it is only the
+// PERMISSION probe that still needs cgo. A real darwin build of this app
+// always has cgo enabled anyway -- Wails v3 requires it -- so the arm is
+// unreachable in practice and exists only so the package still compiles.
+//
+// Note this file's tag pair partitions on "is there an OS permission to ask
+// for", which is a different question from "is there a usable hotkey
+// backend". Windows and X11 have a backend and no permission, so they land on
+// the real registrar and on this no-op checker.
 package hotkeys
 
 // notApplicablePermission implements PermissionChecker for every platform

@@ -25,6 +25,11 @@ jobs:
       # race-enabled `go test ./...` and `go build` compile the main package,
       # which imports the Wails application (cgo), so these dev headers must be
       # present or pkg-config fails on gtk4 / webkitgtk-6.0.
+      #
+      # internal/hotkeys needs NOTHING here: -tags purego selects gohook's
+      # pure-Go X11 backend, so none of libxtst/libxcb/libxkbcommon is
+      # required. Dropping the tag would need six more apt packages AND hit
+      # gohook issue #67 (a hard C23 build break on GCC 14+).
       - name: Install Linux GUI deps
         run: |
           sudo apt-get update
@@ -44,14 +49,20 @@ jobs:
           mkdir -p frontend/dist
           echo '<!doctype html><title>ci</title>' > frontend/dist/index.html
 
+      # -tags purego selects github.com/robotn/gohook's pure-Go backends,
+      # which is what makes global hotkeys pass through to the focused
+      # application instead of being consumed. It must be on EVERY Go
+      # invocation -- see the note at the top of Taskfile.yml. Without it
+      # these steps would compile and test a binary that behaves differently
+      # from the one we ship.
       - name: Go vet
-        run: go vet ./...
+        run: go vet -tags purego ./...
 
       - name: Go test (race)
-        run: go test -race ./...
+        run: go test -tags purego -race ./...
 
       - name: Go build
-        run: go build -o /tmp/vcs-client .
+        run: go build -tags purego -o /tmp/vcs-client .
 
   frontend:
     name: Frontend (React)
@@ -84,8 +95,10 @@ jobs:
 
       # frontend/src/shared/api/client.ts imports the generated TS bindings
       # (gitignored), so they must be generated before tsc/vite build.
+      # -f carries the go build flags into the type-check `wails3 generate
+      # bindings` performs; see the note at the top of Taskfile.yml.
       - name: Generate TypeScript bindings
-        run: wails3 generate bindings -ts -clean=true
+        run: wails3 generate bindings -ts -f "-tags purego" -clean=true
 
       - name: Setup Node
         uses: actions/setup-node@v6

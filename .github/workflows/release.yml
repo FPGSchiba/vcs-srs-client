@@ -41,6 +41,9 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # Wails' own GTK/WebKit dependencies only. internal/hotkeys adds
+      # nothing: -tags purego selects gohook's pure-Go X11 backend (see the
+      # note at the top of Taskfile.yml).
       - name: Install Linux GUI deps
         if: matrix.platform == 'linux-amd64'
         run: |
@@ -50,8 +53,10 @@ jobs:
       - name: Install wails3 CLI
         run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
 
+      # -f carries the go build flags into the type-check `wails3 generate
+      # bindings` performs; see the note at the top of Taskfile.yml.
       - name: Generate TypeScript bindings
-        run: wails3 generate bindings -ts -clean=true
+        run: wails3 generate bindings -ts -f "-tags purego" -clean=true
 
       - name: Install frontend deps
         working-directory: frontend
@@ -61,6 +66,8 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      # Routes through build/{darwin,linux,windows}/Taskfile.yml, whose
+      # BUILD_FLAGS already carry -tags purego unconditionally.
       - name: Build app
         run: wails3 task build
 

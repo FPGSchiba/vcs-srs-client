@@ -11,14 +11,21 @@ var ErrNoPermissionSettings = errors.New("hotkeys: no OS permission settings pan
 
 // Permission is the OS-level grant state for global hotkey capture.
 //
-// Only macOS has one: golang.design/x/hotkey's darwin backend installs a
-// CGEventTap, and its registerTap refuses outright unless the process is
-// trusted for ACCESSIBILITY (TCC's kTCCServiceAccessibility, read through
-// AXIsProcessTrusted) -- because an untrusted CGEventTapCreate can hand back
-// a non-NULL but permanently inert tap. Windows' RegisterHotKey and
-// Linux/X11's XGrabKey need no equivalent grant, so those platforms report
+// Only macOS has one: the OS key listener installs a CGEventTap, and
+// github.com/robotn/gohook's darwin backend refuses to create it unless the
+// process is trusted for ACCESSIBILITY -- axIsProcessTrusted() at
+// darwin.go:304, i.e. TCC's kTCCServiceAccessibility read through
+// AXIsProcessTrusted. (An untrusted CGEventTapCreate can otherwise hand back
+// a non-NULL but permanently inert tap.) Windows' WH_KEYBOARD_LL and
+// Linux/X11's XRecord need no equivalent grant, so those platforms report
 // PermissionNotApplicable rather than pretending to a state they cannot
 // observe.
+//
+// This predicate did not change when the OS layer moved off
+// golang.design/x/hotkey: both libraries gate on exactly AXIsProcessTrusted,
+// which is why the whole permission flow below is untouched by that
+// migration. See permission_darwin.go for what went wrong the one time this
+// gated on something else.
 //
 // Accessibility, NOT Input Monitoring. The two are separate TCC services and
 // granting the wrong one changes nothing about whether a hotkey fires; see
