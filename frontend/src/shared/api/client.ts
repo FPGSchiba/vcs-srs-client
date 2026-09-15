@@ -1,4 +1,5 @@
 import { App } from "../../../bindings/github.com/FPGSchiba/vcs-srs-client/internal/app";
+import { Settings, Keybind, HotkeyState, Capture, SetKeybindResult } from "../store/settings";
 
 export interface RadioDTO {
   id: number;
@@ -42,4 +43,14 @@ export const api = {
   closeWindow: (id: string) => App.CloseWindow(id),
   toggleWindow: (id: string) => App.ToggleWindow(id),
   getOpenWindows: (): Promise<string[]> => App.GetOpenWindows() as Promise<string[]>,
+  getSettings: (): Promise<Settings> => App.GetSettings() as Promise<Settings>,
+  setSettings: (s: Settings): Promise<void> => App.SetSettings(s) as Promise<void>,
+  getKeybinds: (): Promise<Keybind[]> => App.GetKeybinds() as Promise<Keybind[]>,
+  setKeybind: (actionId: string, cap: Capture): Promise<SetKeybindResult> =>
+    App.SetKeybind(actionId, cap) as Promise<SetKeybindResult>,
+  clearKeybind: (actionId: string): Promise<void> =>
+    App.ClearKeybind(actionId) as Promise<void>,
+  beginCapture: (): Promise<void> => App.BeginCapture() as Promise<void>,
+  endCapture: (): Promise<void> => App.EndCapture() as Promise<void>,
+  getHotkeyState: (): Promise<HotkeyState> => App.GetHotkeyState() as Promise<HotkeyState>,
 };
