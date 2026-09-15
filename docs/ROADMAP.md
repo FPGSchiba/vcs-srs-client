@@ -6,6 +6,7 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 - `[ ]` not started
 - `[~]` in progress
 - `[x]` complete
+- `[-]` deferred — consciously skipped; reason and unblock condition recorded on the phase
 
 ---
 
@@ -29,21 +30,27 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ## Phase 2 — Plugin SSO multi-step auth
 
-**Status:** `[ ]`
+**Status:** `[-]` deferred 2026-09-15 — skipped in favour of Phase 3.
 
-**Headline deliverables**
+**Why deferred:** the phase needs the `vcs-vanguard-auth-plugin` finished, and that work is itself blocked on access to the existing Vanguard user-management backend. Building the client-side flow driver against an unfinished plugin would be speculative.
+
+**Interim behaviour (shipped, not a stopgap to rip out):** guest login is the only supported sign-in path. The SSO entry point is deliberately rendered as a disabled placeholder in `Welcome.tsx` — the two-stage welcome UX stays exactly as designed, so picking this phase back up is a matter of enabling the button and wiring the flow behind it, not reworking the screen.
+
+**Headline deliverables** (unchanged, for when it resumes)
 - `InitAuth` → `DiscoverAuthenticationFlows` → `StartAuth` → `ContinueAuth` loop driver
 - Field-definition-driven form renderer (uses `FieldDefinition.type` to pick input widget)
 - Coalition / unit / role pickers after `LoginResult`
 - `UnitSelect` finalisation
 
-**Blocking deps:** none
+**Blocking deps:** `vcs-vanguard-auth-plugin` completion ← access to the Vanguard user-management backend.
+
+**Unblock condition:** that access lands and the plugin's `StartAuth` / `ContinueAuth` are servable end-to-end. No client-side proto or server change is needed first — `srs.proto` already carries the full multi-step surface and is byte-identical to the server's copy.
 
 ---
 
 ## Phase 3 — Settings + keybinds
 
-**Status:** `[ ]`
+**Status:** `[~]` design in progress, started 2026-09-15 — picked up ahead of Phase 2, which is deferred.
 
 **Headline deliverables**
 - Settings popout/section with audio, network, appearance, profiles sub-sections
