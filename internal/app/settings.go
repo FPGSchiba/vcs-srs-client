@@ -24,6 +24,18 @@ const defaultCaptureTimeout = 10 * time.Second
 type settingsBackend struct {
 	mu sync.Mutex
 
+	// writeMu serialises the snapshot -> mutate -> persist -> restore -> emit
+	// sequence in SetSettings, SetKeybind and ClearKeybind. keybinds.Store and
+	// hotkeys.Manager are each thread-safe per call, but the SEQUENCE is not
+	// atomic: without this, a failing call could roll back to a snapshot taken
+	// before a concurrent call's successful persist, erasing a committed
+	// write (or, across SetSettings vs. the keybind mutators, one call's
+	// stale copy of *cfg could overwrite the other's just-persisted field).
+	// Deliberately a SEPARATE mutex from mu: mu guards this struct's own
+	// fields and is taken inside helpers on this path (persistKeybinds,
+	// SetSettings itself), so reusing it here would self-deadlock.
+	writeMu sync.Mutex
+
 	cfg     *config.Config
 	cfgPath string
 	kb      *keybinds.Store
@@ -53,9 +65,14 @@ func (a *App) GetSettings() SettingsDTO {
 // settings:changed so every window re-renders from the new state. Persist
 // happens on a COPY of the config; sb.cfg is only repointed at it once the
 // save succeeds, so a failed write never leaves the in-memory settings
-// disagreeing with disk.
+// disagreeing with disk. writeMu is held for the whole call (through the
+// emit) so a concurrent SetKeybind/ClearKeybind cannot interleave with this
+// copy-persist-swap and clobber it, or vice versa.
 func (a *App) SetSettings(s SettingsDTO) error {
 	sb := a.settings
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
 	sb.mu.Lock()
 	// Shallow copy: Keybinds is a map and would be shared with the original,
 	// but this path never touches Keybinds, so that sharing is harmless.
@@ -106,7 +123,10 @@ func (a *App) GetKeybinds() []KeybindDTO {
 // hotkeys, and emits keybinds:changed. It reports which other action (if
 // any) lost the chord. If persistence fails, the store is rolled back to its
 // pre-Set contents (undoing both the new binding and any steal) so the live
-// store never disagrees with disk.
+// store never disagrees with disk. writeMu is held for the whole call
+// (through the emit) so a concurrent mutator's snapshot can never be older
+// than this call's own commit, which would otherwise let a failing rollback
+// here erase a different call's successful, already-persisted write.
 func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, error) {
 	c, err := chord.FromCode(cap.Code, cap.Ctrl, cap.Alt, cap.Shift, cap.Super)
 	if err != nil {
@@ -114,6 +134,9 @@ func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, err
 	}
 
 	sb := a.settings
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
 	before := sb.kb.Snapshot()
 	stolen := sb.kb.Set(keybinds.ActionID(actionID), c)
 	if err := a.persistKeybinds(); err != nil {
@@ -136,9 +159,14 @@ func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, err
 
 // ClearKeybind removes any binding for actionID, persists, re-applies OS
 // hotkeys, and emits keybinds:changed. If persistence fails, the store is
-// rolled back to its pre-Clear contents.
+// rolled back to its pre-Clear contents. writeMu is held for the whole call
+// for the same reason as SetKeybind: it keeps this call's rollback from
+// racing a concurrent mutator's successful commit.
 func (a *App) ClearKeybind(actionID string) error {
 	sb := a.settings
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
 	before := sb.kb.Snapshot()
 	sb.kb.Clear(keybinds.ActionID(actionID))
 	if err := a.persistKeybinds(); err != nil {

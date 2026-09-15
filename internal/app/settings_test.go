@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -319,6 +320,64 @@ func TestClearKeybindFailsWithoutMutatingOnPersistError(t *testing.T) {
 	}
 	if len(em.events) != seedEvents {
 		t.Error("keybinds:changed must not fire when persistence fails")
+	}
+}
+
+// TestConcurrentMutationsKeepCfgAndStoreConsistent guards against the race
+// the rollback fix (round 2) introduced: SetSettings, SetKeybind and
+// ClearKeybind each snapshot -> mutate -> persist -> (maybe restore) -> emit,
+// and without a mutex serialising that whole sequence, a failing call could
+// roll back to a snapshot taken before a DIFFERENT call's successful,
+// already-persisted commit, silently erasing it. The exact interleaving
+// needed to reproduce that loss is not forceable deterministically, so this
+// instead asserts the invariant the race breaks: after a storm of concurrent
+// mutators, cfg.Keybinds (what actually gets written to disk) must still
+// agree with the live keybinds.Store, no matter which interleaving won.
+func TestConcurrentMutationsKeepCfgAndStoreConsistent(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	a, _, _ := newTestAppWithPath(t, cfgPath)
+
+	actionIDs := []string{
+		"global.mute_toggle", "global.push_to_mute",
+		"global.emergency_broadcast", "global.compact_overlay",
+	}
+	codes := []string{"F1", "F2", "F3", "F4", "F5", "F6"}
+
+	const n = 60
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			id := actionIDs[i%len(actionIDs)]
+			switch i % 3 {
+			case 0:
+				_, _ = a.SetKeybind(id, CaptureDTO{Code: codes[i%len(codes)]})
+			case 1:
+				_ = a.ClearKeybind(id)
+			case 2:
+				s := a.GetSettings()
+				s.StartMinimized = i%2 == 0
+				_ = a.SetSettings(s)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	sb := a.settings
+	sb.mu.Lock()
+	gotCfg := sb.cfg.Keybinds
+	sb.mu.Unlock()
+	want := sb.kb.Snapshot()
+
+	if len(gotCfg) != len(want) {
+		t.Fatalf("cfg.Keybinds has %d entries, kb.Snapshot() has %d: cfg=%v store=%v", len(gotCfg), len(want), gotCfg, want)
+	}
+	for id, c := range want {
+		if gotCfg[id] != c {
+			t.Errorf("cfg.Keybinds[%q] = %q, want %q (from the live store)", id, gotCfg[id], c)
+		}
 	}
 }
 
