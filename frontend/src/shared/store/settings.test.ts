@@ -8,7 +8,7 @@ const blank = {
 
 describe("settings store", () => {
   beforeEach(() => {
-    useSettings.setState({ settings: null, keybinds: [], hotkeys: { registered: false, error: "", failed: {} } });
+    useSettings.setState({ settings: null, keybinds: [], hotkeys: { registered: false, error: "", failed: {}, permission: "unknown" } });
   });
 
   it("starts empty", () => {
@@ -35,7 +35,7 @@ describe("settings store", () => {
   });
 
   it("stores hotkey registration state", () => {
-    useSettings.getState().setHotkeyState({ registered: false, error: "permission denied", failed: {} });
+    useSettings.getState().setHotkeyState({ registered: false, error: "permission denied", failed: {}, permission: "denied" });
     expect(useSettings.getState().hotkeys.error).toBe("permission denied");
   });
 
@@ -56,7 +56,7 @@ describe("settings store", () => {
 
   it("preserves failed entries through setHotkeyState round-trip", () => {
     const failed = { "global.ptt": "key Numpad7 unsupported", "channel.cycle": "missing on this OS" };
-    useSettings.getState().setHotkeyState({ registered: false, error: "", failed });
+    useSettings.getState().setHotkeyState({ registered: false, error: "", failed, permission: "unknown" });
     expect(useSettings.getState().hotkeys.failed).toEqual(failed);
   });
 });

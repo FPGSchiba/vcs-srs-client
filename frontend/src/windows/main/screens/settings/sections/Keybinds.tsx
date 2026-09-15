@@ -92,6 +92,14 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    register (Numpad, F21-F24, punctuation, navigation), so a chord can
  *    save successfully and still never fire. Every row whose action_id
  *    appears in `hotkeys.failed` shows that reason inline.
+ *
+ * 4. The banner is permission-aware. `hotkeys.permission` is a state, not an
+ *    error string, so this branches on it directly: "denied" (macOS only)
+ *    earns an explanation and GRANT ACCESS / OPEN SETTINGS / RE-CHECK;
+ *    "not_applicable" (Windows, Linux/X11) earns none of it, because there
+ *    is nothing to grant. `requestHotkeyPermission()`'s `prompted` result is
+ *    never treated as a grant -- macOS resolves the prompt asynchronously
+ *    and the answer only ever arrives via `hotkeys:state`.
  */
 export function Keybinds() {
   const keybinds = useSettings((s) => s.keybinds);
@@ -100,6 +108,14 @@ export function Keybinds() {
   const [capturingId, setCapturingId] = useState<string | null>(null);
   const [epoch, setEpoch] = useState<Record<string, number>>({});
   const [stolen, setStolen] = useState<StolenInfo | null>(null);
+
+  // Permission-banner state. `requested` unlocks RE-CHECK; `promptSpent`
+  // swaps GRANT ACCESS for OPEN SETTINGS. Both are local rather than derived
+  // from the store because neither is observable from the backend: macOS
+  // gives no way to ask "has this app's one-shot prompt been used", so the
+  // only evidence is a request that came back without prompting.
+  const [requested, setRequested] = useState(false);
+  const [promptSpent, setPromptSpent] = useState(false);
 
   // Pending capture token per action_id. A ref, not state: it must be
   // readable by the cancel that runs during the very commit that started
@@ -233,13 +249,96 @@ export function Keybinds() {
     </div>
   );
 
+  const handleGrantPermission = async () => {
+    setRequested(true);
+    try {
+      const res = await api.requestHotkeyPermission();
+      // `prompted` is NOT the user's answer (the OS resolves the prompt
+      // asynchronously and never reports the decision back through this
+      // call). It is only evidence about whether a prompt could still be
+      // shown: no prompt AND still not granted means the one-shot is spent,
+      // and System Settings is the only remaining route.
+      setPromptSpent(!res.prompted && res.permission !== "granted");
+    } catch (err) {
+      // Logged, not surfaced: the banner already says hotkeys are
+      // unavailable, and RE-CHECK stays available as the retry.
+      console.error("requestHotkeyPermission failed", err);
+    }
+  };
+
+  const handleOpenPermissionSettings = () => {
+    void api.openHotkeyPermissionSettings().catch((err) => {
+      console.error("openHotkeyPermissionSettings failed", err);
+    });
+  };
+
+  const handleRecheckPermission = () => {
+    void api.recheckHotkeyPermission().catch((err) => {
+      console.error("recheckHotkeyPermission failed", err);
+    });
+  };
+
+  // Only macOS ever reports "denied". "not_applicable" (Windows, Linux/X11)
+  // and "unknown" must render no permission affordance at all -- there is
+  // nothing for the user to grant, so a button would be a dead end.
+  const permissionDenied = hotkeys.permission === "denied";
+  // Access is in place and hotkeys STILL will not register. The backend
+  // already re-applied on the grant (which recreates the event tap and
+  // usually suffices), so if this shows, a restart is the remaining step.
+  // Text only, deliberately: a programmatic relaunch is platform-specific,
+  // easy to get wrong, and mostly unnecessary.
+  // The !registered half is redundant inside the banner (which only renders
+  // when registration failed) but kept so the name cannot drift from the
+  // condition if this ever moves.
+  const grantedButUnregistered = hotkeys.permission === "granted" && !hotkeys.registered;
+
   const radioGroups = groupPerRadio(keybinds.filter((k) => k.category === "per_radio"));
 
   return (
     <div className="col gap-5">
       {!hotkeys.registered && (
-        <div className="cap" style={{ color: "var(--ac-alert)", padding: "8px 12px" }}>
-          Global hotkeys unavailable — {hotkeys.error}
+        <div className="col gap-3" style={{ padding: "8px 12px" }}>
+          <span className="cap" style={{ color: "var(--ac-alert)" }}>
+            Global hotkeys unavailable — {hotkeys.error}
+          </span>
+
+          {permissionDenied && (
+            <>
+              <span
+                className="cap-dim"
+                style={{ textTransform: "none", letterSpacing: "0.04em" }}
+              >
+                macOS requires Input Monitoring permission for global hotkeys. Until it is
+                granted, the system delivers no keypress to VCS while another application
+                is focused.
+              </span>
+              <div className="row gap-3">
+                {promptSpent ? (
+                  <Button size="sm" onClick={handleOpenPermissionSettings}>
+                    OPEN SETTINGS
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="primary" onClick={handleGrantPermission}>
+                    GRANT ACCESS
+                  </Button>
+                )}
+                {requested && (
+                  <Button size="sm" variant="ghost" onClick={handleRecheckPermission}>
+                    RE-CHECK
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
+
+          {grantedButUnregistered && (
+            <span
+              className="cap-dim"
+              style={{ textTransform: "none", letterSpacing: "0.04em" }}
+            >
+              Input Monitoring is granted — restart VCS for hotkeys to take effect.
+            </span>
+          )}
         </div>
       )}
 

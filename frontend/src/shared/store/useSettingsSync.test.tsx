@@ -50,9 +50,9 @@ describe("useSettingsSync", () => {
     handlers.clear();
     getSettings.mockReset().mockResolvedValue(settings);
     getKeybinds.mockReset().mockResolvedValue([]);
-    getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {} });
+    getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
     useSettings.setState({
-      settings: null, keybinds: [], hotkeys: { registered: true, error: "", failed: {} },
+      settings: null, keybinds: [], hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
     });
   });
   afterEach(() => vi.restoreAllMocks());

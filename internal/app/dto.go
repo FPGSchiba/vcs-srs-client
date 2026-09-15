@@ -138,4 +138,27 @@ type HotkeyStateDTO struct {
 	// UI must say WHICH binding did not take effect, not just that something
 	// failed.
 	Failed map[string]string `json:"failed"`
+	// Permission is the OS grant state for global hotkey capture:
+	// "unknown" | "granted" | "denied" | "not_applicable" (see
+	// hotkeys.Permission.String). Present so the frontend branches on a
+	// STATE rather than parsing Error's text -- Error carries whatever the
+	// platform registrar said and is not a contract. Only macOS can report
+	// "denied"; Windows and Linux/X11 report "not_applicable", which is the
+	// UI's signal to offer no permission affordance at all.
+	Permission string `json:"permission"`
+}
+
+// HotkeyPermissionResultDTO is the result of RequestHotkeyPermission.
+type HotkeyPermissionResultDTO struct {
+	// Prompted reports what the OS request call returned. It is NOT the
+	// user's answer and must never be rendered as one -- see
+	// hotkeys.PermissionChecker.Request. Its only use is choosing the next
+	// button: false alongside a still-denied Permission means the one-shot
+	// prompt is spent and the user has to be sent to System Settings.
+	Prompted bool `json:"prompted"`
+	// Permission is the grant state read back immediately after the request.
+	// On the happy path it is still "denied" here -- TCC answers the prompt
+	// asynchronously -- and flips later through the bounded re-check poll or
+	// the window-focus re-check, both of which emit hotkeys:state.
+	Permission string `json:"permission"`
 }

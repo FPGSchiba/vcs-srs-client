@@ -53,9 +53,9 @@ describe("CommsApp settings sync", () => {
     getClientState.mockReset().mockResolvedValue({ radios: {}, clients: {}, self: null, self_guid: "" });
     getSettings.mockReset().mockResolvedValue(settings);
     getKeybinds.mockReset().mockResolvedValue([]);
-    getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {} });
+    getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
     useSettings.setState({
-      settings: null, keybinds: [], hotkeys: { registered: true, error: "", failed: {} },
+      settings: null, keybinds: [], hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
     });
   });
 

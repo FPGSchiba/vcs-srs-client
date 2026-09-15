@@ -127,6 +127,12 @@ type HotkeyStatePayload struct {
 	// registered, mirroring app.HotkeyStateDTO.Failed. The UI needs to know
 	// WHICH binding did not take effect, not just that something failed.
 	Failed map[string]string `json:"failed"`
+	// Permission is the OS grant state for global hotkey capture, mirroring
+	// app.HotkeyStateDTO.Permission: "unknown" | "granted" | "denied" |
+	// "not_applicable". Carried here so the UI branches on a STATE rather
+	// than pattern-matching Error's text, which is a registrar message and
+	// not a stable contract.
+	Permission string `json:"permission"`
 }
 
 // SettingsChanged emits EventSettingsChanged with the full settings struct.
@@ -153,7 +159,14 @@ func (t *Tagged) HotkeyReleased(actionID string) {
 
 // HotkeysState emits EventHotkeysState so a failed registration is visible in
 // the UI rather than silent. failed maps action ID -> failure reason for
-// every binding that could not be registered.
-func (t *Tagged) HotkeysState(registered bool, errMsg string, failed map[string]string) {
-	t.em.Emit(EventHotkeysState, HotkeyStatePayload{Registered: registered, Error: errMsg, Failed: failed})
+// every binding that could not be registered; permission is the OS grant
+// state (see HotkeyStatePayload.Permission), which tells the UI whether the
+// failure is one the user can actually do something about.
+func (t *Tagged) HotkeysState(registered bool, errMsg string, failed map[string]string, permission string) {
+	t.em.Emit(EventHotkeysState, HotkeyStatePayload{
+		Registered: registered,
+		Error:      errMsg,
+		Failed:     failed,
+		Permission: permission,
+	})
 }

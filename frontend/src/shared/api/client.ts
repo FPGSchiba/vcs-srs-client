@@ -1,5 +1,12 @@
 import { App } from "../../../bindings/github.com/FPGSchiba/vcs-srs-client/internal/app";
-import type { Settings, Keybind, HotkeyState, Capture, SetKeybindResult } from "../store/settings";
+import type {
+  Settings,
+  Keybind,
+  HotkeyState,
+  HotkeyPermissionResult,
+  Capture,
+  SetKeybindResult,
+} from "../store/settings";
 
 export interface RadioDTO {
   id: number;
@@ -57,4 +64,17 @@ export const api = {
   beginCapture: (): Promise<number> => App.BeginCapture() as Promise<number>,
   endCapture: (token: number): Promise<void> => App.EndCapture(token) as Promise<void>,
   getHotkeyState: (): Promise<HotkeyState> => App.GetHotkeyState() as Promise<HotkeyState>,
+  // requestHotkeyPermission fires the OS prompt for global hotkey capture
+  // (macOS Input Monitoring). The resolved `prompted` is NOT a grant signal
+  // -- see HotkeyPermissionResult. A grant arrives later on hotkeys:state,
+  // via the backend's bounded re-check or its window-focus re-check.
+  requestHotkeyPermission: (): Promise<HotkeyPermissionResult> =>
+    App.RequestHotkeyPermission() as Promise<HotkeyPermissionResult>,
+  openHotkeyPermissionSettings: (): Promise<void> =>
+    App.OpenHotkeyPermissionSettings() as Promise<void>,
+  // recheckHotkeyPermission forces the re-check the window-focus hook does
+  // automatically, for a user who granted access and wants an answer now.
+  // Re-applies the OS registrations and emits hotkeys:state if it flipped.
+  recheckHotkeyPermission: (): Promise<void> =>
+    App.RecheckHotkeyPermission() as Promise<void>,
 };

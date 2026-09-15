@@ -10,6 +10,9 @@ const initialHotkeyState = () => useSettings.getInitialState().hotkeys;
 const setKeybind = vi.fn();
 const beginCapture = vi.fn();
 const endCapture = vi.fn().mockResolvedValue(undefined);
+const requestHotkeyPermission = vi.fn();
+const openHotkeyPermissionSettings = vi.fn();
+const recheckHotkeyPermission = vi.fn();
 
 vi.mock("../../../../../shared/api/client", () => ({
   api: {
@@ -17,6 +20,9 @@ vi.mock("../../../../../shared/api/client", () => ({
     clearKeybind: vi.fn().mockResolvedValue(undefined),
     beginCapture: () => beginCapture(),
     endCapture: (token: number) => endCapture(token),
+    requestHotkeyPermission: () => requestHotkeyPermission(),
+    openHotkeyPermissionSettings: () => openHotkeyPermissionSettings(),
+    recheckHotkeyPermission: () => recheckHotkeyPermission(),
   },
 }));
 
@@ -41,11 +47,17 @@ describe("Keybinds section", () => {
     nextToken = 0;
     beginCapture.mockReset().mockImplementation(() => Promise.resolve(++nextToken));
     endCapture.mockReset().mockResolvedValue(undefined);
+    requestHotkeyPermission
+      .mockReset()
+      .mockResolvedValue({ prompted: true, permission: "denied" });
+    openHotkeyPermissionSettings.mockReset().mockResolvedValue(undefined);
+    recheckHotkeyPermission.mockReset().mockResolvedValue(undefined);
     // NOTE: the task-11 brief's literal for `hotkeys` omits `failed`, which
     // `HotkeyState` requires (see shared/store/settings.ts). Completed here
     // rather than weakening the type or reaching for `as any`.
     useSettings.setState({
-      settings: null, keybinds: rows, hotkeys: { registered: true, error: "", failed: {} },
+      settings: null, keybinds: rows,
+      hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
     });
   });
 
@@ -112,7 +124,7 @@ describe("Keybinds section", () => {
   it("warns when global hotkeys failed to register", () => {
     useSettings.setState({
       settings: null, keybinds: rows,
-      hotkeys: { registered: false, error: "permission denied", failed: {} },
+      hotkeys: { registered: false, error: "permission denied", failed: {}, permission: "unknown" },
     });
     render(<Keybinds />);
     expect(screen.getByText(/global hotkeys unavailable/i)).toBeInTheDocument();
@@ -123,7 +135,7 @@ describe("Keybinds section", () => {
     useSettings.setState({
       settings: null, keybinds: rows,
       hotkeys: {
-        registered: true, error: "",
+        registered: true, error: "", permission: "not_applicable",
         failed: { "global.mute_toggle": "not registerable: key Numpad7 unsupported" },
       },
     });
@@ -239,6 +251,121 @@ describe("Keybinds section", () => {
     expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
   });
 
+  // ---- macOS Input Monitoring permission ----------------------------------
+
+  /** Puts the store in the denied-permission state the banner branches on. */
+  const denyPermission = () =>
+    useSettings.setState({
+      settings: null,
+      keybinds: rows,
+      hotkeys: {
+        registered: false,
+        error: "hotkeys: register global.ptt (F1): failed",
+        failed: {},
+        permission: "denied",
+      },
+    });
+
+  it("offers GRANT ACCESS and explains why when permission is denied", async () => {
+    denyPermission();
+    render(<Keybinds />);
+
+    expect(screen.getByText(/input monitoring permission/i)).toBeInTheDocument();
+    const grant = screen.getByRole("button", { name: "GRANT ACCESS" });
+    expect(screen.queryByRole("button", { name: "OPEN SETTINGS" })).not.toBeInTheDocument();
+
+    fireEvent.click(grant);
+    await waitFor(() => expect(requestHotkeyPermission).toHaveBeenCalledTimes(1));
+  });
+
+  it("swaps to OPEN SETTINGS once the one-shot prompt is spent", async () => {
+    // prompted:false with permission still denied is the ONLY evidence the
+    // OS gives that it will not ask again. Leaving GRANT ACCESS up there is
+    // a button that provably does nothing.
+    requestHotkeyPermission.mockResolvedValue({ prompted: false, permission: "denied" });
+    denyPermission();
+    render(<Keybinds />);
+
+    fireEvent.click(screen.getByRole("button", { name: "GRANT ACCESS" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "OPEN SETTINGS" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "GRANT ACCESS" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "OPEN SETTINGS" }));
+    await waitFor(() => expect(openHotkeyPermissionSettings).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps GRANT ACCESS when the OS did show a prompt", async () => {
+    // prompted:true means the sheet is on screen and unanswered. The answer
+    // arrives asynchronously via hotkeys:state, so this must NOT be mistaken
+    // for "granted" and must not jump the user to System Settings either.
+    requestHotkeyPermission.mockResolvedValue({ prompted: true, permission: "denied" });
+    denyPermission();
+    render(<Keybinds />);
+
+    fireEvent.click(screen.getByRole("button", { name: "GRANT ACCESS" }));
+    await waitFor(() => expect(requestHotkeyPermission).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "OPEN SETTINGS" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "GRANT ACCESS" })).toBeInTheDocument();
+  });
+
+  it("offers RE-CHECK only after a request has been made", async () => {
+    denyPermission();
+    render(<Keybinds />);
+
+    expect(screen.queryByRole("button", { name: "RE-CHECK" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "GRANT ACCESS" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "RE-CHECK" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "RE-CHECK" }));
+    await waitFor(() => expect(recheckHotkeyPermission).toHaveBeenCalledTimes(1));
+  });
+
+  it("offers no permission affordance where there is no permission to grant", () => {
+    // Windows and Linux/X11 report "not_applicable". A GRANT ACCESS button
+    // there is a dead end: there is nothing to grant and nothing to open.
+    useSettings.setState({
+      settings: null,
+      keybinds: rows,
+      hotkeys: {
+        registered: false,
+        error: "hotkeys: OS backend unavailable in this build",
+        failed: {},
+        permission: "not_applicable",
+      },
+    });
+    render(<Keybinds />);
+
+    expect(screen.getByText(/global hotkeys unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "GRANT ACCESS" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "OPEN SETTINGS" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/input monitoring permission/i)).not.toBeInTheDocument();
+  });
+
+  it("tells the user to restart when access is granted but nothing registers", () => {
+    // The backend already re-applied on the grant (which recreates the event
+    // tap), so reaching this state means the running process cannot pick it
+    // up. Text only -- there is deliberately no restart button.
+    useSettings.setState({
+      settings: null,
+      keybinds: rows,
+      hotkeys: {
+        registered: false,
+        error: "hotkeys: register global.ptt (F1): failed",
+        failed: {},
+        permission: "granted",
+      },
+    });
+    render(<Keybinds />);
+
+    expect(screen.getByText(/restart vcs for hotkeys to take effect/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "GRANT ACCESS" })).not.toBeInTheDocument();
+  });
+
   it("does not warn when only SOME bindings failed to register", () => {
     // Registered means "no hotkeys are live at all", not "something failed".
     // One unregisterable key must not declare every working binding dead --
@@ -246,7 +373,7 @@ describe("Keybinds section", () => {
     useSettings.setState({
       settings: null, keybinds: rows,
       hotkeys: {
-        registered: true, error: "",
+        registered: true, error: "", permission: "not_applicable",
         failed: { "global.mute_toggle": "no OS key mapping for Numpad7" },
       },
     });

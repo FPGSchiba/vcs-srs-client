@@ -121,6 +121,17 @@ func main() {
 		}
 	})
 
+	// Re-check the OS global-hotkey permission whenever the main window
+	// regains focus. On macOS, granting Input Monitoring means leaving the
+	// app for System Settings and coming back, and the OS offers no
+	// notification for the change -- so returning focus is both the moment
+	// the answer can have changed and the cheapest time to look. All the
+	// policy (is a re-check even warranted, did it flip, re-apply and emit)
+	// lives in RecheckHotkeyPermission so this stays pure wiring.
+	mainWindow.RegisterHook(events.Common.WindowFocus, func(_ *application.WindowEvent) {
+		gui.RecheckHotkeyPermission()
+	})
+
 	if cfg.General.StartMinimized {
 		mainWindow.Hide()
 	}

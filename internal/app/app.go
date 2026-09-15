@@ -43,6 +43,12 @@ type App struct {
 	windows  windowsAPI
 	settings *settingsBackend
 	tray     *application.SystemTray
+
+	// perm is the OS seam for the global-hotkey capture permission (macOS
+	// Input Monitoring). Filled in by SetSettingsBackend with the platform
+	// implementation unless a test has already injected a fake through
+	// setPermissionChecker. Written once, before anything reads it.
+	perm hotkeys.PermissionChecker
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.
@@ -77,6 +83,10 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 	}
 	kb.Load(raw)
 
+	if a.perm == nil {
+		a.perm = hotkeys.NewPermissionChecker()
+	}
+
 	a.settings = &settingsBackend{
 		cfg:            cfg,
 		cfgPath:        cfgPath,
@@ -84,6 +94,8 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 		hk:             hk,
 		em:             events.New(em),
 		captureTimeout: defaultCaptureTimeout,
+		permInterval:   defaultPermissionPollInterval,
+		permTimeout:    defaultPermissionPollTimeout,
 	}
 	// Per-radio actions are derived from the local client's radios, which are
 	// empty at this point and only arrive at connect time. Observe the store
@@ -93,9 +105,16 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 	a.st.OnRadiosChanged(a.RefreshKeybinds)
 	// Seeds the initial OS registration AND emits the first hotkeys:state, so
 	// a startup registration failure (no backend, denied permission) reaches
-	// the UI without waiting for the user to change something.
+	// the UI without waiting for the user to change something. applyHotkeys
+	// reads the permission on its way through, which also seeds lastPerm for
+	// RecheckHotkeyPermission's early-out.
 	a.applyHotkeys()
 }
+
+// setPermissionChecker injects a fake PermissionChecker. For tests only, and
+// only before SetSettingsBackend -- that is what makes the field a
+// write-once value no goroutine can race.
+func (a *App) setPermissionChecker(p hotkeys.PermissionChecker) { a.perm = p }
 
 // defaultKeybindsRaw renders keybinds.Defaults() as the raw string map
 // keybinds.Store.Load expects.

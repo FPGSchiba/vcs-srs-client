@@ -19,6 +19,21 @@ import (
 // invisible to the user and maddening to diagnose.
 const defaultCaptureTimeout = 10 * time.Second
 
+// Bounds for the permission re-check that RequestHotkeyPermission arms.
+//
+// This is NOT a background loop. macOS offers no notification for a TCC
+// permission change, so the only ways to learn about a grant are to ask
+// CGPreflightListenEventAccess again, or to be told by the user. The poll
+// exists solely in the window between an explicit user request and its
+// answer, and cancels itself on the first grant or at the timeout, whichever
+// comes first. The primary trigger is the cheaper one: the window-focus
+// re-check (RecheckHotkeyPermission), since the user must leave the app to
+// grant and come back afterwards.
+const (
+	defaultPermissionPollInterval = 500 * time.Millisecond
+	defaultPermissionPollTimeout  = 30 * time.Second
+)
+
 // settingsBackend groups the dependencies behind the settings/keybind
 // bindings. It is created by SetSettingsBackend once the real config,
 // keybind store and hotkey manager exist.
@@ -57,6 +72,25 @@ type settingsBackend struct {
 	// RefreshKeybinds saw, so a radio update that does not change the local
 	// client's radios does not re-emit keybinds:changed.
 	radioSig string
+
+	// permInterval / permTimeout bound the re-check armed by
+	// RequestHotkeyPermission. Overridable through
+	// SetHotkeyPermissionPoll for tests, mirroring SetCaptureTimeout.
+	permInterval time.Duration
+	permTimeout  time.Duration
+
+	// permCancel is closed to stop the in-flight re-check, so a second
+	// request supersedes the first instead of running two polls.
+	// permDone is closed by that poll's goroutine when it returns; tests
+	// join on it, and its nil-ness is how "never armed a poll" is asserted.
+	permCancel chan struct{}
+	permDone   chan struct{}
+
+	// lastPerm is the grant state as of the most recent read. Kept so
+	// RecheckHotkeyPermission can tell a genuine flip from a repeat, and so
+	// the focus hook can return without touching the OS once access is
+	// granted (or was never applicable).
+	lastPerm hotkeys.Permission
 }
 
 // GetSettings returns the current General settings.
@@ -287,7 +321,179 @@ func (a *App) hotkeysResumed() bool {
 // GetHotkeyState reports whether OS hotkey registration is currently
 // healthy, and why not if it is not.
 func (a *App) GetHotkeyState() HotkeyStateDTO {
-	return hotkeyStateDTO(a.settings.hk.State())
+	return hotkeyStateDTO(a.settings.hk.State(), a.permissionStatus())
+}
+
+// RequestHotkeyPermission fires the OS permission prompt for global hotkey
+// capture and arms a bounded re-check for the answer.
+//
+// The returned Prompted is what the OS request call said and nothing more;
+// the grant itself is only ever concluded from Status(). That split is the
+// whole point of the flow: on macOS the prompt is handled asynchronously by
+// TCC, so this call returns while the sheet is still on screen, and a UI that
+// rendered the request's return value as the answer would claim "granted"
+// against a process that still cannot see a keystroke.
+//
+// Three outcomes:
+//   - already granted: apply immediately, no poll (nothing to wait for).
+//   - not applicable: return, no poll (Windows/X11 have no grant to wait for,
+//     so a 30-second ticker there would burn wakeups for a state that cannot
+//     change).
+//   - otherwise: arm the poll, which re-applies hotkeys and emits
+//     hotkeys:state if and when Status() flips to granted.
+func (a *App) RequestHotkeyPermission() HotkeyPermissionResultDTO {
+	sb := a.settings
+	if sb == nil || a.perm == nil {
+		return HotkeyPermissionResultDTO{Permission: hotkeys.PermissionUnknown.String()}
+	}
+
+	prompted := a.perm.Request()
+	status := a.permissionStatus()
+
+	switch status {
+	case hotkeys.PermissionGranted:
+		// The grant was already in place (or landed synchronously). Re-apply
+		// now rather than making the user wait a poll interval for it.
+		a.applyHotkeys()
+	case hotkeys.PermissionNotApplicable:
+		// Nothing to wait for.
+	default:
+		a.armPermissionPoll()
+	}
+
+	return HotkeyPermissionResultDTO{Prompted: prompted, Permission: status.String()}
+}
+
+// OpenHotkeyPermissionSettings deep-links the OS settings pane where the user
+// can grant global hotkey access. The escape hatch for when the one-shot
+// prompt has already been spent, which is the state a user who once pressed
+// "Don't Allow" is permanently stuck in otherwise.
+func (a *App) OpenHotkeyPermissionSettings() error {
+	if a.perm == nil {
+		return hotkeys.ErrNoPermissionSettings
+	}
+	return a.perm.OpenSettings()
+}
+
+// RecheckHotkeyPermission re-reads the grant state and, if it has flipped to
+// granted, re-applies hotkeys and emits hotkeys:state.
+//
+// This is the PRIMARY trigger, wired to the main window's focus event in
+// main.go. Granting requires leaving the app and coming back, so focus is
+// precisely the moment the answer can have changed -- and unlike the poll it
+// costs nothing when it has not.
+//
+// Exported so main.go stays a thin wiring layer and this logic is testable;
+// the focus hook itself must contain no policy.
+func (a *App) RecheckHotkeyPermission() {
+	sb := a.settings
+	if sb == nil || a.perm == nil {
+		return // settings backend not wired (tests that only exercise session bindings)
+	}
+
+	sb.mu.Lock()
+	last := sb.lastPerm
+	sb.mu.Unlock()
+	if last == hotkeys.PermissionGranted || last == hotkeys.PermissionNotApplicable {
+		return // nothing a re-check could improve
+	}
+
+	if a.permissionStatus() != hotkeys.PermissionGranted {
+		return
+	}
+	// Re-apply rather than merely re-emitting: Apply tears down and recreates
+	// the OS registrations, which on macOS means a fresh CGEventTap built
+	// under the new permission. That is what can pick the grant up without a
+	// restart. applyHotkeys emits hotkeys:state itself.
+	a.applyHotkeys()
+}
+
+// SetHotkeyPermissionPoll overrides the bounded re-check's interval and
+// timeout. For tests only, mirroring SetCaptureTimeout. Non-positive values
+// leave the corresponding default in place.
+func (a *App) SetHotkeyPermissionPoll(interval, timeout time.Duration) {
+	sb := a.settings
+	sb.mu.Lock()
+	if interval > 0 {
+		sb.permInterval = interval
+	}
+	if timeout > 0 {
+		sb.permTimeout = timeout
+	}
+	sb.mu.Unlock()
+}
+
+// permissionStatus reads the OS grant state and caches it for
+// RecheckHotkeyPermission's early-out. Returns PermissionUnknown when no
+// checker is wired, which is the honest answer and keeps the DTO from
+// claiming a state it never observed.
+func (a *App) permissionStatus() hotkeys.Permission {
+	sb := a.settings
+	if sb == nil || a.perm == nil {
+		return hotkeys.PermissionUnknown
+	}
+	p := a.perm.Status()
+	sb.mu.Lock()
+	sb.lastPerm = p
+	sb.mu.Unlock()
+	return p
+}
+
+// armPermissionPoll starts the bounded re-check described on
+// RequestHotkeyPermission. A second request supersedes the first rather than
+// stacking a second ticker on the same checker.
+func (a *App) armPermissionPoll() {
+	sb := a.settings
+
+	sb.mu.Lock()
+	if sb.permCancel != nil {
+		close(sb.permCancel) // supersede the poll already running
+	}
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	sb.permCancel, sb.permDone = cancel, done
+	interval, timeout := sb.permInterval, sb.permTimeout
+	sb.mu.Unlock()
+
+	if interval <= 0 {
+		interval = defaultPermissionPollInterval
+	}
+	if timeout <= 0 {
+		timeout = defaultPermissionPollTimeout
+	}
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		deadline := time.NewTimer(timeout)
+		defer deadline.Stop()
+		for {
+			select {
+			case <-cancel:
+				return
+			case <-deadline.C:
+				// Give up silently. The user may simply not have granted;
+				// the focus re-check still covers a later grant, so there is
+				// nothing to report and nothing left running.
+				return
+			case <-ticker.C:
+				if a.permissionStatus() == hotkeys.PermissionGranted {
+					a.applyHotkeys() // recreates the taps AND emits hotkeys:state
+					return
+				}
+			}
+		}
+	}()
+}
+
+// permissionPollDone is an unexported test helper returning the channel the
+// in-flight re-check closes when it returns, or nil if none was ever armed.
+func (a *App) permissionPollDone() <-chan struct{} {
+	sb := a.settings
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.permDone
 }
 
 // hotkeyStateDTO renders a hotkeys.State for the binding surface. Error is
@@ -297,12 +503,17 @@ func (a *App) GetHotkeyState() HotkeyStateDTO {
 // says which bindings failed through Failed alone. The UI banner keys off
 // Registered, so letting Error survive a partial failure would resurrect the
 // bug where one bad binding blanked the banner for nineteen working ones.
-func hotkeyStateDTO(s hotkeys.State) HotkeyStateDTO {
+func hotkeyStateDTO(s hotkeys.State, perm hotkeys.Permission) HotkeyStateDTO {
 	msg := ""
 	if !s.Registered {
 		msg = errString(s.LastError)
 	}
-	return HotkeyStateDTO{Registered: s.Registered, Error: msg, Failed: s.Failed}
+	return HotkeyStateDTO{
+		Registered: s.Registered,
+		Error:      msg,
+		Failed:     s.Failed,
+		Permission: perm.String(),
+	}
 }
 
 // emitHotkeyState publishes the current registration health on
@@ -310,8 +521,8 @@ func hotkeyStateDTO(s hotkeys.State) HotkeyStateDTO {
 // those are the only two moments the OS layer's view can change.
 func (a *App) emitHotkeyState() {
 	sb := a.settings
-	dto := hotkeyStateDTO(sb.hk.State())
-	sb.em.HotkeysState(dto.Registered, dto.Error, dto.Failed)
+	dto := hotkeyStateDTO(sb.hk.State(), a.permissionStatus())
+	sb.em.HotkeysState(dto.Registered, dto.Error, dto.Failed, dto.Permission)
 }
 
 // Pressed implements hotkeys.Handler.

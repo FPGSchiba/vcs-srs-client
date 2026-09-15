@@ -26,7 +26,7 @@ describe("SettingsScreen", () => {
         play_connection_sounds: true, radio_switch_as_ptt: false,
       },
       keybinds: [],
-      hotkeys: { registered: true, error: "", failed: {} },
+      hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
     });
   });
 

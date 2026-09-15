@@ -149,7 +149,7 @@ func TestEmitter_HotkeysState(t *testing.T) {
 	f := &fakeEmitter{}
 	e := events.New(f)
 	failed := map[string]string{"global.ptt": "register global.ptt (F1): already bound"}
-	e.HotkeysState(false, "register F1: already bound", failed)
+	e.HotkeysState(false, "register F1: already bound", failed, "denied")
 
 	got := f.last()
 	if got.name != events.EventHotkeysState {
@@ -164,5 +164,11 @@ func TestEmitter_HotkeysState(t *testing.T) {
 	}
 	if reason, ok := p.Failed["global.ptt"]; !ok || reason == "" {
 		t.Fatalf("expected a failure reason for global.ptt, got %+v", p.Failed)
+	}
+	// The permission state must survive onto the wire: the UI branches on it
+	// to decide whether the failure is one the user can act on, and a payload
+	// that dropped it would silently degrade to the old error-string parsing.
+	if p.Permission != "denied" {
+		t.Errorf("Permission = %q, want %q", p.Permission, "denied")
 	}
 }
