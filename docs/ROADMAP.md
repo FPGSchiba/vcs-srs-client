@@ -126,6 +126,17 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 - Ship Mode popout (component registry from local TOML for now)
 - Messages popout (text channels mirroring radio frequencies; local ring buffer)
 - Notifications popout (local + future server-pushed alert channel)
+- Route hotkey-registration failures through the notification channel,
+  replacing Phase 3's inline banner in the Keybinds section. Two distinct
+  cases, and they must stay distinct: a GLOBAL failure (nothing registered at
+  all -- a denied macOS Input Monitoring grant, a missing backend) notifies
+  **once**, carrying the permission state and its remedial action; a
+  PER-BINDING failure (a chord `internal/chord` accepts but the OS cannot
+  register, e.g. `Numpad7`) notifies **per action**, naming the action. The
+  banner exists today because there is nowhere else to put this; once the
+  notification channel lands it is the right home, since a registration
+  failure is exactly the kind of thing the user must learn about without
+  having Settings open. See the Phase 3 spec's R12 for the origin.
 - Fleet Mode popout (C2 view)
 - Transmission history view (local JSON ring buffer)
 - OS-keychain migration for session token (closes R4)
