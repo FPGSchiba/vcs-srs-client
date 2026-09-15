@@ -42,7 +42,12 @@ interface SettingsState {
 export const useSettings = create<SettingsState>((set) => ({
   settings: null,
   keybinds: [],
-  hotkeys: { registered: false, error: "", failed: {} },
+  // `registered: true` is the optimistic default on purpose. The Keybinds
+  // section renders "Global hotkeys unavailable" whenever this is false, so
+  // defaulting to false flashed that banner on every first paint, before
+  // getHotkeyState() had resolved -- and left it up permanently if that call
+  // ever rejected. Nothing is known to be broken until the backend says so.
+  hotkeys: { registered: true, error: "", failed: {} },
   setSettings: (settings) => set({ settings }),
   setKeybinds: (keybinds) => set({ keybinds }),
   setHotkeyState: (hotkeys) => set({ hotkeys }),

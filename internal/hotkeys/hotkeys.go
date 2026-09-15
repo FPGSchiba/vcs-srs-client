@@ -107,11 +107,67 @@ func (m *Manager) Resume() error {
 	return m.registerLocked()
 }
 
-// Registered reports whether the desired set is currently live with no errors.
+// State is a consistent snapshot of registration health, read under one lock
+// so callers never see Registered disagree with Failed.
+type State struct {
+	Registered bool
+	LastError  error
+	Failed     map[string]string
+}
+
+// Registered reports whether OS hotkey registration is usable AT ALL.
+//
+// It is false only when nothing is live: there is at least one bound action
+// and every one of them failed to register. That is what a missing backend
+// (registrar_nocgo.go), a denied macOS Input Monitoring permission or an
+// unreachable X display looks like, and it is the only case the UI's
+// "global hotkeys unavailable" banner should describe.
+//
+// Deliberately NOT false for:
+//   - a partial failure. internal/chord accepts keys the OS layer cannot
+//     register, so one bad binding among nineteen good ones is normal; those
+//     surface per action through Failed(), not as a blanket banner that
+//     declares every working hotkey dead.
+//   - suspension. Capture releases every registration for a moment (see
+//     Suspend); reporting "unavailable" for that window would flash the
+//     banner on every rebind. Use Suspended() to observe that state.
 func (m *Manager) Registered() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return !m.suspended && m.lastErr == nil
+	return m.registeredLocked()
+}
+
+// registeredLocked is Registered without the lock. Caller holds m.mu.
+func (m *Manager) registeredLocked() bool {
+	bound := 0
+	for _, b := range m.desired {
+		if !b.Chord.IsZero() {
+			bound++
+		}
+	}
+	return bound == 0 || len(m.failed) < bound
+}
+
+// Suspended reports whether registrations are currently released for a UI
+// capture. Kept separate from Registered() because suspension is a transient
+// internal state, not a user-facing failure.
+func (m *Manager) Suspended() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.suspended
+}
+
+// State returns Registered, LastError and Failed together under a single
+// lock. Reading them through three separate calls can tear -- the banner
+// saying "unavailable" while Failed is already empty, or vice versa.
+func (m *Manager) State() State {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	failed := make(map[string]string, len(m.failed))
+	for id, err := range m.failed {
+		failed[id] = err.Error()
+	}
+	return State{Registered: m.registeredLocked(), LastError: m.lastErr, Failed: failed}
 }
 
 // LastError returns the most recent registration failure, if any.

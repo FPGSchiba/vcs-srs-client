@@ -4,8 +4,11 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { Keybinds } from "./Keybinds";
 import { useSettings } from "../../../../../shared/store/settings";
 
+/** The store's untouched default hotkey state, read before any test mutates it. */
+const initialHotkeyState = () => useSettings.getInitialState().hotkeys;
+
 const setKeybind = vi.fn();
-const beginCapture = vi.fn().mockResolvedValue(undefined);
+const beginCapture = vi.fn();
 const endCapture = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../../../../../shared/api/client", () => ({
@@ -13,9 +16,15 @@ vi.mock("../../../../../shared/api/client", () => ({
     setKeybind: (...a: unknown[]) => setKeybind(...a),
     clearKeybind: vi.fn().mockResolvedValue(undefined),
     beginCapture: () => beginCapture(),
-    endCapture: () => endCapture(),
+    endCapture: (token: number) => endCapture(token),
   },
 }));
+
+/** Mirrors the backend's capture-token generation counter: every
+ * BeginCapture hands out a new, strictly increasing token, and only the
+ * newest one is honoured by EndCapture. Starts at 1 so 0 stays reserved for
+ * "beginCapture failed". */
+let nextToken = 0;
 
 const rows = [
   { action_id: "global.ptt", label: "Global PTT", desc: "Transmits on the Selected radio",
@@ -29,8 +38,9 @@ const rows = [
 describe("Keybinds section", () => {
   beforeEach(() => {
     setKeybind.mockReset().mockResolvedValue({ stolen: null });
-    beginCapture.mockClear();
-    endCapture.mockClear();
+    nextToken = 0;
+    beginCapture.mockReset().mockImplementation(() => Promise.resolve(++nextToken));
+    endCapture.mockReset().mockResolvedValue(undefined);
     // NOTE: the task-11 brief's literal for `hotkeys` omits `failed`, which
     // `HotkeyState` requires (see shared/store/settings.ts). Completed here
     // rather than weakening the type or reaching for `as any`.
@@ -138,9 +148,17 @@ describe("Keybinds section", () => {
     // Before pressing a key, start capturing on a different chip (bound "M").
     fireEvent.click(screen.getByText("M"));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(2));
-    // The first chip's forced cancel (unmount-while-listening) must re-arm
-    // the backend for it before the second capture proceeds.
     await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
+
+    // The superseded chip's forced cancel (unmount-while-listening) is
+    // dispatched AFTER the new chip's beginCapture -- React only unmounts it
+    // on commit. It must therefore hand back its OWN, now-stale token (1),
+    // never the live one (2): the backend refuses a stale token, which is
+    // what keeps every OS hotkey suspended for the capture that is actually
+    // running. Ending the live capture here would re-register `M` with the
+    // OS and let it swallow the keypress meant to rebind it.
+    expect(endCapture).toHaveBeenCalledWith(1);
+    expect(endCapture).not.toHaveBeenCalledWith(2);
 
     // A single keypress must only be attributed to the second (still
     // listening) chip -- if the first chip were still listening too, this
@@ -153,5 +171,87 @@ describe("Keybinds section", () => {
     );
     expect(setKeybind).toHaveBeenCalledTimes(1);
     expect(setKeybind).not.toHaveBeenCalledWith("global.ptt", expect.anything());
+
+    // And the live capture, once it completes, ends with its own token.
+    await waitFor(() => expect(endCapture).toHaveBeenCalledWith(2));
+  });
+
+  it("does not end the live capture when a row switch races an in-flight setKeybind", async () => {
+    // The other half of the same hazard: the user presses a key on chip A and
+    // then clicks chip B while A's setKeybind is still awaiting. A's `finally`
+    // therefore runs AFTER B's beginCapture. It must still surrender only A's
+    // own token, or B would capture with every OS hotkey re-armed.
+    let resolveSet: (v: unknown) => void = () => {};
+    setKeybind.mockImplementation(() => new Promise((res) => { resolveSet = res; }));
+
+    render(<Keybinds />);
+    fireEvent.click(screen.getAllByText("—")[0]);
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(1));
+    fireEvent.keyDown(window, { code: "F2", key: "F2" });
+    await waitFor(() => expect(setKeybind).toHaveBeenCalledTimes(1));
+    expect(endCapture).not.toHaveBeenCalled(); // still awaiting setKeybind
+
+    // Start a new capture on another row while A is still in flight.
+    fireEvent.click(screen.getByText("M"));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(2));
+
+    resolveSet({ stolen: null });
+    await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
+    expect(endCapture).toHaveBeenCalledWith(1);
+    expect(endCapture).not.toHaveBeenCalledWith(2);
+  });
+
+  it("ends each capture with the token that capture was issued", async () => {
+    render(<Keybinds />);
+    fireEvent.click(screen.getAllByText("—")[0]);
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(1));
+    fireEvent.keyDown(window, { code: "F2", key: "F2" });
+    await waitFor(() => expect(endCapture).toHaveBeenCalledWith(1));
+
+    // A second, independent capture gets a fresh token.
+    fireEvent.click(screen.getByText("M"));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(2));
+    fireEvent.keyDown(window, { code: "F3", key: "F3" });
+    await waitFor(() => expect(endCapture).toHaveBeenCalledWith(2));
+  });
+
+  it("does not end a capture that never began", async () => {
+    render(<Keybinds />);
+    // Escape on a chip the user never clicked cannot happen, but a cancel
+    // with no outstanding token must stay a no-op rather than guessing one.
+    fireEvent.click(screen.getAllByText("—")[0]);
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(1));
+    fireEvent.keyDown(window, { code: "Escape", key: "Escape" });
+    await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
+
+    // Re-clicking the now-idle chip twice must not produce a second end for
+    // the first capture's token.
+    expect(endCapture).toHaveBeenCalledTimes(1);
+    expect(endCapture).toHaveBeenCalledWith(1);
+  });
+
+  it("does not warn before the backend has reported hotkey health", () => {
+    // The store's default: nothing is known to be broken yet. A pessimistic
+    // default flashed the banner on every first paint, and stuck if
+    // getHotkeyState ever rejected.
+    useSettings.setState({ settings: null, keybinds: rows, hotkeys: initialHotkeyState() });
+    render(<Keybinds />);
+    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
+  });
+
+  it("does not warn when only SOME bindings failed to register", () => {
+    // Registered means "no hotkeys are live at all", not "something failed".
+    // One unregisterable key must not declare every working binding dead --
+    // it gets a per-row reason instead.
+    useSettings.setState({
+      settings: null, keybinds: rows,
+      hotkeys: {
+        registered: true, error: "",
+        failed: { "global.mute_toggle": "no OS key mapping for Numpad7" },
+      },
+    });
+    render(<Keybinds />);
+    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/no OS key mapping for Numpad7/i)).toBeInTheDocument();
   });
 });

@@ -99,8 +99,15 @@ func TestSuspendUnregistersAndResumeRestores(t *testing.T) {
 	if f.count() != 0 {
 		t.Errorf("after Suspend registered %d, want 0", f.count())
 	}
-	if m.Registered() {
-		t.Error("Registered() should be false while suspended")
+	// Registered() deliberately stays true across a suspension: suspension is
+	// a transient internal state, not a user-facing failure, and reporting
+	// "hotkeys unavailable" for it would flash the UI banner on every rebind.
+	// Suspended() is the accessor that observes it.
+	if !m.Suspended() {
+		t.Error("Suspended() should be true while suspended")
+	}
+	if !m.Registered() {
+		t.Error("Registered() must not report unavailable merely because of a suspension")
 	}
 
 	if err := m.Resume(); err != nil {
@@ -157,8 +164,15 @@ func TestRegistrationFailureIsRecordedNotFatal(t *testing.T) {
 	if f.count() != 1 {
 		t.Error("the binding that could register should still have registered")
 	}
-	if m.Registered() {
-		t.Error("Registered() should be false when any registration failed")
+	// One of two bindings failed. Registered() means "no hotkeys are live at
+	// all", not "at least one binding failed" -- otherwise a single
+	// unregisterable key declares nineteen working ones dead. The failure is
+	// reported per action through Failed().
+	if !m.Registered() {
+		t.Error("Registered() must stay true when only SOME registrations failed")
+	}
+	if _, ok := m.Failed()["global.ptt"]; !ok {
+		t.Error("the partial failure must be named in Failed()")
 	}
 }
 
@@ -256,5 +270,59 @@ func TestSuspendIsIdempotent(t *testing.T) {
 	}
 	if f.count() != 1 {
 		t.Error("one Resume should restore after repeated Suspend")
+	}
+}
+
+// TestRegisteredFalseWhenEveryBindingFails pins the one case the "global
+// hotkeys unavailable" banner is meant to describe: nothing registered at
+// all, as with a missing OS backend or a denied permission.
+func TestRegisteredFalseWhenEveryBindingFails(t *testing.T) {
+	f := newFake()
+	f.failOn["a"] = errors.New("backend unavailable")
+	f.failOn["b"] = errors.New("backend unavailable")
+	m := New(f, nopHandler{})
+
+	m.Apply(map[string]Binding{
+		"a": {mustChord(t, "F1"), false},
+		"b": {mustChord(t, "F2"), false},
+	})
+
+	if m.Registered() {
+		t.Error("Registered() should be false when EVERY binding failed")
+	}
+	if m.LastError() == nil {
+		t.Error("LastError() should hold a reason")
+	}
+}
+
+// TestRegisteredTrueWithNothingBound: an empty binding set is not a failure.
+func TestRegisteredTrueWithNothingBound(t *testing.T) {
+	m := New(newFake(), nopHandler{})
+	if !m.Registered() {
+		t.Error("Registered() should be true when there is nothing to register")
+	}
+}
+
+// TestStateIsConsistent checks the combined snapshot agrees with the
+// individual accessors, so the UI can never see Registered disagree with
+// Failed.
+func TestStateIsConsistent(t *testing.T) {
+	f := newFake()
+	f.failOn["a"] = errors.New("nope")
+	m := New(f, nopHandler{})
+	m.Apply(map[string]Binding{
+		"a": {mustChord(t, "F1"), false},
+		"b": {mustChord(t, "F2"), false},
+	})
+
+	st := m.State()
+	if st.Registered != m.Registered() {
+		t.Errorf("State().Registered = %v, Registered() = %v", st.Registered, m.Registered())
+	}
+	if len(st.Failed) != len(m.Failed()) {
+		t.Errorf("State().Failed = %v, Failed() = %v", st.Failed, m.Failed())
+	}
+	if st.LastError == nil {
+		t.Error("State().LastError should hold the failure")
 	}
 }

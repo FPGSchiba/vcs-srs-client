@@ -39,6 +39,15 @@ describe("settings store", () => {
     expect(useSettings.getState().hotkeys.error).toBe("permission denied");
   });
 
+  it("defaults registered to true until the backend says otherwise", () => {
+    // The Keybinds banner renders on `!registered`, so a pessimistic default
+    // flashed "Global hotkeys unavailable" on every first paint and stuck for
+    // good if getHotkeyState ever rejected. Read the untouched initial state,
+    // since beforeEach above deliberately overwrites it.
+    expect(useSettings.getInitialState().hotkeys.registered).toBe(true);
+    expect(useSettings.getInitialState().hotkeys.error).toBe("");
+  });
+
   it("initializes failed as empty object, not undefined", () => {
     const state = useSettings.getState();
     expect(state.hotkeys.failed).toEqual({});

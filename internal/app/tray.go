@@ -1,8 +1,6 @@
 package app
 
 import (
-	"context"
-
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -83,12 +81,11 @@ func (a *App) OnMainWindowClose() (preventClose bool) {
 	return a.GetSettings().MinimizeToTray && a.TrayAvailable()
 }
 
-// quit disconnects the control session first, so the server sees a clean
-// leave rather than a dropped stream, then terminates the app. Wired to the
-// tray menu's Quit item -- it must always exit regardless of close-to-tray.
+// quit terminates the app. Wired to the tray menu's Quit item -- it must
+// always exit regardless of close-to-tray. The clean control-session
+// disconnect lives in ServiceShutdown, not here, so that EVERY quit path
+// (this one, Cmd+Q, and a plain window close with minimize_to_tray off) gets
+// it rather than just the tray menu item.
 func (a *App) quit() {
-	if a.sess != nil {
-		_ = a.sess.Disconnect(context.Background())
-	}
 	a.wailsApp.Quit()
 }

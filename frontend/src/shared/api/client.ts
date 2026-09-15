@@ -50,7 +50,11 @@ export const api = {
     App.SetKeybind(actionId, cap) as Promise<SetKeybindResult>,
   clearKeybind: (actionId: string): Promise<void> =>
     App.ClearKeybind(actionId) as Promise<void>,
-  beginCapture: (): Promise<void> => App.BeginCapture() as Promise<void>,
-  endCapture: (): Promise<void> => App.EndCapture() as Promise<void>,
+  // beginCapture returns a CAPTURE TOKEN that must be handed back to
+  // endCapture. The backend only re-arms OS hotkeys for the token of the
+  // capture that is still current, which is what makes switching rows
+  // mid-capture safe without the frontend ordering two IPC calls.
+  beginCapture: (): Promise<number> => App.BeginCapture() as Promise<number>,
+  endCapture: (token: number): Promise<void> => App.EndCapture(token) as Promise<void>,
   getHotkeyState: (): Promise<HotkeyState> => App.GetHotkeyState() as Promise<HotkeyState>,
 };

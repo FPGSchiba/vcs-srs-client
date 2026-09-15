@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,18 @@ type settingsBackend struct {
 
 	captureTimeout time.Duration
 	captureTimer   *time.Timer
+
+	// captureGen is the capture-token generation counter. BeginCapture
+	// increments it and hands the new value to the frontend; EndCapture and
+	// the auto-resume timer only re-arm OS hotkeys if the token they carry is
+	// still the current generation. See BeginCapture for why the invariant
+	// lives here rather than in the frontend.
+	captureGen int64
+
+	// radioSig is the signature of the per-radio action set the last
+	// RefreshKeybinds saw, so a radio update that does not change the local
+	// client's radios does not re-emit keybinds:changed.
+	radioSig string
 }
 
 // GetSettings returns the current General settings.
@@ -179,12 +192,29 @@ func (a *App) ClearKeybind(actionID string) error {
 }
 
 // BeginCapture suspends every OS hotkey registration so a registered hotkey
-// does not swallow the very key the UI is about to listen for. It arms a
-// timeout that auto-resumes if EndCapture never arrives. Safe to call
-// repeatedly: each call re-arms the timer.
-func (a *App) BeginCapture() error {
+// does not swallow the very key the UI is about to listen for, and returns
+// the CAPTURE TOKEN identifying this capture. The caller must hand that token
+// back to EndCapture.
+//
+// The token exists because the frontend cannot order two fire-and-forget IPC
+// calls. Clicking chip B while chip A is listening dispatches B's
+// BeginCapture first and A's EndCapture second (A only unmounts once React
+// commits), so a token-less EndCapture would resume every OS hotkey in the
+// middle of B's capture -- the OS would then swallow the very keypress meant
+// to rebind B, which is exactly the hazard spec section 7 opens with. The
+// same inversion happens when the user clicks a new chip while the previous
+// row's SetKeybind is still in flight.
+//
+// Making the token the authority moves that invariant into the only layer
+// that can enforce it: BeginCapture bumps the generation, and EndCapture and
+// the auto-resume timer are no-ops unless the token they carry is still
+// current. Every interleaving -- row switch, post-capture race, timeout -- is
+// then safe without the frontend sequencing anything.
+func (a *App) BeginCapture() int64 {
 	sb := a.settings
 	sb.mu.Lock()
+	sb.captureGen++
+	gen := sb.captureGen
 	sb.hk.Suspend()
 	if sb.captureTimer != nil {
 		sb.captureTimer.Stop()
@@ -193,25 +223,49 @@ func (a *App) BeginCapture() error {
 	if timeout <= 0 {
 		timeout = defaultCaptureTimeout
 	}
-	hk := sb.hk
-	sb.captureTimer = time.AfterFunc(timeout, func() {
-		_ = hk.Resume()
-	})
+	// The timer captures its OWN generation, so a timeout belonging to a
+	// superseded capture cannot re-arm hotkeys under a live one.
+	sb.captureTimer = time.AfterFunc(timeout, func() { a.resumeCapture(gen) })
 	sb.mu.Unlock()
-	return nil
+	return gen
 }
 
-// EndCapture stops the pending auto-resume timer and re-arms OS hotkey
-// registration. Safe to call repeatedly.
-func (a *App) EndCapture() error {
+// EndCapture re-arms OS hotkey registration, but only if token is still the
+// current capture generation. A stale token -- from a capture the user has
+// already moved on from -- is a deliberate no-op, which is what keeps a row
+// switch from resuming hotkeys during the capture that superseded it.
+//
+// Returns nothing: Resume's error is a PER-BINDING registration failure (one
+// unregisterable chord among many working ones), which is reported through
+// hotkeys:state / HotkeyStateDTO.Failed. Rejecting the frontend's
+// endCapture() promise for it would repeat the same category error I4 fixed
+// in the banner -- treating one bad binding as a failure of the whole
+// operation.
+func (a *App) EndCapture(token int64) {
+	a.resumeCapture(token)
+}
+
+// resumeCapture is the single gate both EndCapture and the auto-resume timer
+// go through. A stale token is a no-op.
+func (a *App) resumeCapture(token int64) {
 	sb := a.settings
 	sb.mu.Lock()
+	if token != sb.captureGen {
+		sb.mu.Unlock()
+		return // superseded by a newer capture -- leave hotkeys suspended
+	}
 	if sb.captureTimer != nil {
 		sb.captureTimer.Stop()
 		sb.captureTimer = nil
 	}
 	sb.mu.Unlock()
-	return sb.hk.Resume()
+
+	_ = sb.hk.Resume() // per-binding failures surface via the event below
+	// Resume is where bindings saved DURING the capture actually hit the OS
+	// (Apply only records the desired set while suspended), so it is the
+	// first moment a newly bound unregisterable key can be known to have
+	// failed. Without this emit that failure would never reach the UI.
+	a.emitHotkeyState()
 }
 
 // SetCaptureTimeout overrides the auto-resume timeout. For tests only.
@@ -222,20 +276,42 @@ func (a *App) SetCaptureTimeout(d time.Duration) {
 	sb.mu.Unlock()
 }
 
-// hotkeysResumed is an unexported test helper.
+// hotkeysResumed is an unexported test helper. It asks whether the manager is
+// out of its suspended state -- NOT Registered(), which by design stays true
+// across a suspension (see hotkeys.Manager.Registered) and would make every
+// resume assertion vacuous.
 func (a *App) hotkeysResumed() bool {
-	return a.settings.hk.Registered()
+	return !a.settings.hk.Suspended()
 }
 
 // GetHotkeyState reports whether OS hotkey registration is currently
 // healthy, and why not if it is not.
 func (a *App) GetHotkeyState() HotkeyStateDTO {
-	sb := a.settings
-	return HotkeyStateDTO{
-		Registered: sb.hk.Registered(),
-		Error:      errString(sb.hk.LastError()),
-		Failed:     sb.hk.Failed(),
+	return hotkeyStateDTO(a.settings.hk.State())
+}
+
+// hotkeyStateDTO renders a hotkeys.State for the binding surface. Error is
+// populated ONLY when Registered is false, so the two fields cannot
+// contradict each other: Registered==false plus Error is "global hotkeys are
+// dead, here is why", while a partial failure leaves Registered true and
+// says which bindings failed through Failed alone. The UI banner keys off
+// Registered, so letting Error survive a partial failure would resurrect the
+// bug where one bad binding blanked the banner for nineteen working ones.
+func hotkeyStateDTO(s hotkeys.State) HotkeyStateDTO {
+	msg := ""
+	if !s.Registered {
+		msg = errString(s.LastError)
 	}
+	return HotkeyStateDTO{Registered: s.Registered, Error: msg, Failed: s.Failed}
+}
+
+// emitHotkeyState publishes the current registration health on
+// hotkeys:state. Called after every apply and after every resume, because
+// those are the only two moments the OS layer's view can change.
+func (a *App) emitHotkeyState() {
+	sb := a.settings
+	dto := hotkeyStateDTO(sb.hk.State())
+	sb.em.HotkeysState(dto.Registered, dto.Error, dto.Failed)
 }
 
 // Pressed implements hotkeys.Handler.
@@ -324,7 +400,57 @@ func (a *App) applyHotkeys() {
 		}
 		binds[string(act.ID)] = hotkeys.Binding{Chord: c, Hold: act.Kind == keybinds.KindHold}
 	}
-	_ = sb.hk.Apply(binds) // failures surface via GetHotkeyState
+	_ = sb.hk.Apply(binds) // failures surface via the event below
+	// Without this the hotkeys:state event had no production emitter at all:
+	// a binding the OS refuses (Numpad7 and friends) saved cleanly, was
+	// recorded in Manager.Failed(), and never reached the UI, so the row
+	// rendered the chord as if it were live.
+	a.emitHotkeyState()
+}
+
+// RefreshKeybinds recomputes the joined action list against the CURRENT radio
+// set, re-applies OS hotkeys and emits keybinds:changed.
+//
+// Per-radio actions are derived from the local client's radios, which do not
+// exist at startup -- they arrive with SyncClient at connect time and change
+// again on every server-side radio update. Without this the per-radio panel
+// stayed absent and per-radio hotkeys stayed unregistered until the user
+// happened to change some unrelated keybind. Wired to state.Store's radio
+// observer in SetSettingsBackend.
+//
+// Radio updates for OTHER clients flow through the same observer, so this
+// short-circuits unless the LOCAL radio set actually changed; otherwise every
+// remote radio tweak would re-emit the whole keybind list.
+func (a *App) RefreshKeybinds() {
+	sb := a.settings
+	if sb == nil {
+		return // settings backend not wired (tests that only exercise session bindings)
+	}
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
+	sig := radioSignature(a.radioRefs())
+	sb.mu.Lock()
+	unchanged := sb.radioSig == sig
+	sb.radioSig = sig
+	sb.mu.Unlock()
+	if unchanged {
+		return
+	}
+
+	a.applyHotkeys()
+	sb.em.KeybindsChanged(a.GetKeybinds())
+}
+
+// radioSignature renders the local radio set as a comparable string. Both the
+// id and the name matter: the name is part of the per-radio action label, so
+// a rename must still refresh the rows.
+func radioSignature(refs []keybinds.RadioRef) string {
+	var b strings.Builder
+	for _, r := range refs {
+		fmt.Fprintf(&b, "%d:%s|", r.ID, r.Name)
+	}
+	return b.String()
 }
 
 // categoryString renders a Category as its lowercase wire form.

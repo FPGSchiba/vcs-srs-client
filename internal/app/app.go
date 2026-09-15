@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -84,6 +85,15 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 		em:             events.New(em),
 		captureTimeout: defaultCaptureTimeout,
 	}
+	// Per-radio actions are derived from the local client's radios, which are
+	// empty at this point and only arrive at connect time. Observe the store
+	// so the keybind list and the OS registrations follow them (I2); without
+	// it the per-radio panel stays absent for the whole session unless the
+	// user happens to touch an unrelated keybind.
+	a.st.OnRadiosChanged(a.RefreshKeybinds)
+	// Seeds the initial OS registration AND emits the first hotkeys:state, so
+	// a startup registration failure (no backend, denied permission) reaches
+	// the UI without waiting for the user to change something.
 	a.applyHotkeys()
 }
 
@@ -107,8 +117,24 @@ func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) er
 	return nil
 }
 
-// ServiceShutdown is the Wails v3 lifecycle hook.
+// shutdownDisconnectTimeout bounds the clean-leave RPC on quit. Without it an
+// unresponsive server would hang the quit forever on a context.Background()
+// call the user cannot cancel.
+const shutdownDisconnectTimeout = 2 * time.Second
+
+// ServiceShutdown is the Wails v3 lifecycle hook. It runs the clean
+// disconnect, so the server sees a proper leave rather than a dropped stream
+// on EVERY quit path -- tray Quit, Cmd+Q, and closing the window with
+// minimize_to_tray off (the ordinary quit on Windows and Linux). Doing this
+// in the tray's Quit handler alone covered exactly one of those.
 func (a *App) ServiceShutdown() error {
 	a.logger.Info("App service shutting down")
+	if a.sess != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownDisconnectTimeout)
+		defer cancel()
+		if err := a.sess.Disconnect(ctx); err != nil {
+			a.logger.Warn("clean disconnect on shutdown failed", "err", err)
+		}
+	}
 	return nil
 }

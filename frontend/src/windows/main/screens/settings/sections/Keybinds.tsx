@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Panel } from "../../../../../shared/components/Panel";
 import { Button } from "../../../../../shared/components/Button";
 import { KeyChip } from "../../../../../shared/components/KeyChip";
@@ -62,10 +62,10 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *
  * Three correctness properties this file is built around:
  *
- * 1. `handleCapture` always calls `api.endCapture()` in a `finally`. The
- *    backend suspends every OS hotkey registration for the duration of a
- *    capture; if `setKeybind` throws and `endCapture` is skipped, every
- *    global hotkey stays dead until the backend's own timeout.
+ * 1. `handleCapture` always ends the capture in a `finally`. The backend
+ *    suspends every OS hotkey registration for the duration of a capture;
+ *    if `setKeybind` throws and the capture is never ended, every global
+ *    hotkey stays dead until the backend's own timeout.
  *
  * 2. Only one chip may listen at a time. `capturingId` tracks which
  *    action_id is currently allowed to listen; clicking a different chip
@@ -76,6 +76,17 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    safety net instead of duplicating it here -- without this, two
  *    mounted chips would both hold a window keydown listener and a single
  *    keypress would fire `setKeybind` twice.
+ *
+ *    That forced unmount arrives AFTER React commits, so the superseded
+ *    chip's cancel reaches the backend after the new chip's
+ *    `beginCapture` -- the calls are inverted and this layer cannot
+ *    reorder them. Correctness therefore does not live here: every
+ *    `beginCapture` returns a capture token, every end hands its own row's
+ *    token back, and the backend only re-arms for the token that is still
+ *    current. A superseded row's end is a no-op there, so the new capture
+ *    keeps its hotkeys suspended. The same inversion happens when the user
+ *    clicks a new chip while the previous row's `setKeybind` is still in
+ *    flight, and the token covers that too.
  *
  * 3. Per-row failures: `internal/chord` accepts keys the OS layer can't
  *    register (Numpad, F21-F24, punctuation, navigation), so a chord can
@@ -89,6 +100,11 @@ export function Keybinds() {
   const [capturingId, setCapturingId] = useState<string | null>(null);
   const [epoch, setEpoch] = useState<Record<string, number>>({});
   const [stolen, setStolen] = useState<StolenInfo | null>(null);
+
+  // Pending capture token per action_id. A ref, not state: it must be
+  // readable by the cancel that runs during the very commit that started
+  // another row's capture, and it must never trigger a re-render.
+  const tokens = useRef<Map<string, Promise<number>>>(new Map());
 
   const bumpEpoch = (actionId: string) =>
     setEpoch((e) => ({ ...e, [actionId]: (e[actionId] ?? 0) + 1 }));
@@ -105,7 +121,33 @@ export function Keybinds() {
     setStolen(null);
     if (capturingId) bumpEpoch(capturingId);
     setCapturingId(actionId);
-    void api.beginCapture();
+    tokens.current.set(
+      actionId,
+      api.beginCapture().catch((err) => {
+        console.error("beginCapture failed", err);
+        // 0 is never a live generation, so the matching endCapture below is
+        // a no-op -- which is right: if the capture never began, the backend
+        // never suspended anything and must not be told to re-arm.
+        return 0;
+      }),
+    );
+  };
+
+  // Ends the capture this row started, handing back the token it was issued.
+  // Passing another row's token (or none) is what the backend's staleness
+  // check exists to reject, so this side just has to be honest about which
+  // capture it is ending.
+  const endCapture = async (actionId: string) => {
+    const pending = tokens.current.get(actionId);
+    tokens.current.delete(actionId);
+    if (pending === undefined) return; // this row never began a capture
+    try {
+      await api.endCapture(await pending);
+    } catch (err) {
+      // Logged, not rethrown: callers are cancel paths with nowhere to
+      // surface it, and the backend's 10s auto-resume is the real safety net.
+      console.error("endCapture failed", err);
+    }
   };
 
   const handleCapture = (actionId: string) => async (cap: Capture) => {
@@ -124,13 +166,13 @@ export function Keybinds() {
       // Runs even when setKeybind throws, so the backend always re-arms its
       // OS hotkey registrations instead of staying suspended until its own
       // timeout.
-      await api.endCapture();
+      await endCapture(actionId);
       setCapturingId((cur) => (cur === actionId ? null : cur));
     }
   };
 
   const handleCancel = (actionId: string) => () => {
-    void api.endCapture();
+    void endCapture(actionId);
     setCapturingId((cur) => (cur === actionId ? null : cur));
   };
 
