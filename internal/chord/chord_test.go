@@ -24,7 +24,7 @@ func TestChordString(t *testing.T) {
 }
 
 func TestParseRoundTrip(t *testing.T) {
-	for _, s := range []string{"F1", "Ctrl+E", "Ctrl+Alt+Shift+Super+A", "Alt+1", "Space"} {
+	for _, s := range []string{"F1", "Ctrl+E", "Ctrl+Alt+Shift+Super+A", "Alt+1", "Space", "Ctrl+Alt+A"} {
 		t.Run(s, func(t *testing.T) {
 			c, err := Parse(s)
 			if err != nil {
@@ -56,6 +56,8 @@ func TestParseRejects(t *testing.T) {
 		{"modifier only", "Ctrl", ErrModifierOnly},
 		{"modifiers only", "Ctrl+Shift", ErrModifierOnly},
 		{"unknown key", "Ctrl+NotAKey", ErrUnknownKey},
+		{"duplicate ctrl", "Ctrl+Ctrl+A", ErrDuplicateModifier},
+		{"duplicate shift", "Shift+Shift+F1", ErrDuplicateModifier},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

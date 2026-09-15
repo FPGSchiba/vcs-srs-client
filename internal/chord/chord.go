@@ -26,6 +26,8 @@ var (
 	ErrModifierOnly = errors.New("chord: modifier-only chord is not bindable")
 	// ErrUnknownKey means the key name is not in the canonical key set.
 	ErrUnknownKey = errors.New("chord: unknown key")
+	// ErrDuplicateModifier means the same modifier appeared more than once.
+	ErrDuplicateModifier = errors.New("chord: duplicate modifier")
 )
 
 // Chord is a set of modifiers plus one canonical key name.
@@ -76,15 +78,27 @@ func Parse(s string) (Chord, error) {
 	for i, p := range parts {
 		switch p {
 		case "Ctrl":
+			if c.Mods&ModCtrl != 0 {
+				return Chord{}, ErrDuplicateModifier
+			}
 			c.Mods |= ModCtrl
 			continue
 		case "Alt":
+			if c.Mods&ModAlt != 0 {
+				return Chord{}, ErrDuplicateModifier
+			}
 			c.Mods |= ModAlt
 			continue
 		case "Shift":
+			if c.Mods&ModShift != 0 {
+				return Chord{}, ErrDuplicateModifier
+			}
 			c.Mods |= ModShift
 			continue
 		case "Super":
+			if c.Mods&ModSuper != 0 {
+				return Chord{}, ErrDuplicateModifier
+			}
 			c.Mods |= ModSuper
 			continue
 		}

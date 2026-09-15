@@ -4,10 +4,10 @@ import "testing"
 
 func TestFromCode(t *testing.T) {
 	tests := []struct {
-		name                       string
-		code                       string
-		ctrl, alt, shift, super    bool
-		want                       string
+		name                    string
+		code                    string
+		ctrl, alt, shift, super bool
+		want                    string
 	}{
 		{"letter", "KeyD", false, false, false, false, "D"},
 		{"digit", "Digit1", false, false, false, false, "1"},
