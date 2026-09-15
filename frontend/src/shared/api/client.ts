@@ -1,5 +1,5 @@
 import { App } from "../../../bindings/github.com/FPGSchiba/vcs-srs-client/internal/app";
-import { Settings, Keybind, HotkeyState, Capture, SetKeybindResult } from "../store/settings";
+import type { Settings, Keybind, HotkeyState, Capture, SetKeybindResult } from "../store/settings";
 
 export interface RadioDTO {
   id: number;
