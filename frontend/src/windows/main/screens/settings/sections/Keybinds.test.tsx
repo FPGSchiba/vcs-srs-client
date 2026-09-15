@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import { Keybinds } from "./Keybinds";
 import { useSettings } from "../../../../../shared/store/settings";
@@ -86,9 +86,17 @@ describe("Keybinds section", () => {
     fireEvent.click(screen.getAllByText("—")[0]);
     await waitFor(() => expect(beginCapture).toHaveBeenCalled());
     fireEvent.keyDown(window, { code: "F1", key: "F1" });
+    // The warning belongs on the row that just captured the stolen key
+    // (global.ptt), not merely somewhere on the page -- scope the query to
+    // that row so a regression that renders it under the wrong row (or
+    // duplicates it across every row) fails this test.
+    const capturingRow = screen.getByText("Global PTT").closest("[data-row]") as HTMLElement;
     await waitFor(() =>
-      expect(screen.getByText(/F1 taken from R01 · GUARD \(PTT\)/i)).toBeInTheDocument(),
+      expect(
+        within(capturingRow).getByText(/F1 taken from R01 · GUARD \(PTT\)/i),
+      ).toBeInTheDocument(),
     );
+    expect(screen.getAllByText(/F1 taken from R01 · GUARD \(PTT\)/i)).toHaveLength(1);
   });
 
   it("warns when global hotkeys failed to register", () => {
@@ -110,7 +118,14 @@ describe("Keybinds section", () => {
       },
     });
     render(<Keybinds />);
-    expect(screen.getByText(/not registerable: key Numpad7 unsupported/i)).toBeInTheDocument();
+    // Scope to the row for global.mute_toggle specifically -- a regression
+    // that attached the reason to the wrong row, or to every row, must fail
+    // this test, not just "the string exists somewhere".
+    const failedRow = screen.getByText("Mute toggle").closest("[data-row]") as HTMLElement;
+    expect(
+      within(failedRow).getByText(/not registerable: key Numpad7 unsupported/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/not registerable: key Numpad7 unsupported/i)).toHaveLength(1);
   });
 
   it("cancels the previously listening chip when another chip starts capturing", async () => {

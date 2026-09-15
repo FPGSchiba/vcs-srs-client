@@ -169,6 +169,7 @@ export function Keybinds() {
   const renderRow = (kb: Keybind) => (
     <div
       key={kb.action_id}
+      data-row={kb.action_id}
       className="row between acenter gap-6"
       style={{ padding: "10px 0", borderBottom: "1px solid var(--bd-1)" }}
     >
