@@ -50,16 +50,34 @@ var ErrNoDisplay = fmt.Errorf(
 // XDG_SESSION_TYPE and WAYLAND_DISPLAY returns nothing), and under Wayland
 // its X11 backend succeeds against XWayland.
 //
-// A Wayland session is claimed when XDG_SESSION_TYPE says so, OR when a
-// Wayland display is present at all -- that second case is the XWayland trap
-// above, where DISPLAY is also set and everything looks healthy.
+// A Wayland session is claimed when XDG_SESSION_TYPE says so, or -- when
+// XDG_SESSION_TYPE is silent -- when a Wayland display is present at all.
+// That second case is the XWayland trap above, where DISPLAY is also set and
+// everything looks healthy.
+//
+// XDG_SESSION_TYPE=x11 short-circuits to OK, and the WAYLAND_DISPLAY
+// heuristic is not consulted at all, because that heuristic has a false
+// positive: a genuine X11 login can carry a stale or imported
+// WAYLAND_DISPLAY. systemd's user-environment import carries it across
+// sessions, nested compositors set it, and some Flatpak and snap wrappers
+// export it unconditionally. Such a user would lose every hotkey and be told
+// to log in to an X11 session -- which is exactly what they did. An
+// unactionable error is worse than none.
+//
+// This does not weaken the trap. logind sets XDG_SESSION_TYPE from the
+// session it actually created, so a real Wayland session reads "wayland" and
+// is caught by the first case whether or not XWayland is running. There is no
+// configuration in which a Wayland session reports "x11".
 func linuxSessionCheck(sessionType, waylandDisplay, display string) error {
-	if strings.EqualFold(strings.TrimSpace(sessionType), "wayland") {
+	switch st := strings.TrimSpace(sessionType); {
+	case strings.EqualFold(st, "wayland"):
+		return ErrWaylandUnsupported
+	case strings.EqualFold(st, "x11"):
+		// Authoritative. Trust it over any WAYLAND_DISPLAY lying around.
+	case strings.TrimSpace(waylandDisplay) != "":
 		return ErrWaylandUnsupported
 	}
-	if strings.TrimSpace(waylandDisplay) != "" {
-		return ErrWaylandUnsupported
-	}
+
 	if strings.TrimSpace(display) == "" {
 		return ErrNoDisplay
 	}

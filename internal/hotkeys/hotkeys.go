@@ -30,6 +30,21 @@ type Registrar interface {
 	UnregisterAll()
 }
 
+// Closer is an OPTIONAL extra a Registrar may implement when it owns an OS
+// resource with a lifetime longer than one registration cycle.
+//
+// It is deliberately not part of Registrar. The real registrar now keeps a
+// single process-wide event stream alive across every Apply/Suspend/Resume
+// (see registrar_gohook.go), so "stop registering" and "shut the stream down"
+// became different operations -- but every fake Registrar in the test suite
+// implements the two-method interface, and widening it would break them all
+// to express something only one implementation has.
+type Closer interface {
+	// Close releases the OS resource. Must be safe to call more than once,
+	// and safe on a Registrar that never started anything.
+	Close()
+}
+
 // Manager owns the current registration set and the suspend/resume state.
 type Manager struct {
 	mu        sync.Mutex
@@ -105,6 +120,30 @@ func (m *Manager) Resume() error {
 	}
 	m.suspended = false
 	return m.registerLocked()
+}
+
+// Close releases every registration and then shuts down the OS layer, if the
+// Registrar has anything to shut down.
+//
+// Call it once, on application shutdown. UnregisterAll runs first and on
+// every path, which is what releases a hotkey still being HELD at quit -- a
+// push-to-talk down at the moment the user hits Cmd+Q would otherwise never
+// see its Released.
+//
+// After Close the Manager is spent: Apply would re-register against a stream
+// that is gone. Nothing calls it twice today, and the real Registrar tolerates
+// it if something does.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.desired = map[string]Binding{}
+	m.failed = map[string]error{}
+	m.reg.UnregisterAll()
+
+	if c, ok := m.reg.(Closer); ok {
+		c.Close()
+	}
 }
 
 // State is a consistent snapshot of registration health, read under one lock

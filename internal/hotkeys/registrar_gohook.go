@@ -48,26 +48,12 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	hook "github.com/robotn/gohook"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
 )
-
-// SupportsRelease reports whether the backend can detect key release, which
-// hold-to-talk PTT bindings require.
-//
-// True on every platform this builds for, verified per backend in gohook
-// v1.0.0-beta1: darwin emits KeyUp from kCGEventKeyUp and synthesises one for
-// modifier-only transitions out of kCGEventFlagsChanged (darwin.go:401-404,
-// :425-455); windows emits it from WM_KEYUP/WM_SYSKEYUP (windows.go:342-344,
-// :381-391); linux/X11 emits it from xproto.KeyRelease (x11.go:335, :381).
-//
-// This is also an upgrade over the previous implementation rather than parity
-// with it: x/hotkey's Windows backend had no delivered key-up at all and
-// polled GetAsyncKeyState every 10 ms, so a release could be reported up to a
-// tick late and a tap shorter than a tick could be missed entirely.
-func SupportsRelease() bool { return true }
 
 // ErrBackendUnavailable is returned by Register when the OS event stream
 // cannot run at all in this environment. The user-visible consequence is the
@@ -138,10 +124,25 @@ func (gohookSource) End()                     { hook.End() }
 //     bindings it registers -- otherwise nineteen bindings against a denied
 //     permission would mean nineteen End/Start cycles.
 //
+//   - A stream that goes away RELEASES whatever it was holding, on every
+//     path: HookDisabled, the channel closing underneath us, a deliberate
+//     teardown, and Close. Once the stream is gone no KeyUp can arrive, so a
+//     push-to-talk latched at that instant would stay latched forever --
+//     Pressed emitted, Released never, microphone open with nothing able to
+//     close it. See streamDied and dispatcher.releaseHeld.
+//
 // Consequences worth stating: there is exactly one reader goroutine for the
 // life of the process (a restart ends the old one before starting the new
 // one), repeated Apply/Suspend/Resume cycles allocate nothing and start
 // nothing, and the hook can never be double-started.
+//
+// One failure the design does NOT cover, because nothing at this layer can
+// observe it: gohook's X11 backend can die SILENTLY. If the RECORD data
+// connection drops, x11ReadLoop returns on the read error and x11Loop
+// (x11.go:227) returns without sending HookDisabled and without closing the
+// channel. Our reader simply blocks forever, disabled stays false, and this
+// registrar reports healthy. See the migration report for why a liveness
+// watchdog is not the answer and what is.
 type hookRegistrar struct {
 	d   *dispatcher
 	src eventSource
@@ -151,14 +152,45 @@ type hookRegistrar struct {
 	// to set it while ensureStream holds that lock.
 	disabled atomic.Bool
 
-	// lifeMu guards everything below: the stream's running state. It is never
-	// held while calling into the dispatcher or a Handler.
+	// readersAlive counts reader goroutines that have been committed to and
+	// have not yet returned. It exists to make ONE invariant checkable rather
+	// than merely asserted in a comment: src.End() must never be called while
+	// a reader is alive, because gohook's End() drains the same channel the
+	// reader is receiving from and can block forever competing with it.
+	readersAlive atomic.Int32
+
+	// startMu serialises a whole start/restart operation. lifeMu alone is not
+	// enough: a restart releases lifeMu to do its slow work (see teardown),
+	// and without this a concurrent registration could start a second stream
+	// on top of one still being torn down. Manager already serialises
+	// Register, so this is belt and braces -- but it is the difference
+	// between "cannot happen today" and "cannot happen".
+	startMu sync.Mutex
+
+	// lifeMu guards the fields below and NOTHING slow. It is never held
+	// across src.End(), across a channel wait, or across a call into the
+	// dispatcher or a Handler.
 	lifeMu     sync.Mutex
 	running    bool
 	retryArmed bool
+	quit       chan struct{}
 	readerDone chan struct{}
 	starts     int // how many times the stream has been started; tests assert on it
 }
+
+// readerStopTimeout bounds how long a teardown waits for the reader goroutine
+// to acknowledge its quit signal.
+//
+// The reader exits within one select iteration, so this should never be
+// reached -- unless a Handler blocks, since dispatcher.handle calls out to
+// application code. Bounded anyway: ensureStream runs on the goroutine
+// servicing a Wails call from the settings UI, and an unbounded wait there is
+// a hung window rather than a slow one.
+const readerStopTimeout = 2 * time.Second
+
+// errStreamWedged is returned when a previous stream's reader did not stop.
+// Registration fails rather than starting a second stream on top of it.
+var errStreamWedged = fmt.Errorf("%w: the previous OS key listener did not shut down", ErrBackendUnavailable)
 
 // NewOSRegistrar returns a Registrar backed by the real OS key listener.
 func NewOSRegistrar() Registrar { return newHookRegistrar(gohookSource{}) }
@@ -204,72 +236,212 @@ func (r *hookRegistrar) UnregisterAll() {
 	r.d.clear()
 }
 
+// streamPlan is what ensureStream decided to do, computed under lifeMu so the
+// slow part of a restart can happen with the lock released.
+type streamPlan int
+
+const (
+	planStart   streamPlan = iota // nothing running; start one
+	planHealthy                   // running and alive; nothing to do
+	planDead                      // running, dead, and the retry is spent
+	planRestart                   // running, dead, retry claimed; tear down then start
+)
+
 // ensureStream starts the OS stream if it is not running, or restarts it once
 // if it has reported itself dead and a retry is armed.
+//
+// The work is split deliberately: the DECISION happens under lifeMu, the
+// teardown does not. gohook's End() drains and closes a package-global
+// channel and sleeps while doing it, so holding a lock across it risks
+// blocking every later Register -- and ensureStream runs on the goroutine
+// servicing a Wails call, so that reads to the user as a frozen settings
+// window. startMu keeps the whole operation serialised regardless.
 func (r *hookRegistrar) ensureStream() error {
 	if err := sessionSupported(); err != nil {
 		return err
 	}
 
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+
+	quit, done, plan := r.planStream()
+	switch plan {
+	case planHealthy:
+		return nil
+	case planDead:
+		return errHookDisabled
+	case planRestart:
+		if err := r.teardown(quit, done); err != nil {
+			return err
+		}
+	}
+
+	r.startStream()
+	return nil
+}
+
+// planStream decides what ensureStream should do and, for a restart, CLAIMS
+// it: the retry is spent and the stream is marked not-running before the lock
+// is released, so nothing else can restart it concurrently. Returns the old
+// stream's channels for teardown.
+func (r *hookRegistrar) planStream() (quit, done chan struct{}, plan streamPlan) {
 	r.lifeMu.Lock()
 	defer r.lifeMu.Unlock()
 
 	switch {
 	case !r.running:
-		// First registration, or a restart after a completed teardown.
+		return nil, nil, planStart
 	case !r.disabled.Load():
-		return nil // healthy and already running
+		return nil, nil, planHealthy
 	case !r.retryArmed:
-		return errHookDisabled
-	default:
-		// Dead, and we are allowed one restart. Tear the old stream down and
-		// wait for its reader to finish before starting a new one, so there
-		// is never more than one reader alive.
-		r.retryArmed = false
-		done := r.readerDone
-		r.src.End()
-		if done != nil {
-			<-done
-		}
-		r.running = false
+		return nil, nil, planDead
 	}
 
-	r.disabled.Store(false)
-	done := make(chan struct{})
-	ch := r.src.Start()
-	r.readerDone = done
-	r.running = true
-	r.starts++
-	go r.read(ch, done)
+	r.retryArmed = false
+	r.running = false
+	quit, done = r.quit, r.readerDone
+	r.quit, r.readerDone = nil, nil
+	return quit, done, planRestart
+}
+
+// teardown stops the reader, then the stream. Called with startMu held and
+// lifeMu NOT held.
+//
+// The ORDER is the fix for a real deadlock. gohook's End() drains its channel
+// with `for len(ev) != 0 { <-ev }` and then closes it (darwin.go:268-272,
+// x11.go:142-146). If our reader were still ranging over that same channel it
+// would compete for those receives, and End() could take the last element's
+// length check and then block forever on a receive no producer will satisfy --
+// asyncon is already false by then. Mouse-move traffic keeps that buffer
+// non-empty, so the window is small but real, and the restart path is exactly
+// the macOS "user just granted Accessibility" recovery.
+//
+// Signalling our reader first and waiting for it to acknowledge means End()
+// drains against no competitor at all. On timeout we do NOT call End(): a
+// still-live reader is precisely the condition that makes it unsafe, and
+// leaking one blocked goroutine beats wedging the UI.
+func (r *hookRegistrar) teardown(quit chan struct{}, done <-chan struct{}) error {
+	if quit != nil {
+		close(quit)
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(readerStopTimeout):
+			return errStreamWedged
+		}
+	}
+	r.src.End()
 	return nil
 }
 
-// read pumps the OS event stream until it closes.
+// startStream opens a new stream and its reader. Called with startMu held.
+func (r *hookRegistrar) startStream() {
+	quit := make(chan struct{})
+	done := make(chan struct{})
+
+	r.disabled.Store(false)
+	ch := r.src.Start()
+
+	r.lifeMu.Lock()
+	r.quit, r.readerDone = quit, done
+	r.running = true
+	r.starts++
+	r.lifeMu.Unlock()
+
+	// Counted BEFORE the goroutine is scheduled: from here on a reader exists
+	// as far as teardown is concerned, even if it has not run its first
+	// instruction yet.
+	r.readersAlive.Add(1)
+	go r.read(ch, quit, done)
+}
+
+// aliveReaders reports how many reader goroutines are live. Tests assert it
+// is zero at the moment src.End() runs; see readersAlive.
+func (r *hookRegistrar) aliveReaders() int32 { return r.readersAlive.Load() }
+
+// Close stops the OS stream for good. It releases anything held first, so a
+// quit mid-transmission cannot leave the server believing we are still
+// talking.
+//
+// This is the closing bracket on "one stream per process". At process exit
+// the OS reclaims the tap regardless, so this is tidiness rather than a leak
+// fix -- but a lifecycle with a start and no stop is one somebody eventually
+// gets wrong, and it gives a test a way to prove the teardown path works.
+// Safe to call when nothing is running, and safe to call twice.
+func (r *hookRegistrar) Close() {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+
+	r.lifeMu.Lock()
+	quit, done := r.quit, r.readerDone
+	r.quit, r.readerDone = nil, nil
+	running := r.running
+	r.running = false
+	r.lifeMu.Unlock()
+
+	r.d.clear()
+	if running {
+		_ = r.teardown(quit, done)
+	}
+}
+
+// read pumps the OS event stream until it closes or quit is closed.
 //
 // This is the only place raw OS key data exists in this program, and it lives
 // for the duration of one loop iteration. See the file comment: nothing here
 // may log, buffer, or forward a key identity.
-func (r *hookRegistrar) read(ch <-chan hook.Event, done chan struct{}) {
+//
+// quit exists so a teardown never has to rely on the stream's channel being
+// closed to stop us -- see teardown for the deadlock that would otherwise be
+// reachable.
+func (r *hookRegistrar) read(ch <-chan hook.Event, quit <-chan struct{}, done chan struct{}) {
 	defer close(done)
+	defer r.readersAlive.Add(-1)
 
-	for e := range ch {
-		switch e.Kind {
-		case hook.HookEnabled:
-			r.disabled.Store(false)
-		case hook.HookDisabled:
-			// The backend could not install its listener, or lost it. Its
-			// loop goroutine has already returned; only a restart recovers.
-			r.disabled.Store(true)
-		default:
-			if ke, ok := toKeyEvent(e); ok {
-				r.d.handle(ke)
+	for {
+		select {
+		case <-quit:
+			// Deliberate teardown. The stream is going away, so no KeyUp can
+			// follow; release anything held rather than stranding it.
+			r.d.releaseHeld()
+			return
+
+		case e, ok := <-ch:
+			if !ok {
+				// The stream closed underneath us.
+				r.streamDied()
+				return
+			}
+
+			switch e.Kind {
+			case hook.HookEnabled:
+				r.disabled.Store(false)
+			case hook.HookDisabled:
+				// The backend could not install its listener, or lost it. Its
+				// loop goroutine has already returned; only a restart
+				// recovers. Keep reading: on darwin the channel is NOT closed
+				// on this path, and quit is what stops us.
+				r.streamDied()
+			default:
+				if ke, ok := toKeyEvent(e); ok {
+					r.d.handle(ke)
+				}
 			}
 		}
 	}
+}
 
-	// A closed channel means the stream is gone. Mark it dead so the next
-	// registration cycle restarts it rather than silently matching nothing.
+// streamDied marks the stream dead and releases anything currently held.
+//
+// The release is the important half. Marking it dead only fixes the NEXT
+// registration cycle; without the release, a hold binding latched at the
+// moment the stream died stays latched forever, because the KeyUp that would
+// have cleared it can no longer be delivered. Pressed was emitted, Released
+// never would be, and the microphone stays open.
+func (r *hookRegistrar) streamDied() {
 	r.disabled.Store(true)
+	r.d.releaseHeld()
 }
 
 // startCount reports how many times the OS stream has been started. Tests use

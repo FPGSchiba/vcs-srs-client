@@ -204,7 +204,13 @@ tasks:
           BUILD_FLAGS:
             ref: .BUILD_FLAGS
     cmds:
-      - go build -tags server,purego {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
+      # -tags goes LAST, after BUILD_FLAGS, on purpose. Go's flag parser keeps
+      # the FINAL occurrence of a repeated flag, so if BUILD_FLAGS ever grows
+      # its own -tags (the platform Taskfiles' BUILD_FLAGS already carry
+      # `production,purego`) an earlier -tags here would be silently dropped
+      # and `server` would vanish from the build with no error. Put anything
+      # extra in EXTRA_TAGS rather than adding a second -tags anywhere.
+      - go build {{.BUILD_FLAGS}} -tags server,purego{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -o {{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
     vars:
       BUILD_FLAGS: "{{.BUILD_FLAGS}}"
 

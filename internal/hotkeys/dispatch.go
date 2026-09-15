@@ -58,13 +58,33 @@ func newDispatcher() *dispatcher {
 	return &dispatcher{binds: map[string]boundAction{}, latched: map[string]bool{}}
 }
 
-// add registers one action. Replacing an existing action ID drops its latch,
-// because the new binding's key may be a different one entirely.
+// add registers one action, replacing any previous binding for that ID.
+//
+// A replaced binding that was HELD is released first, using the OLD binding's
+// handler and hold flag. The new binding's key may be a different one
+// entirely, so its latch cannot carry over -- and dropping the latch without
+// the Released would be a silently open microphone.
+//
+// Nothing reaches this with a latch today: Manager.registerLocked always calls
+// UnregisterAll first, and clear() drains. The release is here anyway so the
+// invariant "a latch never disappears without its Released" is enforced where
+// the latch is removed, rather than depending on a caller two layers up
+// continuing to behave.
 func (d *dispatcher) add(actionID string, b boundAction) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	var release []pending
+	if d.latched[actionID] {
+		if prev, ok := d.binds[actionID]; ok && prev.hold {
+			release = append(release, pending{id: actionID, h: prev.h})
+		}
+		delete(d.latched, actionID)
+	}
 	d.binds[actionID] = b
-	delete(d.latched, actionID)
+	d.mu.Unlock()
+
+	for _, r := range release {
+		r.h.Released(r.id)
+	}
 }
 
 // clear drops every registration and, crucially, RELEASES anything currently
@@ -75,6 +95,34 @@ func (d *dispatcher) clear() {
 	d.mu.Lock()
 	release := d.drainLatchedLocked()
 	d.binds = map[string]boundAction{}
+	d.mu.Unlock()
+
+	for _, r := range release {
+		r.h.Released(r.id)
+	}
+}
+
+// releaseHeld releases everything currently held but KEEPS the registrations.
+//
+// This is what the OS stream dying looks like from here. Once the stream is
+// gone no KeyUp can ever arrive, so a hold binding latched at that instant
+// would stay latched forever: Pressed was emitted, Released never would be,
+// and the microphone stays open with nothing able to close it. The
+// registrations themselves are still wanted -- the stream may be restarted --
+// so this deliberately does not empty binds the way clear() does.
+//
+// Idempotent: the latch set is drained, so a second call finds nothing and
+// fires nothing.
+//
+// It is also the only code-level closure available for a KeyUp that gohook
+// DROPPED. gohook's send() discards events when its 1024-slot buffer is full
+// (darwin.go:579-591, windows.go:666-678, x11.go:554-566) rather than stalling
+// the OS input path -- a reasonable trade for it, but a dropped KeyUp strands
+// a latch exactly like a dead stream does. That case self-heals on the next
+// press/release of the same key; this one cannot.
+func (d *dispatcher) releaseHeld() {
+	d.mu.Lock()
+	release := d.drainLatchedLocked()
 	d.mu.Unlock()
 
 	for _, r := range release {

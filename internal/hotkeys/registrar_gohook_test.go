@@ -26,9 +26,27 @@ type fakeSource struct {
 	ch     chan hook.Event
 	starts int
 	ends   int
+
+	// blockEnd, when non-nil, makes End() wait for it to be closed. Models a
+	// slow or wedged gohook teardown so a test can prove no lock is held
+	// across it.
+	blockEnd chan struct{}
+
+	// probe is sampled at the TOP of End(), before anything else happens, so
+	// a test can capture how many reader goroutines were alive at exactly the
+	// moment the real gohook End() would have started draining.
+	probe func() int32
+	alive []int32
+
+	// entered is closed the first time End() is reached. Without it a test
+	// that wants to observe the system WHILE End() is in flight races the
+	// goroutine driving the teardown and can take its measurement before the
+	// teardown has even begun -- which makes the test pass no matter what.
+	entered     chan struct{}
+	enteredOnce sync.Once
 }
 
-func newFakeSource() *fakeSource { return &fakeSource{} }
+func newFakeSource() *fakeSource { return &fakeSource{entered: make(chan struct{})} }
 
 func (f *fakeSource) Start() <-chan hook.Event {
 	f.mu.Lock()
@@ -39,6 +57,22 @@ func (f *fakeSource) Start() <-chan hook.Event {
 }
 
 func (f *fakeSource) End() {
+	f.enteredOnce.Do(func() { close(f.entered) })
+
+	f.mu.Lock()
+	probe, block := f.probe, f.blockEnd
+	f.mu.Unlock()
+
+	if probe != nil {
+		v := probe()
+		f.mu.Lock()
+		f.alive = append(f.alive, v)
+		f.mu.Unlock()
+	}
+	if block != nil {
+		<-block
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ends++
@@ -46,6 +80,21 @@ func (f *fakeSource) End() {
 		close(f.ch)
 		f.ch = nil
 	}
+}
+
+// readersAliveAtEnd returns the highest reader count observed at the start of
+// any End() call. Must be 0: gohook's End() drains the very channel the
+// reader receives from, so overlapping them is the I2 deadlock.
+func (f *fakeSource) readersAliveAtEnd() int32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var worst int32
+	for _, v := range f.alive {
+		if v > worst {
+			worst = v
+		}
+	}
+	return worst
 }
 
 func (f *fakeSource) current() chan hook.Event {
@@ -740,5 +789,366 @@ func assertNoGoroutineGrowth(t *testing.T, before int) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A dying stream must not strand a held hotkey (review finding I1)
+// ---------------------------------------------------------------------------
+
+// TestHookDisabledReleasesAHeldHotkey is a microphone-safety test.
+//
+// HookDisabled means the backend lost its listener and its loop goroutine has
+// already returned, so NO KeyUp can ever follow. A hold binding latched at
+// that instant would stay latched forever: Pressed was emitted, Released never
+// would be, and the mic stays open until some later Apply happens to clear it.
+func TestHookDisabledReleasesAHeldHotkey(t *testing.T) {
+	r, src, rec := newTestRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down")
+
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.flush(t)
+
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+	if held := r.d.heldCount(); held != 0 {
+		t.Errorf("%d actions still latched after the stream died, want 0", held)
+	}
+}
+
+// TestClosedStreamReleasesAHeldHotkey is the same hazard reached the other
+// way: the channel closing underneath us rather than an explicit
+// HookDisabled. Both paths must release.
+func TestClosedStreamReleasesAHeldHotkey(t *testing.T) {
+	r, src, rec := newTestRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down")
+
+	src.End() // the stream goes away with the key still down
+
+	waitFor(t, func() bool { return r.d.heldCount() == 0 })
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+}
+
+// TestDyingStreamKeepsRegistrations: releasing what is held must NOT discard
+// the bindings. The stream can be restarted, and the user's keybinds have not
+// changed -- only clear() (Suspend/Apply) empties the table.
+func TestDyingStreamKeepsRegistrations(t *testing.T) {
+	r, src, rec := newTestRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.flush(t)
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+
+	// Recover, and the binding must still be live without re-registering it.
+	r.UnregisterAll()
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	src.send(t, hook.Event{Kind: hook.HookEnabled})
+	src.send(t, down(t, "F1", 0))
+	src.send(t, up(t, "F1", 0))
+	src.flush(t)
+
+	rec.want(t, "global.ptt:down", "global.ptt:up", "global.ptt:down", "global.ptt:up")
+}
+
+// TestDyingStreamDoesNotReleasePressOnlyBindings: a press-only action has no
+// release semantics, so a dead stream must not invent one for it either.
+func TestDyingStreamDoesNotReleasePressOnlyBindings(t *testing.T) {
+	r, src, rec := newTestRegistrar(t)
+	mustRegister(t, r, "global.mute_toggle", "M", false, rec)
+
+	src.send(t, down(t, "M", 0))
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.flush(t)
+
+	rec.want(t, "global.mute_toggle:down")
+}
+
+// TestReleaseOnStreamDeathIsIdempotent: several HookDisabled events, or a
+// HookDisabled followed by the channel closing, must not produce a second
+// Released for the same press.
+func TestReleaseOnStreamDeathIsIdempotent(t *testing.T) {
+	r, src, rec := newTestRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.flush(t)
+	src.End()
+
+	waitFor(t, func() bool { return r.d.heldCount() == 0 })
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+}
+
+// ---------------------------------------------------------------------------
+// Teardown must not deadlock or hang the caller (review finding I2)
+// ---------------------------------------------------------------------------
+
+// TestRestartStopsTheReaderBeforeEndingTheStream pins the ORDER that makes the
+// restart path safe.
+//
+// gohook's End() drains its channel with `for len(ev) != 0 { <-ev }` and then
+// closes it. If our reader were still ranging over that same channel it would
+// compete for those receives, and End() could pass its length check and then
+// block forever on a receive no producer will satisfy. Signalling the reader
+// first and waiting for it to acknowledge means End() drains unopposed.
+func TestRestartStopsTheReaderBeforeEndingTheStream(t *testing.T) {
+	src := newFakeSource()
+	r := newHookRegistrar(src)
+	src.probe = r.aliveReaders
+	rec := &recorder{}
+	t.Cleanup(func() { src.End() })
+
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.flush(t)
+
+	r.UnregisterAll()
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	if got := src.readersAliveAtEnd(); got != 0 {
+		t.Errorf("End() ran with %d reader(s) still alive; it must be called only "+
+			"after the reader has acknowledged quit, or its drain can deadlock", got)
+	}
+}
+
+// TestTeardownDoesNotHoldTheLifecycleLock: a wedged teardown must not block
+// unrelated lifecycle reads. ensureStream runs on the goroutine servicing a
+// Wails call from the settings UI, so a lock held across End() is a frozen
+// window, not merely a slow one.
+func TestTeardownDoesNotHoldTheLifecycleLock(t *testing.T) {
+	src := newFakeSource()
+	release := make(chan struct{})
+	src.blockEnd = release
+	r := newHookRegistrar(src)
+	rec := &recorder{}
+
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.flush(t)
+	r.UnregisterAll()
+
+	// Drive a restart, whose End() is now stuck.
+	registered := make(chan struct{})
+	go func() {
+		defer close(registered)
+		c, _ := chord.Parse("F1")
+		_ = r.Register("global.ptt", c, true, rec)
+	}()
+
+	// Wait until End() is genuinely in flight. Probing before the teardown
+	// starts would find lifeMu free no matter how it is written, which is how
+	// the first version of this test passed against a deliberately broken
+	// implementation.
+	select {
+	case <-src.entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("src.End() was never reached; the restart did not happen")
+	}
+
+	// lifeMu must still be free while End() is blocked.
+	lockFree := make(chan struct{})
+	go func() {
+		defer close(lockFree)
+		_ = r.startCount()
+	}()
+
+	select {
+	case <-lockFree:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("a blocked src.End() also blocked startCount(): the teardown is " +
+			"holding lifeMu, which would freeze the settings UI")
+	}
+
+	close(release)
+	select {
+	case <-registered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Register did not return after End() unblocked")
+	}
+	src.End()
+}
+
+// TestWedgedReaderFailsInsteadOfHanging: if the reader does not acknowledge
+// quit, registration must report a failure rather than block the UI, and must
+// NOT start a second stream on top of the first.
+func TestWedgedReaderFailsInsteadOfHanging(t *testing.T) {
+	src := newFakeSource()
+	r := newHookRegistrar(src)
+	rec := &recorder{}
+	t.Cleanup(func() { src.End() })
+
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	src.send(t, hook.Event{Kind: hook.HookDisabled})
+	src.flush(t)
+
+	// Wedge the reader by hijacking its done channel: it will never close.
+	r.lifeMu.Lock()
+	r.readerDone = make(chan struct{})
+	r.lifeMu.Unlock()
+
+	r.UnregisterAll()
+	c, _ := chord.Parse("F1")
+
+	start := time.Now()
+	err := r.Register("global.ptt", c, true, rec)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrBackendUnavailable) {
+		t.Fatalf("Register over a wedged reader = %v, want ErrBackendUnavailable", err)
+	}
+	if elapsed > readerStopTimeout+2*time.Second {
+		t.Errorf("Register blocked for %v; the wait must be bounded", elapsed)
+	}
+	if got := src.endCount(); got != 0 {
+		t.Errorf("End() was called %d time(s) with the reader still alive; that is "+
+			"exactly the condition that makes its drain unsafe", got)
+	}
+	if got := r.startCount(); got != 1 {
+		t.Errorf("stream started %d times, want 1: a wedged teardown must not be "+
+			"followed by a second stream", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Close (review minor 5)
+// ---------------------------------------------------------------------------
+
+// TestCloseReleasesHeldAndStopsTheStream: quitting mid-transmission must not
+// leave Pressed unmatched, and the one-stream-per-process lifecycle must have
+// a closing bracket.
+func TestCloseReleasesHeldAndStopsTheStream(t *testing.T) {
+	src := newFakeSource()
+	r := newHookRegistrar(src)
+	rec := &recorder{}
+	before := runtime.NumGoroutine()
+
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down")
+
+	r.Close()
+
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+	if got := src.endCount(); got != 1 {
+		t.Errorf("End() called %d times on Close, want 1", got)
+	}
+	assertNoGoroutineGrowth(t, before)
+}
+
+// TestCloseIsIdempotentAndSafeWhenIdle: Close runs on a shutdown path, where
+// the cheapest bug is a panic on a stream that never started.
+func TestCloseIsIdempotentAndSafeWhenIdle(t *testing.T) {
+	src := newFakeSource()
+	r := newHookRegistrar(src)
+
+	r.Close() // never started
+	if got := src.endCount(); got != 0 {
+		t.Errorf("End() called %d times on a stream that never started, want 0", got)
+	}
+
+	rec := &recorder{}
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	r.Close()
+	r.Close()
+	if got := src.endCount(); got != 1 {
+		t.Errorf("End() called %d times across two Closes, want 1", got)
+	}
+}
+
+// TestManagerCloseReachesTheRegistrar wires the optional Closer seam: Manager
+// must release registrations AND shut the OS layer down, without Registrar
+// itself growing a third method that every fake would have to implement.
+func TestManagerCloseReachesTheRegistrar(t *testing.T) {
+	src := newFakeSource()
+	r := newHookRegistrar(src)
+	rec := &recorder{}
+	m := New(r, rec)
+
+	if err := m.Apply(map[string]Binding{"global.ptt": {mustChord(t, "F1"), true}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down")
+
+	m.Close()
+
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+	if got := src.endCount(); got != 1 {
+		t.Errorf("Manager.Close reached End() %d times, want 1", got)
+	}
+}
+
+// TestManagerCloseWorksWithAPlainRegistrar: the existing fakes implement only
+// the two-method Registrar, which is the whole reason Closer is optional.
+func TestManagerCloseWorksWithAPlainRegistrar(t *testing.T) {
+	f := newFake()
+	m := New(f, nopHandler{})
+	m.Apply(map[string]Binding{"a": {mustChord(t, "F1"), false}})
+
+	m.Close() // must not panic on a Registrar with no Close
+
+	if f.count() != 0 {
+		t.Error("Close should have released every registration")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Replacing a held binding (review minor 1)
+// ---------------------------------------------------------------------------
+
+// TestReplacingAHeldBindingReleasesIt: add() drops the latch because the new
+// binding's key may be a different one, and a latch that vanishes without its
+// Released is an open microphone. Unreachable through Manager today, which is
+// why the invariant belongs where the latch is removed.
+func TestReplacingAHeldBindingReleasesIt(t *testing.T) {
+	r, src, rec := newTestRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down")
+
+	// Re-register the SAME action on a different key, without UnregisterAll.
+	mustRegister(t, r, "global.ptt", "F2", true, rec)
+
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+	if held := r.d.heldCount(); held != 0 {
+		t.Errorf("%d actions still latched after rebinding, want 0", held)
+	}
+}
+
+// TestReplacingAnUnheldBindingReleasesNothing guards the other direction: the
+// release must be conditional on the latch, not on the replacement.
+func TestReplacingAnUnheldBindingReleasesNothing(t *testing.T) {
+	r, _, rec := newTestRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	mustRegister(t, r, "global.ptt", "F2", true, rec)
+	rec.want(t)
+}
+
+// waitFor polls until cond holds, for assertions driven by a goroutine rather
+// than by a synchronous send.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 2s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

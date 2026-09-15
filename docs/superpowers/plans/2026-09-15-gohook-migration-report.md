@@ -860,3 +860,209 @@ $ cd frontend && npx tsc --noEmit                    # clean
 $ npx vitest run                                     # 10 files, 57 tests passed
 $ npm run build                                      # built in 366ms
 ```
+
+---
+
+# Review round 2 — I1, I2 and five minors
+
+Commit `03fcf38`.
+
+## 14.1 I1 — a dying stream stranded a held latch
+
+**Confirmed and fixed.** `read()` handled `HookDisabled` and channel-close by setting
+`r.disabled` and nothing else. Neither drained `d.latched`, so a hold binding latched at that
+instant stayed latched forever: `HotkeyPressed` emitted, `HotkeyReleased` never, microphone
+open until some later `Apply` happened to clear it.
+
+New `dispatcher.releaseHeld()` — drains the latch set and issues `Released` for every held
+`hold` binding, but **keeps `binds`**. That distinction is the point: the registrations are
+still wanted (the stream may restart), only the latches are invalid. It shares
+`drainLatchedLocked` with `clear()`, so there is one drain implementation, and it is
+idempotent.
+
+Called from **four** places, which is every way a stream can stop being able to deliver a
+KeyUp:
+
+| path | where |
+| --- | --- |
+| `HookDisabled` | `streamDied()` |
+| channel closed underneath us | `streamDied()` |
+| deliberate teardown (restart) | `read()`'s `quit` branch |
+| `Close()` (shutdown) | via `d.clear()`, and again via the quit branch |
+
+**Upstream event drops — commented, as asked.** gohook's `send()` discards events when its
+1024-slot buffer is full rather than stalling the OS input path (`darwin.go:579-591`,
+`windows.go:666-678`, `x11.go:554-566`). A dropped `KeyUp` strands a latch identically. That
+case self-heals on the next press/release of the same key, unlike a dead stream; the note is
+on `releaseHeld` where someone reading the drain will find it.
+
+### The liveness watchdog: **not added**, and why
+
+The silent-X11-death path is real and I confirmed the reviewer's reading: on a RECORD
+data-connection loss `x11ReadLoop` returns on the `io.ReadFull` error and `x11Loop`
+(`x11.go:227`) returns **without** `HookDisabled` and **without** closing `ev`. Our reader
+blocks forever, `disabled` stays `false`, `ensureStream` reports healthy. The drain above does
+**not** cover it, because nothing calls it.
+
+I did not add a liveness watchdog, because **there is no liveness signal available at this
+layer that can distinguish "dead" from "idle."**
+
+- The only observable is event arrival, and gohook exposes nothing else — no connection
+  handle, no health call, no backend-state query.
+- "No events for N seconds" is not a death signal. A user who walks away from the machine
+  produces exactly the same silence. Mouse-move traffic makes silence *unlikely* while someone
+  is present, but "unlikely" is not a predicate you tear a working stream down on.
+- A false positive is expensive: it would drive the restart path, which is `End()` + `Start()`
+  on gohook's package-global channel — the machinery §14.2 exists to make safe. Spuriously
+  cycling a healthy stream to guard against a rare one is a net loss.
+
+A watchdog that is wrong in the common case to be right in the rare one is worse than the gap.
+
+**The right mitigation is different, and it is a product decision I did not take
+unilaterally.** The harm from a silently dead stream is not "hotkeys stop working" (annoying,
+visible, user-recoverable) — it is **the mic stays open**. That is closed by a *stale-latch*
+watchdog, not a liveness one: hard-release any `hold` binding latched longer than some bound.
+It is the spike's R12, it is library-independent, and it also covers the dropped-`KeyUp` case
+and a KeyUp missed while backgrounded.
+
+What stopped me implementing it is that its timeout **is** the product decision: too short and
+it truncates a legitimately long transmission mid-sentence, which is a new failure in the
+common path to fix a rare one. Picking that number needs someone who knows how long VCS users
+actually hold PTT. **Recommended as the follow-up, with the question named rather than
+guessed.** I would propose 120 s as a starting point — long enough that no real transmission
+hits it, short enough that a stranded mic is bounded — but that is a suggestion, not a
+decision I should make.
+
+The silent-death gap is now documented on `hookRegistrar` itself, pointing here.
+
+## 14.2 I2 — `ensureStream` could deadlock holding `lifeMu`
+
+**Confirmed and fixed, and the root cause is removed rather than bounded.**
+
+The reviewer's analysis is exactly right: `src.End()` ran under `lifeMu`, and gohook's `End()`
+drains with `for len(ev) != 0 { <-ev }` then closes (`darwin.go:268-272`, `x11.go:142-146`).
+Our reader was ranging over that same channel, competing for those receives. If the reader
+took the last buffered event between `End()`'s length check and its blocking receive, `End()`
+blocks forever — `asyncon` is already false, so no producer will ever unblock it — while
+holding `lifeMu`. Every later `Register` blocks, and `Register` runs on the goroutine
+servicing a Wails call from the settings UI, so that is a frozen window.
+
+Three changes, in order of how much they matter:
+
+1. **The reader now has its own `quit` channel**, and teardown is `close(quit)` → wait for the
+   reader to acknowledge → *then* `src.End()`. This **eliminates the race** rather than
+   narrowing it: by the time `End()` drains, there is no competing receiver at all. Previously
+   the only way to stop the reader was to close the channel `End()` itself was draining, which
+   is what forced the overlap.
+2. **Teardown runs with `lifeMu` released.** `ensureStream` is split into `planStream()`
+   (decides and *claims* the restart under the lock, in one atomic step) and `teardown()` /
+   `startStream()` (slow work, no `lifeMu`). A new `startMu` serialises the whole operation, so
+   releasing `lifeMu` mid-restart cannot let a concurrent registration start a second stream on
+   top of one being torn down. `lifeMu` is now held only across field reads and writes.
+3. **The reader wait is bounded** (`readerStopTimeout`, 2 s). On timeout `teardown` returns
+   `errStreamWedged` and — importantly — **does not call `End()`**, because a still-live reader
+   is precisely the condition that makes its drain unsafe. Registration fails, the UI shows the
+   banner, and one goroutine leaks. Degraded, not hung.
+
+`Close()` (§14.3) shares the same teardown, so there is one implementation of "stop this
+stream safely."
+
+**A new invariant is made checkable, not just asserted:** `readersAlive atomic.Int32`,
+incremented before the reader goroutine is scheduled and decremented on its return. The fake
+event source samples it at the top of `End()`, so a test can state outright *"`End()` must
+never run with a reader alive"* and fail if it does.
+
+## 14.3 Minors
+
+| # | item | what changed |
+| --- | --- | --- |
+| 1 | `add()` discarded a held binding's `Released` | Releases first, using the **previous** binding's handler and hold flag. The invariant now lives where the latch is removed instead of depending on `registerLocked` continuing to call `UnregisterAll` first. |
+| 2 | Wayland preflight false positive | `XDG_SESSION_TYPE=x11` short-circuits to OK and the `WAYLAND_DISPLAY` heuristic is skipped. Three test rows added (stale var, capitalised, and `x11` with no `DISPLAY` → still `ErrNoDisplay`). |
+| 3 | `SupportsRelease()` dead | Deleted. Re-grepped `.go`/`.ts`/`.tsx`: no callers. |
+| 4 | `build:server` tag clobber | `-tags` now goes **last**, after `{{.BUILD_FLAGS}}`. Go keeps the final occurrence, so `server` can no longer be silently dropped by a `-tags` arriving from `BUILD_FLAGS`. Comment says to use `EXTRA_TAGS` rather than a second `-tags`. |
+| 5 | no shutdown bracket | `Manager.Close()` + `hookRegistrar.Close()`, wired into `App.ServiceShutdown`. |
+
+On **minor 2**, the reasoning that makes this safe rather than a hole: logind sets
+`XDG_SESSION_TYPE` from the session it actually created, so a real Wayland session reads
+`wayland` and is caught by the first case whether or not XWayland is running. There is no
+configuration in which a Wayland session reports `x11`, so the XWayland trap is untouched.
+
+On **minor 5**, the seam: `Registrar` did **not** grow a third method — every fake in the
+suite implements the two-method interface, and widening it to express something only one
+implementation has would break them all. Instead there is an optional `Closer` that
+`Manager.Close()` type-asserts. `Manager.Close()` always runs `UnregisterAll` first, which is
+what releases a hotkey **held at the moment of quit** — Cmd+Q mid-transmission would otherwise
+emit `Pressed` with no matching `Released`. Verified both ways:
+`TestManagerCloseReachesTheRegistrar` and `TestManagerCloseWorksWithAPlainRegistrar`.
+
+## 14.4 Not touched, as instructed
+
+Bare-key modifier semantics (`dispatch.go`) — a no-modifier chord requiring no modifiers held.
+Left exactly as-is pending the product decision.
+
+## 14.5 Load-bearing verification
+
+14 new tests. Every fix broken deliberately, suite run, reverted:
+
+| # | break | caught by |
+| --- | --- | --- |
+| I1-a | `streamDied()` stops draining (the literal pre-fix code) | `TestHookDisabledReleasesAHeldHotkey`, `…ClosedStreamReleases…`, `…DyingStreamKeepsRegistrations`, `…ReleaseOnStreamDeathIsIdempotent` |
+| I1-b | `releaseHeld()` becomes a no-op | same four |
+| I2-a | `End()` called **before** stopping the reader (the deadlock order) | `TestRestartStopsTheReaderBeforeEndingTheStream` (*"End() ran with 1 reader(s) still alive"*), `TestWedgedReaderFailsInsteadOfHanging` |
+| I2-b | teardown put back **under `lifeMu`** | `TestTeardownDoesNotHoldTheLifecycleLock` |
+| I2-c | reader wait unbounded (`<-done`) | whole package times out at 60 s instead of failing |
+| M1 | `add()` drops the latch without releasing | `TestReplacingAHeldBindingReleasesIt` |
+| M2 | `x11` short-circuit removed | `TestLinuxSessionCheck` (both stale-`WAYLAND_DISPLAY` rows) |
+| M5 | `Manager.Close` stops reaching `Closer` | `TestManagerCloseReachesTheRegistrar` |
+| — | `Close()` releases nothing (**both** paths removed) | `TestCloseReleasesHeldAndStopsTheStream` |
+
+### ⚠️ A third hollow test, caught and fixed
+
+**`TestTeardownDoesNotHoldTheLifecycleLock` passed against the I2-b break on its first
+version.** It raced: the goroutine probing `lifeMu` could finish before the goroutine driving
+the restart had even reached `End()`, so it measured a lock that was free for a reason that had
+nothing to do with the code under test. It would have passed no matter how `teardown` was
+written.
+
+Fixed by adding an `entered` channel to the fake source, closed the first time `End()` is
+reached. The test now blocks until the teardown is genuinely in flight before probing. It then
+fails against the I2-b break with *"a blocked src.End() also blocked startCount()"*, as shown
+above.
+
+That is three hollow tests this round (`TestKeyHoldEventsAreIgnored`,
+`TestNoCgoDarwinStillOffersTheSettingsPane`, this one), all caught by breaking the
+implementation rather than by reading the test.
+
+One test deliberately **kept** despite surviving a single-path break: removing `d.clear()`
+from `Close()` alone does not fail `TestCloseReleasesHeldAndStopsTheStream`, because the
+reader's `quit` branch also releases and `Close()` waits for the reader before returning. That
+is real defence in depth, not a hollow assertion — removing **both** paths fails the test, as
+recorded above.
+
+## 14.6 Verification
+
+```
+$ gofmt -l .                                         # (excluding node_modules) — empty
+$ go vet -tags purego ./...                          # clean
+$ GOOS=darwin  CGO_ENABLED=0 go vet -tags purego ./internal/hotkeys/    # OK
+$ GOOS=linux   CGO_ENABLED=0 go vet -tags purego ./internal/hotkeys/    # OK
+$ GOOS=windows CGO_ENABLED=0 go vet -tags purego ./internal/hotkeys/    # OK
+
+$ go test -tags purego -race -count=1 ./...
+ok  internal/app 7.133s     ok  internal/auth 2.192s     ok  internal/chord 3.151s
+ok  internal/config 2.634s  ok  internal/control 1.488s  ok  internal/events 3.776s
+ok  internal/hotkeys 4.362s ok  internal/keybinds 2.890s ok  internal/session 5.549s
+ok  internal/state 3.511s   ok  internal/windowstate 2.906s  ok  pkg/logger 2.469s
+
+303 passing Go tests across 12 packages (was 286).
+internal/hotkeys: 63 (darwin+cgo) / 64 (darwin CGO_ENABLED=0).
+internal/hotkeys coverage: 91.3% (was 88.5%).
+
+$ go build -tags purego -ldflags="-w -s" -o … .      # 15,289,346 bytes, links
+$ cd frontend && npx tsc --noEmit                     # clean
+$ npx vitest run                                      # 10 files, 57 tests passed
+$ npm run build                                       # built in 374ms
+```
+
+All of `hotkeys_test.go`'s original 328 lines still pass unmodified, through both the
+lifecycle rewrite and the new `Closer` seam.

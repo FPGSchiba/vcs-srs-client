@@ -158,6 +158,14 @@ func (a *App) ServiceShutdown() error {
 	// into the hotkey library and emit a Wails event after teardown. Bounded,
 	// so a poll blocked behind an in-flight keybind write cannot hang quit.
 	a.stopPermissionPoll(shutdownPollStopTimeout)
+	// Then shut the OS key listener down. The stream is process-global and
+	// outlives every rebind (see internal/hotkeys/registrar_gohook.go), so
+	// this is its one closing bracket. It also releases a hotkey still being
+	// HELD at quit: someone hitting Cmd+Q mid-transmission would otherwise
+	// have Pressed emitted with no Released to match it.
+	if a.settings != nil && a.settings.hk != nil {
+		a.settings.hk.Close()
+	}
 	if a.sess != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownDisconnectTimeout)
 		defer cancel()

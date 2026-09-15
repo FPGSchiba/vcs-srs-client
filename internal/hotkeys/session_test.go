@@ -58,6 +58,30 @@ func TestLinuxSessionCheck(t *testing.T) {
 			sessionType: "tty", displa: "",
 			want: ErrNoDisplay,
 		},
+		{
+			// The false positive the WAYLAND_DISPLAY heuristic has on its own.
+			// systemd's user-environment import carries WAYLAND_DISPLAY across
+			// sessions, nested compositors set it, and some Flatpak/snap
+			// wrappers export it unconditionally. Refusing here would cost a
+			// real X11 user every hotkey and tell them to log in to X11 --
+			// which is what they did. XDG_SESSION_TYPE is authoritative and
+			// wins.
+			name:        "X11 session carrying a stale WAYLAND_DISPLAY",
+			sessionType: "x11", wayDisplay: "wayland-0", displa: ":0",
+			want: nil,
+		},
+		{
+			name:        "X11 session type, capitalised, stale WAYLAND_DISPLAY",
+			sessionType: "X11", wayDisplay: "wayland-1", displa: ":1",
+			want: nil,
+		},
+		{
+			// XDG_SESSION_TYPE being authoritative must not excuse a missing
+			// DISPLAY -- there would be nothing for XRecord to attach to.
+			name:        "X11 session type but no DISPLAY",
+			sessionType: "x11", wayDisplay: "", displa: "",
+			want: ErrNoDisplay,
+		},
 	}
 
 	for _, c := range cases {
