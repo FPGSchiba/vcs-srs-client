@@ -74,6 +74,14 @@ export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
     setListening(true);
   };
 
+  // `stopListening` is recreated every render; mirror it in a ref (same
+  // pattern as `onCaptureRef`/`onCancelRef`) so the empty-deps unmount
+  // effect below can call the latest closure without adding it to that
+  // effect's deps -- which would re-run the cleanup on every render and
+  // fire `onCancel` spuriously mid-capture.
+  const stopListeningRef = useRef(stopListening);
+  stopListeningRef.current = stopListening;
+
   useEffect(() => {
     if (!listening) return;
 
@@ -110,11 +118,12 @@ export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
   }, [listening]);
 
   // Runs only on true unmount (empty deps): if the chip is torn down mid
-  // capture, tell the caller so it can un-suspend the backend's hotkeys.
+  // capture, route it through the same funnel as every other exit so it
+  // can never diverge from the "cancel means stopListening(true)" contract.
   useEffect(() => {
     return () => {
       if (listeningRef.current) {
-        onCancelRef.current?.();
+        stopListeningRef.current(true);
       }
     };
   }, []);
