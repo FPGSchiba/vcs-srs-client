@@ -4,6 +4,7 @@ import { on, EV } from "../../../../shared/api/events";
 import { useSettings } from "../../../../shared/store/settings";
 import type { Settings, Keybind, HotkeyState } from "../../../../shared/store/settings";
 import { General } from "./sections/General";
+import { Keybinds } from "./sections/Keybinds";
 import { Deferred } from "./sections/Deferred";
 
 interface SettingsSection {
@@ -27,14 +28,7 @@ function renderSection(key: string) {
     case "general":
       return <General />;
     case "keybinds":
-      // Task 11 swaps this for the real Keybinds section.
-      return (
-        <Deferred
-          title="KEYBINDS"
-          phase={3}
-          items={["Global PTT & mute", "Channel hotkeys", "Per-radio bindings", "Quick-status hotkeys"]}
-        />
-      );
+      return <Keybinds />;
     case "audio":
       return <Deferred phase={4} items={["Device selection", "AGC", "Noise suppression", "VU metering"]} />;
     case "effects":
@@ -64,8 +58,9 @@ function renderSection(key: string) {
  * (no router this phase). On mount it hydrates the settings store from a
  * one-shot fetch and subscribes to the settings/keybinds/hotkeys events,
  * unsubscribing on unmount so re-opening this screen never accumulates
- * duplicate handlers. Only General renders live controls; the remaining
- * sections render an honest `Deferred` stub until their subsystems land.
+ * duplicate handlers. General and Keybinds render live controls; the
+ * remaining sections render an honest `Deferred` stub until their
+ * subsystems land.
  */
 export function SettingsScreen() {
   const [section, setSection] = useState("general");
