@@ -438,7 +438,7 @@ Tracked in [`docs/PROTO_GAPS.md`](../../PROTO_GAPS.md). Summary:
 
 | # | Risk | Likelihood | Mitigation |
 |---|---|---|---|
-| R1 | Wails v3 still pre-stable; API churn breaks builds mid-development | M | Pin v3 version in `go.mod`; keep windowing/binding adapter (`internal/app/windows.go`) thin; run `wails doctor` in CI |
+| R1 | ~~Wails v3 pre-stable; API churn breaks builds~~ **RETIRED 2026-09-15** | — | Upgraded to `v3.0.0-beta.22`, which ships a stable desktop API and an explicit compatibility promise. Version stays pinned in `go.mod` and both CI workflows; the thin windowing adapter (`internal/app/windows.go`) is kept regardless |
 | R2 | UDP voice protocol unknown — Phase 5 blocked | H | Phase 1 – 4 don't touch voice; `internal/voice` ships as interface-only; spec defers Phase 5 until user provides server-side reference |
 | R3 | malgo native deps complicate cross-platform builds | M | Add a CI job that compiles the audio package per platform in Phase 3 (one phase before audio lands) to surface toolchain issues early |
 | R4 | Session token persisted to disk without OS-keychain protection in v1 | M | Document trade-off; `os.Chmod(0600)` on Unix; ticket a follow-up to use a keychain library in Phase 7 |

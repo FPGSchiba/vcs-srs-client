@@ -80,7 +80,7 @@ jobs:
         run: buf generate
 
       - name: Install wails3 CLI
-        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha.96
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
 
       # frontend/src/shared/api/client.ts imports the generated TS bindings
       # (gitignored), so they must be generated before tsc/vite build.
