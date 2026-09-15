@@ -40,10 +40,13 @@ const BARE_MODIFIER_CODES = new Set([
  * super}` chord to the caller.
  *
  * While listening, the backend suspends all OS hotkey registrations, so
- * every path out of the listening state -- capture, Escape, or unmounting
- * mid-capture -- must resolve it: capture via `onCapture`, everything else
- * via `onCancel`. Losing that guarantee leaves every global hotkey dead
- * until a 10s server-side timeout rescues it.
+ * every path out of the listening state -- successful capture, Escape,
+ * re-clicking the chip, the window losing focus, or unmounting mid-capture
+ * -- must resolve it: capture via `onCapture`, every other exit via
+ * `onCancel`. Losing that guarantee leaves every global hotkey dead until a
+ * 10s server-side timeout rescues it. All of those exits funnel through
+ * `stopListening` below so a future new exit path can't forget to call
+ * `onCancel`.
  */
 export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
   const [listening, setListening] = useState(false);
@@ -56,9 +59,19 @@ export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
   onCaptureRef.current = onCapture;
   onCancelRef.current = onCancel;
 
-  const setListeningState = (value: boolean) => {
-    listeningRef.current = value;
-    setListening(value);
+  // The single place every "stop listening" path runs through. `cancelled`
+  // is false only for a successful capture (the caller already invoked
+  // `onCapture` itself) -- every other exit passes `true` so `onCancel`
+  // fires and the backend un-suspends its hotkeys.
+  const stopListening = (cancelled: boolean) => {
+    listeningRef.current = false;
+    setListening(false);
+    if (cancelled) onCancelRef.current?.();
+  };
+
+  const startListening = () => {
+    listeningRef.current = true;
+    setListening(true);
   };
 
   useEffect(() => {
@@ -68,14 +81,12 @@ export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
       e.preventDefault();
 
       if (e.code === "Escape") {
-        setListeningState(false);
-        onCancelRef.current?.();
+        stopListening(true);
         return;
       }
 
       if (BARE_MODIFIER_CODES.has(e.code)) return;
 
-      setListeningState(false);
       onCaptureRef.current({
         code: e.code,
         ctrl: e.ctrlKey,
@@ -83,10 +94,19 @@ export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
         shift: e.shiftKey,
         super: e.metaKey,
       });
+      stopListening(false);
     };
 
+    // Alt-tabbing away mid-capture must not leave the backend suspended
+    // forever -- treat losing window focus the same as Escape.
+    const handleBlur = () => stopListening(true);
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("blur", handleBlur);
+    };
   }, [listening]);
 
   // Runs only on true unmount (empty deps): if the chip is torn down mid
@@ -99,7 +119,16 @@ export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
     };
   }, []);
 
-  const toggleListening = () => setListeningState(!listeningRef.current);
+  // Re-clicking a listening chip is itself a cancel: the user backed out
+  // without pressing a key, and the backend must be told the same as on
+  // Escape or blur.
+  const toggleListening = () => {
+    if (listeningRef.current) {
+      stopListening(true);
+    } else {
+      startListening();
+    }
+  };
 
   if (listening) {
     return (

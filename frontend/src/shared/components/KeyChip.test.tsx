@@ -65,4 +65,31 @@ describe("KeyChip", () => {
     expect(onCancel).toHaveBeenCalled();
     expect(onCapture).not.toHaveBeenCalled();
   });
+
+  // Design spec §7 cancel path: re-clicking a listening chip backs out of
+  // the capture without pressing a key. Same "backend stays suspended"
+  // failure mode as an uncancelled unmount if this doesn't fire onCancel.
+  it("cancels when the chip is clicked again while listening", () => {
+    const onCapture = vi.fn();
+    const onCancel = vi.fn();
+    render(<KeyChip binding="" onCapture={onCapture} onCancel={onCancel} />);
+    fireEvent.click(screen.getByText("—"));
+    fireEvent.click(screen.getByText("PRESS…"));
+    expect(onCancel).toHaveBeenCalled();
+    expect(onCapture).not.toHaveBeenCalled();
+    expect(screen.queryByText("PRESS…")).not.toBeInTheDocument();
+  });
+
+  // Design spec §7 cancel path: alt-tabbing away mid-capture must not leave
+  // the backend suspended until the 10s timeout.
+  it("cancels when the window loses focus while listening", () => {
+    const onCapture = vi.fn();
+    const onCancel = vi.fn();
+    render(<KeyChip binding="" onCapture={onCapture} onCancel={onCancel} />);
+    fireEvent.click(screen.getByText("—"));
+    fireEvent.blur(window);
+    expect(onCancel).toHaveBeenCalled();
+    expect(onCapture).not.toHaveBeenCalled();
+    expect(screen.queryByText("PRESS…")).not.toBeInTheDocument();
+  });
 });
