@@ -99,7 +99,7 @@ func main() {
 	// Named so the tray (internal/app/tray.go) can resolve it back out of the
 	// Wails window manager for show/hide.
 	mainWindow := wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:             "main",
+		Name:             app.MainWindowName,
 		Title:            "VCS Client",
 		Width:            1440,
 		Height:           900,

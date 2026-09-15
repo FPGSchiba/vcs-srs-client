@@ -6,9 +6,12 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-// mainWindowName is the Name given to the main window's WebviewWindowOptions
-// in main.go, so it can be resolved back out of the Wails window manager.
-const mainWindowName = "main"
+// MainWindowName is the Wails window name for the main client window. The
+// tray resolves the window by this name, so main.go and internal/app must
+// agree; a mismatch degrades show/hide to a silent no-op -- GetByName
+// returns ok == false and showMainWindow/toggleMainWindow/the close-to-tray
+// hide path all quietly do nothing, with no error surfaced to the user.
+const MainWindowName = "main"
 
 // SetupTray creates the system tray icon and menu. Call after the main window
 // exists. If tray creation fails, a.tray is left nil so TrayAvailable
@@ -48,7 +51,7 @@ func (a *App) TrayAvailable() bool {
 // showMainWindow reveals and focuses the main window (tray menu -> Show VCS
 // / Settings, and after a hotkey or dock-icon reactivation).
 func (a *App) showMainWindow() {
-	win, ok := a.wailsApp.Window.GetByName(mainWindowName)
+	win, ok := a.wailsApp.Window.GetByName(MainWindowName)
 	if !ok {
 		return
 	}
@@ -59,7 +62,7 @@ func (a *App) showMainWindow() {
 // toggleMainWindow shows the main window if it is hidden, or hides it if it
 // is currently visible. Wired to the tray icon's click handler.
 func (a *App) toggleMainWindow() {
-	win, ok := a.wailsApp.Window.GetByName(mainWindowName)
+	win, ok := a.wailsApp.Window.GetByName(MainWindowName)
 	if !ok {
 		return
 	}
