@@ -28,7 +28,7 @@ jobs:
       - name: Install Linux GUI deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev
 
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
@@ -71,7 +71,7 @@ jobs:
       - name: Install Linux GUI deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev
 
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2

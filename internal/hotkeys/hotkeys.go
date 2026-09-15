@@ -38,11 +38,12 @@ type Manager struct {
 	desired   map[string]Binding
 	suspended bool
 	lastErr   error
+	failed    map[string]error
 }
 
 // New constructs a Manager over a Registrar.
 func New(r Registrar, h Handler) *Manager {
-	return &Manager{reg: r, handler: h, desired: map[string]Binding{}}
+	return &Manager{reg: r, handler: h, desired: map[string]Binding{}, failed: map[string]error{}}
 }
 
 // Apply replaces the desired binding set and re-registers. While suspended it
@@ -64,6 +65,7 @@ func (m *Manager) Apply(binds map[string]Binding) error {
 func (m *Manager) registerLocked() error {
 	m.reg.UnregisterAll()
 	m.lastErr = nil
+	m.failed = map[string]error{}
 	var firstErr error
 	for id, b := range m.desired {
 		if b.Chord.IsZero() {
@@ -71,6 +73,7 @@ func (m *Manager) registerLocked() error {
 		}
 		if err := m.reg.Register(id, b.Chord, b.Hold, m.handler); err != nil {
 			wrapped := fmt.Errorf("register %s (%s): %w", id, b.Chord, err)
+			m.failed[id] = wrapped
 			if firstErr == nil {
 				firstErr = wrapped
 			}
@@ -89,6 +92,7 @@ func (m *Manager) Suspend() {
 		return
 	}
 	m.suspended = true
+	m.failed = map[string]error{}
 	m.reg.UnregisterAll()
 }
 
@@ -115,4 +119,18 @@ func (m *Manager) LastError() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastErr
+}
+
+// Failed returns the reason each action's binding could not be registered,
+// keyed by action ID. Empty when everything registered cleanly. Callers use
+// it to tell the user WHICH keybind did not take effect -- chord accepts keys
+// the OS layer cannot register, so a silent failure is otherwise invisible.
+func (m *Manager) Failed() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]string, len(m.failed))
+	for id, err := range m.failed {
+		out[id] = err.Error()
+	}
+	return out
 }
