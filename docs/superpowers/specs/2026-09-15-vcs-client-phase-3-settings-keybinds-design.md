@@ -258,8 +258,17 @@ this sequence must be exact:
    emit `keybinds:changed`
 4. `EndCapture()` → `hotkeys.Apply(current)` re-registers
 
-`EndCapture` must also fire on every cancel path: Escape, click-away, window
-blur, component unmount. **Escape cancels capture; it does not bind Escape.**
+`EndCapture` must also fire on every cancel path. **Escape cancels capture; it
+does not bind Escape.** Where each path is handled:
+
+| Path | Handled in | Note |
+|---|---|---|
+| Escape | `KeyChip` | |
+| Component unmount while listening | `KeyChip` | |
+| **Re-clicking the chip to stop listening** | `KeyChip` | Not in the original list; found during implementation. Same hole as unmount |
+| Window blur (alt-tab away mid-capture) | `KeyChip` | |
+| **Starting a capture on a different row** | `Keybinds` section | A single-capture invariant: only one chip may listen at a time. Without it two chips both capture the next keypress |
+| Click on neutral page area | *not handled* | Deliberate. Escape, blur, re-click and the 10s backend timeout all cover it, and a chip stuck showing `PRESS…` is visible to the user. A document-wide mousedown handler was judged not worth the complexity for the remaining sliver |
 
 **Safety net:** if the frontend dies mid-capture, hotkeys would stay suspended
 forever — an invisible failure that is maddening to diagnose. `BeginCapture`

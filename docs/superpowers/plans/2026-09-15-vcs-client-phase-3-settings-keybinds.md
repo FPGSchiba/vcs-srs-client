@@ -2702,6 +2702,7 @@ Requirements, all pinned by the tests:
 - Reads `keybinds` from the store and groups by `category` into four `Panel`s titled `GLOBAL`, `CHANNEL HOTKEYS`, `PER-RADIO BINDINGS`, `QUICK-STATUS HOTKEYS`. A group with no rows is not rendered.
 - Per-radio rows render in a `.tbl` table matching the prototype (Radio | PTT | Select | UNBIND); the other groups render as rows with a `KeyChip` and an UNBIND button.
 - Clicking a chip calls `api.beginCapture()` first, then lets `KeyChip` listen.
+- **Single-capture invariant:** only one chip may be listening at a time. The section tracks which `action_id` is capturing; starting a capture on another row must cancel the first (fire its `onCancel` path) before beginning the new one. Without this, two chips both receive the next keydown and both call `setKeybind` — the user presses one key and two bindings change.
 - On capture: `api.setKeybind(actionID, capture)` → then `api.endCapture()` in a `finally` block so **the backend re-arms even if the call throws**.
 - On cancel (Escape/blur/unmount): `api.endCapture()`.
 - If the result carries `stolen`, render an inline `.cap` warning in `var(--ac-warn)`: `⚠ {chord} taken from {label}`. Clear it on the next capture.
