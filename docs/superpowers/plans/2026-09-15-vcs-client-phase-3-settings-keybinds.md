@@ -1752,13 +1752,42 @@ R11: golang.design/x/hotkey key-release support = <RECORD THE ANSWER FROM STEP 1
 
 **Interfaces:**
 - Consumes: `keybinds.Store`, `hotkeys.Manager`, `config.Config`, `chord.FromCode`, `state.Store`.
-- Produces (the frontend-facing surface):
+- Produces (the frontend-facing surface). **JSON tags are snake_case and are load-bearing** — Tasks 9/10/11 consume exactly these names, and this matches the existing convention in `dto.go` (`is_intercom`, `unit_id`, `self_guid`). Write them verbatim:
 ```go
-type SettingsDTO struct { StartMinimized, MinimizeToTray, ShowTransmitterName, PlayConnectionSounds, RadioSwitchAsPTT bool }
-type CaptureDTO struct { Code string; Ctrl, Alt, Shift, Super bool }
-type KeybindDTO struct { ActionID, Label, Desc, Category, Kind, Chord string }
-type StolenDTO struct { ActionID, Label, Chord string }
-type SetKeybindResult struct { Stolen *StolenDTO }
+type SettingsDTO struct {
+    StartMinimized       bool `json:"start_minimized"`
+    MinimizeToTray       bool `json:"minimize_to_tray"`
+    ShowTransmitterName  bool `json:"show_transmitter_name"`
+    PlayConnectionSounds bool `json:"play_connection_sounds"`
+    RadioSwitchAsPTT     bool `json:"radio_switch_as_ptt"`
+}
+type CaptureDTO struct {
+    Code  string `json:"code"`
+    Ctrl  bool   `json:"ctrl"`
+    Alt   bool   `json:"alt"`
+    Shift bool   `json:"shift"`
+    Super bool   `json:"super"`
+}
+type KeybindDTO struct {
+    ActionID string `json:"action_id"`
+    Label    string `json:"label"`
+    Desc     string `json:"desc"`
+    Category string `json:"category"` // "global" | "channel" | "per_radio" | "status"
+    Kind     string `json:"kind"`     // "hold" | "press"
+    Chord    string `json:"chord"`    // canonical form, "" when unbound
+}
+type StolenDTO struct {
+    ActionID string `json:"action_id"`
+    Label    string `json:"label"`
+    Chord    string `json:"chord"`
+}
+type SetKeybindResult struct {
+    Stolen *StolenDTO `json:"stolen"` // nil when there was no conflict
+}
+type HotkeyStateDTO struct {
+    Registered bool   `json:"registered"`
+    Error      string `json:"error"`
+}
 func (a *App) GetSettings() SettingsDTO
 func (a *App) SetSettings(s SettingsDTO) error
 func (a *App) GetKeybinds() []KeybindDTO
@@ -1830,6 +1859,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
@@ -1848,8 +1878,11 @@ type countingRegistrar struct {
 	unregisters int
 }
 
-func (c *countingRegistrar) Register(string, chordT, bool, hotkeys.Handler) error { c.registers++; return nil }
-func (c *countingRegistrar) UnregisterAll()                                       { c.unregisters++ }
+func (c *countingRegistrar) Register(string, chord.Chord, bool, hotkeys.Handler) error {
+	c.registers++
+	return nil
+}
+func (c *countingRegistrar) UnregisterAll() { c.unregisters++ }
 
 // newTestApp wires an App with in-memory settings deps and no Wails.
 func newTestApp(t *testing.T) (*App, *recordingEmitter, *countingRegistrar) {
@@ -2013,8 +2046,6 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 ```
-
-Note: the test file references `chordT` in `countingRegistrar.Register` — replace that with `chord.Chord` and import `github.com/FPGSchiba/vcs-srs-client/internal/chord`.
 
 - [ ] **Step 3: Run to verify it fails**
 
