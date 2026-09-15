@@ -25,6 +25,37 @@ type Store struct {
 	settings *srspb.ServerSettings
 	selfGUID string
 	self     *srspb.ClientInfo
+
+	// radioObservers are notified after any mutation that can change which
+	// radios the local client owns. See OnRadiosChanged.
+	radioObservers []func()
+}
+
+// OnRadiosChanged registers fn to run after any mutation that can change the
+// local client's radio set: SetRadios, RemoveClient, SetSelf and ClearSelf.
+// It exists so derived state that is a function of the radios -- the
+// per-radio keybind actions -- can be rebuilt when they arrive, which happens
+// long after startup (SyncClient at connect, then the update stream).
+//
+// Observers run OUTSIDE the store lock, so an observer is free to call back
+// into Snapshot. They run synchronously on the mutating goroutine, so an
+// observer must not block.
+func (s *Store) OnRadiosChanged(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.radioObservers = append(s.radioObservers, fn)
+}
+
+// notifyRadiosChanged calls every observer. MUST be called with the lock
+// released: observers read the store back.
+func (s *Store) notifyRadiosChanged() {
+	s.mu.RLock()
+	observers := make([]func(), len(s.radioObservers))
+	copy(observers, s.radioObservers)
+	s.mu.RUnlock()
+	for _, fn := range observers {
+		fn()
+	}
 }
 
 // New constructs an empty Store.
@@ -45,9 +76,10 @@ func (s *Store) UpdateClient(guid string, info *srspb.ClientInfo) {
 // RemoveClient drops a client (and its radios) from the store.
 func (s *Store) RemoveClient(guid string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.clients, guid)
 	delete(s.radios, guid)
+	s.mu.Unlock()
+	s.notifyRadiosChanged()
 }
 
 // Client returns the client info for guid, or false if absent.
@@ -61,8 +93,9 @@ func (s *Store) Client(guid string) (*srspb.ClientInfo, bool) {
 // SetRadios replaces the radio info for a client.
 func (s *Store) SetRadios(guid string, info *srspb.RadioInfo) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.radios[guid] = info
+	s.mu.Unlock()
+	s.notifyRadiosChanged()
 }
 
 // Radios returns the radio info for guid, or false if absent.
@@ -74,19 +107,25 @@ func (s *Store) Radios(guid string) (*srspb.RadioInfo, bool) {
 }
 
 // SetSelf records the local client's own guid and info (set at connect).
+// Notifies radio observers: until the local GUID is known, radios already in
+// the store cannot be attributed to the local client -- Connect calls
+// SyncClient (which fills radios) BEFORE SetSelf, so this is the point at
+// which the local radio set first becomes knowable.
 func (s *Store) SetSelf(guid string, info *srspb.ClientInfo) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.selfGUID = guid
 	s.self = info
+	s.mu.Unlock()
+	s.notifyRadiosChanged()
 }
 
 // ClearSelf clears the local client identity (on disconnect).
 func (s *Store) ClearSelf() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.selfGUID = ""
 	s.self = nil
+	s.mu.Unlock()
+	s.notifyRadiosChanged()
 }
 
 // SetSettings overwrites the server settings.

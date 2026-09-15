@@ -3,6 +3,7 @@ package state_test
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -89,5 +90,56 @@ func TestStore_SetSelfAppearsInSnapshot(t *testing.T) {
 	s.ClearSelf()
 	if snap2 := s.Snapshot(); snap2.SelfGUID != "" || snap2.Self != nil {
 		t.Fatalf("expected self cleared, got guid=%q self=%+v", snap2.SelfGUID, snap2.Self)
+	}
+}
+
+// TestStore_OnRadiosChangedFiresForEveryRadioMutation pins the observer
+// contract the per-radio keybind refresh depends on: the local radio set
+// becomes knowable across several distinct mutations (SyncClient fills radios
+// BEFORE SetSelf records which GUID is ours), so every one of them must
+// notify.
+func TestStore_OnRadiosChangedFiresForEveryRadioMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*state.Store)
+	}{
+		{"SetRadios", func(s *state.Store) { s.SetRadios("g", &srspb.RadioInfo{}) }},
+		{"SetSelf", func(s *state.Store) { s.SetSelf("g", &srspb.ClientInfo{}) }},
+		{"ClearSelf", func(s *state.Store) { s.ClearSelf() }},
+		{"RemoveClient", func(s *state.Store) { s.RemoveClient("g") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := state.New()
+			calls := 0
+			s.OnRadiosChanged(func() { calls++ })
+			tt.mutate(s)
+			if calls != 1 {
+				t.Errorf("%s notified %d observers, want 1", tt.name, calls)
+			}
+		})
+	}
+}
+
+// TestStore_ObserverCanReadTheStore is the deadlock guard: observers run with
+// the store lock RELEASED, so an observer is free to call Snapshot -- which is
+// exactly what the per-radio keybind refresh does.
+func TestStore_ObserverCanReadTheStore(t *testing.T) {
+	s := state.New()
+	var seen int
+	s.OnRadiosChanged(func() { seen = len(s.Snapshot().Radios) })
+
+	done := make(chan struct{})
+	go func() {
+		s.SetRadios("g", &srspb.RadioInfo{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observer deadlocked against the store lock")
+	}
+	if seen != 1 {
+		t.Errorf("observer saw %d radios, want 1", seen)
 	}
 }
