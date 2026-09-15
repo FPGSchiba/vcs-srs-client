@@ -90,7 +90,8 @@ Never check these in. Never edit by hand. CI re-generates them on every build (`
 |---|---|
 | **Phase 1** | `[x]` complete — merged to `main` (PR #11). Scaffold, windowing, guest auth, control gRPC, Comms popout. |
 | **Phase 2** | `[-]` **deferred** — plugin SSO is blocked on `vcs-vanguard-auth-plugin`, which is blocked on access to the Vanguard user-management backend. |
-| **Phase 3** | `[~]` **current** — Settings + keybinds. |
+| **Phase 3** | `[x]` complete 2026-09-15 — Settings + keybinds, global hotkeys, system tray. Automated suite green; **not yet verified on real hardware** — see `docs/superpowers/plans/2026-09-15-phase-3-manual-verification.md`. |
+| **Phase 4** | **next** — Audio I/O (malgo lifecycle, device picker, VU metering, SFX engine). |
 
 ### Login: guest-only, by decision
 

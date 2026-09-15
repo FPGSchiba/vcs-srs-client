@@ -50,7 +50,9 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ## Phase 3 — Settings + keybinds
 
-**Status:** `[~]` design complete 2026-09-15 — picked up ahead of Phase 2, which is deferred.
+**Status:** `[x]` complete 2026-09-15 — Settings screen, persisted keybinds with steal-on-conflict, real OS-level global hotkey registration (including hold-to-talk key-release, R11 resolved), and system tray all landed on `feat/phase-3-settings-keybinds`.
+
+**Verification status:** the full automated suite is green (`go vet`, `go test -race ./...`, `tsc --noEmit`, `vitest`, frontend production build — see Task 12's report). **The phase has NOT been verified on real hardware** — no GUI could be launched in the environment that closed out the phase. A concrete manual checklist covering every hardware-dependent DoD item (tray legibility in light/dark, close-to-tray/restore, global hotkeys firing with another app focused, non-US keyboard layout capture, macOS permission-prompt denial, Linux no-StatusNotifier-host behaviour, and more) is written up and waiting for a human to run: [`2026-09-15-phase-3-manual-verification.md`](./superpowers/plans/2026-09-15-phase-3-manual-verification.md). Treat Phase 3 as code-complete, not field-verified, until that checklist has been executed.
 
 **Design doc:** [`2026-09-15-vcs-client-phase-3-settings-keybinds-design.md`](./superpowers/specs/2026-09-15-vcs-client-phase-3-settings-keybinds-design.md)
 
