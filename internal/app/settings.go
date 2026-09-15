@@ -654,18 +654,29 @@ func (a *App) emitHotkeyState() {
 }
 
 // Pressed implements hotkeys.Handler.
+//
+// The log line alongside the emit is deliberate and deliberately at Info: a
+// hotkey edge is a low-frequency, genuinely diagnostic event, and the log
+// file is the only place a user can confirm "my key IS firing, the problem
+// is downstream" without any UI. It records the ACTION ID and the edge --
+// never the key, the keycode or the character. The OS layer sees every
+// keystroke on the machine (see internal/hotkeys/registrar_gohook.go), so
+// widening this to key identities would turn the log into a keylog.
 func (a *App) Pressed(actionID string) {
 	if a.settings == nil {
 		return
 	}
+	a.logger.Info("hotkey fired", "action", actionID, "edge", "down")
 	a.settings.em.HotkeyPressed(actionID)
 }
 
-// Released implements hotkeys.Handler.
+// Released implements hotkeys.Handler. See Pressed for why this logs the
+// action ID and nothing about the key itself.
 func (a *App) Released(actionID string) {
 	if a.settings == nil {
 		return
 	}
+	a.logger.Info("hotkey fired", "action", actionID, "edge", "up")
 	a.settings.em.HotkeyReleased(actionID)
 }
 

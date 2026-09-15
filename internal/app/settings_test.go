@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -735,5 +738,55 @@ func TestBackendUnavailableReportsHotkeysUnavailable(t *testing.T) {
 	}
 	if len(got.Failed) == 0 {
 		t.Error("Failed must still name the individual bindings")
+	}
+}
+
+// TestHotkeyEdgesAreLogged pins Change A: every hotkey edge is written to the
+// app log with its action ID and direction, so a user can confirm hotkeys
+// fire from the log file alone with no UI involved.
+//
+// It also pins the privacy boundary: the record must name the ACTION, never
+// the key. The OS layer sees every keystroke on the machine, so a key
+// identity in this line would make the log a keylog.
+func TestHotkeyEdgesAreLogged(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	a.Pressed("global.ptt")
+	a.Released("global.ptt")
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d log lines, want 2:\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], `action=global.ptt`) || !strings.Contains(lines[0], `edge=down`) {
+		t.Errorf("press line missing action/edge: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], `action=global.ptt`) || !strings.Contains(lines[1], `edge=up`) {
+		t.Errorf("release line missing action/edge: %q", lines[1])
+	}
+	for _, l := range lines {
+		if !strings.Contains(l, "level=INFO") {
+			t.Errorf("hotkey edge should log at Info, got: %q", l)
+		}
+	}
+}
+
+// TestHotkeyEdgesWithoutBackendDoNotPanic: Pressed/Released can arrive before
+// SetSettingsBackend has run (the OS stream is global and outlives a rebind),
+// and must be a silent no-op rather than a nil dereference.
+func TestHotkeyEdgesWithoutBackendDoNotPanic(t *testing.T) {
+	a := NewForTest(state.New(), nil, nil)
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	a.Pressed("global.ptt")
+	a.Released("global.ptt")
+
+	if buf.Len() != 0 {
+		t.Errorf("no backend wired, so nothing should be logged; got %q", buf.String())
 	}
 }
