@@ -215,23 +215,85 @@ server's log, so the three above can be told apart from it.
    mechanism should make this structurally impossible to violate, but confirm
    observed behavior matches.
 
-### 10. macOS Input Monitoring permission prompt — R12
+### 10. macOS Accessibility permission — R12
 
-**macOS only.**
+**macOS only. This section is the authority for the R12 manual pass**; the
+spec's §11 points here rather than restating the steps, so there is exactly
+one executable copy to keep current.
 
-1. On a clean macOS user account (or after resetting the app's permission via
-   `tccutil reset ListenEvent <bundle-id>`), launch the app and bind/trigger a
-   global hotkey for the first time.
-   **Expected:** the OS Input Monitoring permission dialog appears.
-2. Click **Deny**.
-   **Expected:** the app does not crash and does not fail to start. The
-   Keybinds section shows the "global hotkeys unavailable" banner (driven by
-   the `hotkeys:state {registered, error}` event per spec §6.1). Bindings can
-   still be captured and saved to `config.toml`; they simply don't fire.
-3. Grant the permission via System Settings → Privacy & Security → Input
-   Monitoring, then relaunch.
-   **Expected:** the banner clears and previously saved bindings register and
-   fire correctly.
+> **Read this before starting.** The permission is **Accessibility**
+> (`kTCCServiceAccessibility`), *not* Input Monitoring. `x/hotkey`'s
+> `registerTap` returns NULL unless `AXIsProcessTrusted()`, so Accessibility is
+> the only grant that makes a hotkey fire. An earlier revision of this
+> checklist told the tester to reset and grant **Input Monitoring**, which
+> reproduces the exact bug the permission work fixed: hotkeys stay dead no
+> matter what the tester grants, and the run "fails" for the wrong reason.
+> If you are working from a printed or cached copy that says Input Monitoring,
+> stop and use this one.
+
+> **Run this on an account that has NEVER granted VCS Accessibility.** A
+> machine that already holds the grant passes every item below vacuously —
+> that is precisely how the wrong-service bug survived review. Reset first
+> (step 1) or use a fresh user account. Nothing in this flow has been
+> exercised against a real TCC yet, so treat surprises here as findings, not
+> as tester error.
+
+1. Reset the grant: `tccutil reset Accessibility <bundle-id>` (or use a clean
+   macOS user account). Launch the app and open Settings → Keybinds.
+   **Expected:** the "Global hotkeys unavailable" banner is shown, with the
+   Accessibility explanation beneath it and a **GRANT ACCESS** button. The
+   banner is driven by `hotkeys:state {registered, error, failed, permission}`
+   (spec §6.1); `permission` must be `"denied"`.
+2. Click **GRANT ACCESS**.
+   **Expected:** the macOS accessibility trust sheet appears — the one raised
+   by `AXIsProcessTrustedWithOptions`, naming **Accessibility**, *not* Input
+   Monitoring. If it names Input Monitoring, stop: that is a real failure of
+   the fix, not a checklist problem.
+3. **Observe the banner while that sheet is still open** (the `prompted`
+   wrinkle). `AXIsProcessTrustedWithOptions` reports the *current* trust
+   state, so a first request returns false and the button swaps to **OPEN
+   SETTINGS** even though the sheet is up and unanswered. This is the known,
+   accepted behaviour — the sheet's own button is literally "Open System
+   Settings" — but confirm it is not confusing in practice, and note it if it
+   is.
+4. Dismiss the sheet with **Deny**.
+   **Expected:** the app does not crash and does not fail to start. The banner
+   stays, `permission` stays `"denied"`, and **RE-CHECK** is now offered
+   alongside. Bindings can still be captured and saved to `config.toml`; they
+   simply don't fire.
+5. Click **OPEN SETTINGS**.
+   **Expected:** System Settings opens directly on Privacy & Security →
+   **Accessibility**. The URL
+   (`x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`)
+   was verified well-formed against the shipping pane bundle but has never
+   been dispatched — this step is the first real test of it. A pane that opens
+   somewhere else (or not at all) is a finding.
+6. Grant Accessibility to VCS in that pane, then switch back to the VCS
+   window without clicking anything else.
+   **Expected:** the window-focus re-check clears the banner on its own. No
+   RE-CHECK click should be needed; if one is, record it, because focus is the
+   primary detection path.
+7. **Does the re-apply alone revive the tap?** Immediately after step 6, with
+   **no restart**, press a bound hotkey while another application is focused.
+   **Expected (hoped):** it fires, meaning `applyHotkeys()`'s teardown and
+   recreate is sufficient and the banner's "restart VCS" line is
+   belt-and-braces. **If it does not fire**, the restart guidance is
+   load-bearing — record that explicitly here and in R12, because it changes
+   what the UI should be telling users.
+8. **Wrong-service regression check.** Reset again
+   (`tccutil reset Accessibility <bundle-id>`), then grant **Input Monitoring
+   only** and leave Accessibility off.
+   **Expected:** the banner stays, `permission` stays `"denied"`, and hotkeys
+   stay dead. **Fail** if the UI reports the permission as granted — that is
+   the original bug, in which the app claimed success while every `Register`
+   still returned NULL.
+9. **Quit during the poll.** Click **GRANT ACCESS** and quit the app within 30
+   seconds, without answering the sheet.
+   **Expected:** no panic, no hang, and no event emitted after teardown
+   (`ServiceShutdown` cancels the armed re-check and waits, bounded).
+10. Relaunch with the grant in place.
+    **Expected:** no banner, `permission` is `"granted"`, and previously saved
+    bindings register and fire correctly.
 
 ### 11. Linux R13 — no StatusNotifier host, no stranded user
 
@@ -327,6 +389,13 @@ platform backends.
 5. Confirm the chord is still saved to `config.toml` (capture-and-persist
    succeeds even though OS registration fails) so the user doesn't lose the
    intended binding if key support improves later.
+6. **The complementary case** (added with the per-row suppression change):
+   with NOTHING registered — easiest to reach via item 10's step 1, an
+   ungranted macOS account — the banner appears and rows must show **no**
+   per-row reasons at all. When `registered` is false every bound action is in
+   the `failed` map, so per-row notes would reprint the banner's one message
+   under every row. Seeing no inline notes there is correct, not a
+   regression.
 
 ---
 

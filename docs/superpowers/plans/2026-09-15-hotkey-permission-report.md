@@ -730,3 +730,181 @@ the items are written into the spec rather than only this report:
    needs a real TCC and is item 7 on the manual pass.
 4. Final binary link and `GOOS=linux` full build — documented environment
    limits, unrelated to these changes.
+
+---
+
+# Round 3 — review response
+
+Four residuals. Both Importants were real; the manual-doc one was the worst
+artifact in the change set.
+
+## IMPORTANT — the sweep missed a live procedure that reproduced the bug
+
+**Confirmed and fixed.** `docs/superpowers/plans/2026-09-15-phase-3-manual-verification.md`
+§10 was worse than a stale comment, exactly as described: it was an
+*executable* procedure telling a tester to
+`tccutil reset ListenEvent <bundle-id>`, expect the Input Monitoring dialog,
+and grant via Privacy & Security → Input Monitoring, with the expectation
+that "the banner clears and previously saved bindings register and fire".
+Following it produces a guaranteed false negative — the tester grants the one
+service that cannot help, sees nothing work, and concludes the feature is
+broken.
+
+My round-2 sweep grepped source files and the two docs I had edited. It never
+touched this file, because I did not think of it. The lesson is the one the
+review drew: after a semantic change, sweep by *concept* across the whole
+repo, not by the set of files already open.
+
+§10 is rewritten for Accessibility as a 10-step procedure:
+`tccutil reset Accessibility`; the `AXIsProcessTrustedWithOptions` sheet;
+Deny; OPEN SETTINGS; grant in Privacy & Security → **Accessibility**; return
+to the window and confirm the focus re-check clears the banner unaided;
+whether the re-apply alone revives the tap or a restart is genuinely needed;
+the wrong-service regression check; quit-during-poll; and relaunch. It matches
+the current banner copy and the GRANT ACCESS / OPEN SETTINGS / RE-CHECK flow,
+and states the expected `permission` value at each stage.
+
+Two callouts sit at the top, both earned rather than decorative:
+
+- A warning that the permission is Accessibility, *not* Input Monitoring, and
+  that an earlier revision of this very checklist said otherwise and thereby
+  reproduced the bug. Anyone working from a printed or cached copy is told to
+  stop and re-fetch. The old wrong instruction is named, so the reader can
+  recognise it.
+- A warning to run on an account that has **never** granted VCS Accessibility,
+  because otherwise every item passes vacuously — which is how the
+  wrong-service bug survived in the first place.
+
+### Which way I resolved the duplication, and why
+
+**The manual-verification doc §10 is now the single authority; the spec's §11
+points at it.**
+
+I had it backwards in round 2. That file is the repo's home for executable
+procedures — thirteen numbered sections of them — and it is where results are
+recorded ("Record pass/fail per numbered item ... directly in this file").
+The spec's §11 was a five-line summary until I dropped an eight-step procedure
+into it, creating a second executable copy. That is what drifted: my round-2
+sweep corrected R12 and §11 while §10, the copy a human would actually run,
+kept the wrong instructions.
+
+So the procedure moved to where procedures live, and §11 shrank back to a
+pointer plus the two facts that are genuinely spec-level rather than steps:
+that the pass cannot be automated (a `go test` binary is never trusted, so
+both services read false and CI cannot distinguish them), and that it must run
+on a never-granted account. R12's back-reference now names §10 explicitly as
+the single executable copy. Both directions of the cross-reference are in
+place, and each says why, so the next person is told not to re-fork it.
+
+### The fuller sweep of that file — what else it turned up
+
+Grepped the whole 359-line file for every permission-adjacent term
+(`input monitoring`, `listenevent`, `accessibility`, `tccutil`, `permission`,
+`denied`, `grant`). **Section 10 was the only wrong-service content.** The
+remaining hits are correct:
+
+- §13's line "that banner means 'no global hotkeys are registered at all'
+  (missing backend / denied permission), never 'one binding failed'" — still
+  accurate, and in fact reinforced by the Change 1 suppression.
+- The "known gaps" list — no permission content.
+
+I did find one piece of **pre-permission-feature content worth adding to**
+rather than correcting: §13 tested the partial-failure direction (per-row
+reasons appear, banner does not) but had nothing for the complement that
+Change 1 introduced. Without a note, a tester in the ungranted state would see
+rows with no inline reasons and could file the suppression as a regression. So
+§13 gained a step 6 describing the banner-state case and why absent per-row
+notes are correct there. §10's step 1 is the easiest way to reach that state,
+and it is cross-referenced.
+
+Also updated §10's event shape from `hotkeys:state {registered, error}` to
+`{registered, error, failed, permission}`, which had been stale since the
+`failed` map landed, before this feature.
+
+## IMPORTANT — one `applyHotkeys` caller still bypassed `writeMu`
+
+Correct, and it was the easiest of the three to hit: `RequestHotkeyPermission`'s
+already-granted branch fires on a button click, so a user clicking GRANT
+ACCESS while a keybind write is in flight reaches it directly. It now cancels
+any armed poll and holds `writeMu` across the apply, in the same style as the
+other two.
+
+The poll point was real too: a second GRANT ACCESS click after the grant had
+landed left the first click's poll ticking, to re-apply and tear down the tap
+the second click had just built.
+
+The invariant is now actually true. Enumerated every call site:
+
+| site | enclosing function | `writeMu` |
+|---|---|---|
+| `settings.go:193` | `SetKeybind` | held (line 184) |
+| `settings.go:223` | `ClearKeybind` | held (line 214) |
+| `settings.go:370` | `RequestHotkeyPermission` | held (**new**) |
+| `settings.go:459` | `RecheckHotkeyPermission` | held (line 426) |
+| `settings.go:615` | `applyGrantedHotkeys` (poll) | held |
+| `settings.go:780` | `RefreshKeybinds` | held (line 768) |
+| `app.go:111` | `SetSettingsBackend` | none — single-threaded startup wiring |
+
+## MINOR — the two recheck paths now read the same way
+
+`RecheckHotkeyPermission` re-reads `lastPerm` after acquiring `writeMu`,
+mirroring `applyGrantedHotkeys`'s post-lock `cancel` re-check. As noted, the
+window is the lock acquisition itself, which is wide open whenever a keybind
+write is in flight — two focus goroutines could both clear the pre-lock
+early-out and both apply, the second tearing down the tap the first had just
+built. The symmetry is the bigger win: a reader comparing the two paths no
+longer has to work out why only one of them re-checks.
+
+## MINOR — three stale API names
+
+All three updated to the AX equivalents:
+
+- `internal/hotkeys/permission.go` — now "macOS's `AXIsProcessTrustedWithOptions`
+  returns the CURRENT trust state and returns immediately", which is also more
+  accurate than the old sentence was about its own API.
+- `internal/app/settings.go` — "ask `AXIsProcessTrusted` again".
+- `internal/app/permission_test.go` — "The real `AXIsProcessTrustedWithOptions`
+  returns a value that is not the user's answer".
+
+The comments that deliberately name Input Monitoring as a warning are
+**kept**: the two in `permission_darwin.go` and `permission.go` explaining what
+went wrong, the `permission_other.go` partition note, the spec's R12 history,
+and the manual doc's warning banner and step 8 regression check.
+
+## Round 3 tests
+
+Three new tests, each verified load-bearing:
+
+| Breakage | Result |
+|---|---|
+| already-granted branch drops `writeMu` | ✗ `RequestHotkeyPermission applied hotkeys (2 applies, was 1) while writeMu was held` |
+| already-granted branch does not cancel the poll | ✗ `poll cancelled by the already-granted request: re-check poll did not finish within 500ms` |
+| post-lock `lastPerm` re-read removed | ✗ `2 applies from two concurrent focus re-checks, want exactly 1; the second tore down and rebuilt the tap the first had just created` |
+
+`TestConcurrentFocusRechecksApplyOnce` is the interesting one: it holds
+`writeMu` so both focus goroutines are parked on the lock before either can
+proceed, which is the precise interleaving the re-read exists for, and makes
+the test deterministic rather than a timing hope.
+
+`TestRequestHotkeyPermissionCancelsPoll` is framed against the tick interval
+the same way the round-2 rewrite was, specifically so it cannot pass on a poll
+that merely finished by itself — the failure mode I shipped and had to
+correct last round.
+
+```
+gofmt -l .                     empty
+go vet ./...                   exit 0
+go test -race -count=1 ./...   12 packages ok, 0 failures
+                               22 permission tests passing (19 app, 3 hotkeys)
+npx tsc --noEmit               clean
+npx vitest run                 10 files, 57 tests passed
+npm run build                  ✓ built in 381ms
+```
+
+## Still unverified here
+
+Unchanged, and now correctly routed: the deep link dispatching, live TCC
+behaviour, whether `applyHotkeys()` alone revives the tap, and the
+wrong-service regression check all live in manual-verification §10 as
+executable steps rather than as prose in this report. Nothing in this flow has
+met a real TCC.
