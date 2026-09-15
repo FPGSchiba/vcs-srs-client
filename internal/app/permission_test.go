@@ -21,9 +21,9 @@ import (
 //
 // Crucially, `prompted` and `status` are INDEPENDENT. That is not a
 // convenience -- it is the property under test. The real
-// CGRequestListenEventAccess returns a value that is not the user's answer,
-// so a fake that derived one from the other would quietly agree with the bug
-// this design exists to prevent.
+// AXIsProcessTrustedWithOptions returns a value that is not the user's
+// answer, so a fake that derived one from the other would quietly agree with
+// the bug this design exists to prevent.
 type fakePermission struct {
 	mu       sync.Mutex
 	status   hotkeys.Permission
@@ -639,5 +639,126 @@ func TestStopPermissionPollIsBounded(t *testing.T) {
 	a.stopPermissionPoll(100 * time.Millisecond)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("stopPermissionPoll blocked for %s on a wedged goroutine; quit would hang", elapsed)
+	}
+}
+
+// TestRequestHotkeyPermissionHoldsWriteMu closes the last IPC-reachable
+// applyHotkeys caller that bypassed writeMu.
+//
+// RequestHotkeyPermission's already-granted branch carries the identical
+// hazard the focus path and the poll were fixed for, and is arguably the
+// easiest to hit: it fires on a button click, so a user who clicks GRANT
+// ACCESS while a keybind write is in flight reaches it directly. Applying
+// between a failed persist and its rollback registers the OS against a
+// binding both the store and disk deny.
+func TestRequestHotkeyPermissionHoldsWriteMu(t *testing.T) {
+	perm := &fakePermission{status: hotkeys.PermissionGranted, prompted: true}
+	a, _, reg := newPermTestApp(t, perm)
+	sb := a.settings
+
+	sb.writeMu.Lock()
+	before := reg.applyCount()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.RequestHotkeyPermission()
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	if got := reg.applyCount(); got != before {
+		sb.writeMu.Unlock()
+		t.Fatalf("RequestHotkeyPermission applied hotkeys (%d applies, was %d) while writeMu was held",
+			got, before)
+	}
+
+	sb.writeMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestHotkeyPermission never completed after writeMu was released")
+	}
+	if got := reg.applyCount(); got <= before {
+		t.Errorf("RequestHotkeyPermission never applied (%d applies, was %d) once the lock was free",
+			got, before)
+	}
+}
+
+// TestRequestHotkeyPermissionCancelsPoll: a second GRANT ACCESS click after
+// the grant has landed must stop the poll the first click armed, or that poll
+// ticks on to re-apply and tear down the event tap the second click just
+// built. Same failure the focus path had, reached by a different route.
+//
+// Timings mirror TestRecheckHotkeyPermissionCancelsPoll and for the same
+// reason: framed against the tick so neither assertion can pass on a poll
+// that merely finished by itself.
+func TestRequestHotkeyPermissionCancelsPoll(t *testing.T) {
+	const tick = 2 * time.Second
+
+	perm := &fakePermission{status: hotkeys.PermissionDenied, prompted: true}
+	a, _, reg := newPermTestApp(t, perm)
+	a.setHotkeyPermissionPoll(tick, 30*time.Second)
+
+	a.RequestHotkeyPermission() // first click: denied, arms the poll
+	done := a.permissionPollDone()
+	if done == nil {
+		t.Fatal("no poll was armed by the first request")
+	}
+
+	perm.set(hotkeys.PermissionGranted)
+	before := reg.applyCount()
+	a.RequestHotkeyPermission() // second click: already granted
+
+	if got := reg.applyCount(); got != before+1 {
+		t.Fatalf("the second request produced %d applies, want exactly 1", got-before)
+	}
+	waitClosed(t, done, tick/4, "poll cancelled by the already-granted request")
+
+	time.Sleep(tick + 250*time.Millisecond)
+	if got := reg.applyCount(); got != before+1 {
+		t.Errorf("%d applies after a full tick interval, want exactly 1; the poll armed by the "+
+			"first click rebuilt the tap the second click had just built", got-before)
+	}
+}
+
+// TestConcurrentFocusRechecksApplyOnce covers the post-lock re-read.
+//
+// Wails dispatches window hooks on their own goroutine, so two focus events
+// can both clear the pre-lock early-out before either takes writeMu -- and
+// the window between those two points is the lock acquisition itself, which
+// is wide open whenever a keybind write is in flight. Without re-reading
+// lastPerm after the lock, both goroutines then apply, and the second tears
+// down the tap the first just built.
+//
+// writeMu is held here so both are parked on it before either can proceed,
+// which is exactly the interleaving the re-read exists for.
+func TestConcurrentFocusRechecksApplyOnce(t *testing.T) {
+	perm := &fakePermission{status: hotkeys.PermissionDenied}
+	a, _, reg := newPermTestApp(t, perm)
+	sb := a.settings
+
+	// Grant out of band. lastPerm stays "denied" until something re-reads it,
+	// so both goroutines will clear the pre-lock early-out.
+	perm.set(hotkeys.PermissionGranted)
+
+	sb.writeMu.Lock()
+	before := reg.applyCount()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.RecheckHotkeyPermission()
+		}()
+	}
+	// Let both clear the early-out and park on writeMu.
+	time.Sleep(50 * time.Millisecond)
+	sb.writeMu.Unlock()
+	wg.Wait()
+
+	if got := reg.applyCount(); got != before+1 {
+		t.Errorf("%d applies from two concurrent focus re-checks, want exactly 1; the second "+
+			"tore down and rebuilt the tap the first had just created", got-before)
 	}
 }

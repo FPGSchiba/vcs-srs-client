@@ -69,11 +69,11 @@ type PermissionChecker interface {
 	// spent, and reports whether the OS indicated a prompt-worthy state.
 	//
 	// It deliberately does NOT return the user's answer, and the return value
-	// must never be treated as one. macOS's CGRequestListenEventAccess is
-	// handled asynchronously by TCC: the prompt outlives the call, its return
-	// value is not documented as the user's decision, and there is no public
-	// notification for a permission change. A grant is detected by polling
-	// Status() and by re-checking on window focus -- never here.
+	// must never be treated as one. macOS's AXIsProcessTrustedWithOptions
+	// returns the CURRENT trust state and returns immediately: the prompt it
+	// raises outlives the call, is answered out of process, and there is no
+	// public notification for a permission change. A grant is detected by
+	// polling Status() and by re-checking on window focus -- never here.
 	//
 	// The single legitimate use of the result is choosing the frontend's next
 	// button label. Note what a false result does and does not prove: it says

@@ -23,7 +23,7 @@ const defaultCaptureTimeout = 10 * time.Second
 //
 // This is NOT a background loop. macOS offers no notification for a TCC
 // permission change, so the only ways to learn about a grant are to ask
-// CGPreflightListenEventAccess again, or to be told by the user. The poll
+// AXIsProcessTrusted again, or to be told by the user. The poll
 // exists solely in the window between an explicit user request and its
 // answer, and cancels itself on the first grant or at the timeout, whichever
 // comes first. The primary trigger is the cheaper one: the window-focus
@@ -357,7 +357,18 @@ func (a *App) RequestHotkeyPermission() HotkeyPermissionResultDTO {
 	case hotkeys.PermissionGranted:
 		// The grant was already in place (or landed synchronously). Re-apply
 		// now rather than making the user wait a poll interval for it.
+		//
+		// Same two obligations as the focus path, and for the same reasons:
+		// cancel any poll a previous GRANT ACCESS click armed (a second click
+		// after the grant would otherwise leave the old one ticking to
+		// re-apply), and hold writeMu across the apply so this IPC-reachable
+		// call cannot land between a failed persist and its rollback in
+		// SetKeybind -- which would register the OS against a binding both
+		// the store and disk deny. See RecheckHotkeyPermission.
+		a.cancelPermissionPoll()
+		sb.writeMu.Lock()
 		a.applyHotkeys()
+		sb.writeMu.Unlock()
 	case hotkeys.PermissionNotApplicable:
 		// Nothing to wait for.
 	default:
@@ -414,6 +425,20 @@ func (a *App) RecheckHotkeyPermission() {
 	// in the opposite order.
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
+
+	// Re-read lastPerm now that the lock is held, mirroring the way
+	// applyGrantedHotkeys re-checks cancel after winning writeMu. Two focus
+	// goroutines can both pass the early-out above before either applies, and
+	// the window is the writeMu acquisition itself -- not microscopic when a
+	// keybind write is in flight. Reading the same way in both paths also
+	// removes the question a reader would otherwise have to answer about why
+	// only one of them re-checks.
+	sb.mu.Lock()
+	last = sb.lastPerm
+	sb.mu.Unlock()
+	if last == hotkeys.PermissionGranted || last == hotkeys.PermissionNotApplicable {
+		return // another focus goroutine got here first
+	}
 
 	if a.permissionStatus() != hotkeys.PermissionGranted {
 		return
