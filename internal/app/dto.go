@@ -85,3 +85,51 @@ func SnapshotFromProto(clients map[string]*srspb.ClientInfo, radios map[string]*
 	}
 	return snap
 }
+
+// SettingsDTO is the binding-facing shape of config.General.
+type SettingsDTO struct {
+	StartMinimized       bool `json:"start_minimized"`
+	MinimizeToTray       bool `json:"minimize_to_tray"`
+	ShowTransmitterName  bool `json:"show_transmitter_name"`
+	PlayConnectionSounds bool `json:"play_connection_sounds"`
+	RadioSwitchAsPTT     bool `json:"radio_switch_as_ptt"`
+}
+
+// CaptureDTO is a raw {code, modifiers} capture from the frontend's keydown
+// listener. The physical-key mapping table lives only in internal/chord, so
+// this carries the browser KeyboardEvent.code rather than a chord string.
+type CaptureDTO struct {
+	Code  string `json:"code"`
+	Ctrl  bool   `json:"ctrl"`
+	Alt   bool   `json:"alt"`
+	Shift bool   `json:"shift"`
+	Super bool   `json:"super"`
+}
+
+// KeybindDTO is one row of the joined action-registry + bound-chord list.
+type KeybindDTO struct {
+	ActionID string `json:"action_id"`
+	Label    string `json:"label"`
+	Desc     string `json:"desc"`
+	Category string `json:"category"` // "global" | "channel" | "per_radio" | "status"
+	Kind     string `json:"kind"`     // "hold" | "press"
+	Chord    string `json:"chord"`    // canonical form, "" when unbound
+}
+
+// StolenDTO reports which action lost its chord to a new binding.
+type StolenDTO struct {
+	ActionID string `json:"action_id"`
+	Label    string `json:"label"`
+	Chord    string `json:"chord"`
+}
+
+// SetKeybindResult is the result of SetKeybind.
+type SetKeybindResult struct {
+	Stolen *StolenDTO `json:"stolen"` // nil when there was no conflict
+}
+
+// HotkeyStateDTO reports whether OS hotkey registration is currently healthy.
+type HotkeyStateDTO struct {
+	Registered bool   `json:"registered"`
+	Error      string `json:"error"`
+}

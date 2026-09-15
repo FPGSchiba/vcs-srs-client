@@ -23,6 +23,11 @@ const (
 	EventControlConnection = "control:connection"
 	EventWindowGeometry    = "window:geometry_changed"
 	EventWindowState       = "window:state" // payload: []string of open window ids
+	EventSettingsChanged   = "settings:changed"
+	EventKeybindsChanged   = "keybinds:changed"
+	EventHotkeyPressed     = "hotkey:pressed"
+	EventHotkeyReleased    = "hotkey:released"
+	EventHotkeysState      = "hotkeys:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -113,3 +118,37 @@ func (t *Tagged) SessionChanged(state string) { t.em.Emit(EventAuthSession, stat
 
 // ClientState emits EventClientState with a full snapshot payload.
 func (t *Tagged) ClientState(snapshot any) { t.em.Emit(EventClientState, snapshot) }
+
+// HotkeyStatePayload is the EventHotkeysState payload.
+type HotkeyStatePayload struct {
+	Registered bool   `json:"registered"`
+	Error      string `json:"error"`
+}
+
+// SettingsChanged emits EventSettingsChanged with the full settings struct.
+func (t *Tagged) SettingsChanged(payload any) { t.em.Emit(EventSettingsChanged, payload) }
+
+// KeybindsChanged emits EventKeybindsChanged with the FULL binding list.
+// Full replacement rather than a delta: the list is small, and it removes a
+// class of frontend/backend divergence bug.
+func (t *Tagged) KeybindsChanged(payload any) { t.em.Emit(EventKeybindsChanged, payload) }
+
+// HotkeyPressed emits EventHotkeyPressed.
+func (t *Tagged) HotkeyPressed(actionID string) {
+	t.em.Emit(EventHotkeyPressed, struct {
+		ActionID string `json:"action_id"`
+	}{ActionID: actionID})
+}
+
+// HotkeyReleased emits EventHotkeyReleased (Hold actions only).
+func (t *Tagged) HotkeyReleased(actionID string) {
+	t.em.Emit(EventHotkeyReleased, struct {
+		ActionID string `json:"action_id"`
+	}{ActionID: actionID})
+}
+
+// HotkeysState emits EventHotkeysState so a failed registration is visible in
+// the UI rather than silent.
+func (t *Tagged) HotkeysState(registered bool, errMsg string) {
+	t.em.Emit(EventHotkeysState, HotkeyStatePayload{Registered: registered, Error: errMsg})
+}

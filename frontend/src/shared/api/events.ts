@@ -11,6 +11,11 @@ export const EV = {
   authSession: "auth:session_changed",
   controlConnection: "control:connection",
   windowState: "window:state",
+  settingsChanged: "settings:changed",
+  keybindsChanged: "keybinds:changed",
+  hotkeyPressed: "hotkey:pressed",
+  hotkeyReleased: "hotkey:released",
+  hotkeysState: "hotkeys:state",
 } as const;
 
 // on subscribes to a Wails event and returns an unsubscribe function.

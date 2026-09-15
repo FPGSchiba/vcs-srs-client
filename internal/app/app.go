@@ -6,6 +6,10 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
+	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
+	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -36,6 +40,7 @@ type App struct {
 	st       *state.Store
 	sess     sessionAPI
 	windows  windowsAPI
+	settings *settingsBackend
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.
@@ -59,6 +64,38 @@ func (a *App) SetBackend(sess sessionAPI, windows windowsAPI) {
 
 // SetApp injects the Wails application reference. Must be called before Run().
 func (a *App) SetApp(app *application.App) { a.wailsApp = app }
+
+// SetSettingsBackend wires the settings/keybind dependencies onto App and
+// seeds kb from cfg.Keybinds, falling back to keybinds.Defaults() when
+// cfg.Keybinds is empty (fresh config, or one written before Phase 3).
+func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybinds.Store, hk *hotkeys.Manager, em events.Emitter) {
+	raw := cfg.Keybinds
+	if len(raw) == 0 {
+		raw = defaultKeybindsRaw()
+	}
+	kb.Load(raw)
+
+	a.settings = &settingsBackend{
+		cfg:            cfg,
+		cfgPath:        cfgPath,
+		kb:             kb,
+		hk:             hk,
+		em:             events.New(em),
+		captureTimeout: defaultCaptureTimeout,
+	}
+	a.applyHotkeys()
+}
+
+// defaultKeybindsRaw renders keybinds.Defaults() as the raw string map
+// keybinds.Store.Load expects.
+func defaultKeybindsRaw() map[string]string {
+	defaults := keybinds.Defaults()
+	out := make(map[string]string, len(defaults))
+	for id, c := range defaults {
+		out[string(id)] = c.String()
+	}
+	return out
+}
 
 // WailsApp returns the injected Wails app (for main.go window/event wiring).
 func (a *App) WailsApp() *application.App { return a.wailsApp }
