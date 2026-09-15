@@ -251,6 +251,64 @@ describe("Keybinds section", () => {
     expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
   });
 
+  // ---- Per-row suppression while the banner is up -------------------------
+
+  it("does not repeat the banner as a per-row warning on every binding", () => {
+    // registered === false means NOTHING registered, which implies `failed`
+    // names every bound action. Rendering those inline would print the
+    // banner's single message once per row -- pure duplicate noise.
+    useSettings.setState({
+      settings: null,
+      keybinds: rows,
+      hotkeys: {
+        registered: false,
+        error: "permission denied",
+        permission: "denied",
+        failed: {
+          "global.ptt": "permission denied",
+          "global.mute_toggle": "permission denied",
+          "radio.1.ptt": "permission denied",
+        },
+      },
+    });
+    render(<Keybinds />);
+
+    // The banner itself still says it, exactly once.
+    expect(screen.getByText(/global hotkeys unavailable/i)).toBeInTheDocument();
+    // ...and no row repeats it. Scoped per row so a regression that renders
+    // the reason on even one row fails here. Per-radio bindings live in a
+    // `.tbl` <tr> rather than a [data-row] div, so match either.
+    for (const row of rows) {
+      const el = screen.getByText(row.label).closest("[data-row], tr") as HTMLElement;
+      expect(el).not.toBeNull();
+      expect(within(el).queryByText(/permission denied/i)).not.toBeInTheDocument();
+    }
+  });
+
+  it("still shows per-row reasons for a PARTIAL failure, with no banner", () => {
+    // One unregisterable Numpad7 among working binds keeps registered true.
+    // Here the per-row text is the ONLY place the failure is reported, so
+    // suppressing it would lose the information entirely.
+    useSettings.setState({
+      settings: null,
+      keybinds: rows,
+      hotkeys: {
+        registered: true,
+        error: "",
+        permission: "granted",
+        failed: { "global.mute_toggle": "no OS key mapping for Numpad7" },
+      },
+    });
+    render(<Keybinds />);
+
+    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
+    const failedRow = screen.getByText("Mute toggle").closest("[data-row]") as HTMLElement;
+    expect(within(failedRow).getByText(/no OS key mapping for Numpad7/i)).toBeInTheDocument();
+    // And only that row.
+    const okRow = screen.getByText("Global PTT").closest("[data-row]") as HTMLElement;
+    expect(within(okRow).queryByText(/no OS key mapping for Numpad7/i)).not.toBeInTheDocument();
+  });
+
   // ---- macOS Input Monitoring permission ----------------------------------
 
   /** Puts the store in the denied-permission state the banner branches on. */

@@ -91,7 +91,10 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  * 3. Per-row failures: `internal/chord` accepts keys the OS layer can't
  *    register (Numpad, F21-F24, punctuation, navigation), so a chord can
  *    save successfully and still never fire. Every row whose action_id
- *    appears in `hotkeys.failed` shows that reason inline.
+ *    appears in `hotkeys.failed` shows that reason inline -- but ONLY while
+ *    `hotkeys.registered` is true. `registered === false` means nothing
+ *    registered at all, which implies `failed` names every bound action, so
+ *    the per-row text would just reprint the banner once per row.
  *
  * 4. The banner is permission-aware. `hotkeys.permission` is a state, not an
  *    error string, so this branches on it directly: "denied" (macOS only)
@@ -199,7 +202,15 @@ export function Keybinds() {
   const chipKey = (actionId: string) => `${actionId}:${epoch[actionId] ?? 0}`;
 
   const renderChip = (kb: Keybind) => {
-    const failedReason = hotkeys.failed[kb.action_id];
+    // Suppressed while the banner is up. `registered === false` means NOTHING
+    // registered (see hotkeys.Manager.Registered), which implies `failed`
+    // names every bound action -- so rendering per-row reasons there repeats
+    // the banner's single message on every single row. A PARTIAL failure
+    // (one unregisterable Numpad7 among nineteen working binds) keeps
+    // `registered === true`, and those rows still get their own reason,
+    // which is the only case where the per-row text says something the
+    // banner does not.
+    const failedReason = hotkeys.registered ? hotkeys.failed[kb.action_id] : undefined;
     return (
       <div className="col" style={{ gap: 2, alignItems: "flex-end" }}>
         <span onClickCapture={() => handleChipClick(kb.action_id)}>
