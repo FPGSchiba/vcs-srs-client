@@ -65,7 +65,7 @@ export const api = {
   endCapture: (token: number): Promise<void> => App.EndCapture(token) as Promise<void>,
   getHotkeyState: (): Promise<HotkeyState> => App.GetHotkeyState() as Promise<HotkeyState>,
   // requestHotkeyPermission fires the OS prompt for global hotkey capture
-  // (macOS Input Monitoring). The resolved `prompted` is NOT a grant signal
+  // (macOS Accessibility trust). The resolved `prompted` is NOT a grant signal
   // -- see HotkeyPermissionResult. A grant arrives later on hotkeys:state,
   // via the backend's bounded re-check or its window-focus re-check.
   requestHotkeyPermission: (): Promise<HotkeyPermissionResult> =>

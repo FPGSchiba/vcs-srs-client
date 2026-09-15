@@ -97,8 +97,10 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    the per-row text would just reprint the banner once per row.
  *
  * 4. The banner is permission-aware. `hotkeys.permission` is a state, not an
- *    error string, so this branches on it directly: "denied" (macOS only)
- *    earns an explanation and GRANT ACCESS / OPEN SETTINGS / RE-CHECK;
+ *    error string, so this branches on it directly: "denied" (macOS only,
+ *    meaning the process is not trusted for Accessibility -- the grant
+ *    `x/hotkey`'s CGEventTap actually requires) earns an explanation and
+ *    GRANT ACCESS / OPEN SETTINGS / RE-CHECK;
  *    "not_applicable" (Windows, Linux/X11) earns none of it, because there
  *    is nothing to grant. `requestHotkeyPermission()`'s `prompted` result is
  *    never treated as a grant -- macOS resolves the prompt asynchronously
@@ -317,11 +319,12 @@ export function Keybinds() {
             <>
               <span
                 className="cap-dim"
-                style={{ textTransform: "none", letterSpacing: "0.04em" }}
+                style={{ fontSize: 10, textTransform: "none", letterSpacing: "0.04em" }}
               >
-                macOS requires Input Monitoring permission for global hotkeys. Until it is
-                granted, the system delivers no keypress to VCS while another application
-                is focused.
+                macOS requires Accessibility permission for global hotkeys (System
+                Settings → Privacy &amp; Security → Accessibility). Until it is granted,
+                the system delivers no keypress to VCS while another application is
+                focused.
               </span>
               <div className="row gap-3">
                 {promptSpent ? (
@@ -345,9 +348,9 @@ export function Keybinds() {
           {grantedButUnregistered && (
             <span
               className="cap-dim"
-              style={{ textTransform: "none", letterSpacing: "0.04em" }}
+              style={{ fontSize: 10, textTransform: "none", letterSpacing: "0.04em" }}
             >
-              Input Monitoring is granted — restart VCS for hotkeys to take effect.
+              Accessibility is granted — restart VCS for hotkeys to take effect.
             </span>
           )}
         </div>

@@ -11,9 +11,9 @@
 //     registration error instead.
 //   - darwin without cgo: no hotkey backend exists at all in that build
 //     (registrar_nocgo.go claims it and fails every Register with
-//     ErrBackendUnavailable), so an Input Monitoring grant would enable
-//     nothing. Reporting "denied" there would point the user at System
-//     Settings for a problem only a rebuild can fix.
+//     ErrBackendUnavailable), so an Accessibility grant would enable nothing.
+//     Reporting "denied" there would point the user at System Settings for a
+//     problem only a rebuild can fix.
 //   - any other cgo-less build: same reasoning.
 //
 // Note this is a WIDER tag than registrar_x.go / registrar_nocgo.go's

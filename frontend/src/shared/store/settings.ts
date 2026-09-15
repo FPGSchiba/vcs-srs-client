@@ -34,8 +34,10 @@ export interface HotkeyState {
 /** Result of `api.requestHotkeyPermission()`. `prompted` is what the OS
  * request call returned and is NOT the user's answer -- macOS answers the
  * prompt asynchronously through TCC. Its only use is choosing the banner's
- * next button: `prompted: false` while `permission` is still "denied" means
- * the one-shot prompt is spent and System Settings is the only way through. */
+ * next button: `prompted: false` while `permission` is still "denied" is
+ * evidence that System Settings may be the remaining route (it covers both
+ * "the sheet is up, unanswered" and "already refused"), which is why the UI
+ * offers that route alongside a re-check rather than instead of one. */
 export interface HotkeyPermissionResult {
   prompted: boolean;
   permission: HotkeyPermission;

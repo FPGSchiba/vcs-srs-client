@@ -119,7 +119,7 @@ type State struct {
 //
 // It is false only when nothing is live: there is at least one bound action
 // and every one of them failed to register. That is what a missing backend
-// (registrar_nocgo.go), a denied macOS Input Monitoring permission or an
+// (registrar_nocgo.go), a denied macOS Accessibility permission or an
 // unreachable X display looks like, and it is the only case the UI's
 // "global hotkeys unavailable" banner should describe.
 //

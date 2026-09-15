@@ -122,7 +122,7 @@ func main() {
 	})
 
 	// Re-check the OS global-hotkey permission whenever the main window
-	// regains focus. On macOS, granting Input Monitoring means leaving the
+	// regains focus. On macOS, granting Accessibility means leaving the
 	// app for System Settings and coming back, and the OS offers no
 	// notification for the change -- so returning focus is both the moment
 	// the answer can have changed and the cheapest time to look. All the

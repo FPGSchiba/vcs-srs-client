@@ -47,6 +47,9 @@ describe("Keybinds section", () => {
     nextToken = 0;
     beginCapture.mockReset().mockImplementation(() => Promise.resolve(++nextToken));
     endCapture.mockReset().mockResolvedValue(undefined);
+    // Default: the OS raised the sheet and trust is not (yet) in place. See
+    // "keeps GRANT ACCESS when the OS did show a prompt" for why this exact
+    // pairing is a branch fixture rather than a reachable production state.
     requestHotkeyPermission
       .mockReset()
       .mockResolvedValue({ prompted: true, permission: "denied" });
@@ -309,7 +312,7 @@ describe("Keybinds section", () => {
     expect(within(okRow).queryByText(/no OS key mapping for Numpad7/i)).not.toBeInTheDocument();
   });
 
-  // ---- macOS Input Monitoring permission ----------------------------------
+  // ---- macOS Accessibility permission ----------------------------------
 
   /** Puts the store in the denied-permission state the banner branches on. */
   const denyPermission = () =>
@@ -328,7 +331,7 @@ describe("Keybinds section", () => {
     denyPermission();
     render(<Keybinds />);
 
-    expect(screen.getByText(/input monitoring permission/i)).toBeInTheDocument();
+    expect(screen.getByText(/accessibility permission/i)).toBeInTheDocument();
     const grant = screen.getByRole("button", { name: "GRANT ACCESS" });
     expect(screen.queryByRole("button", { name: "OPEN SETTINGS" })).not.toBeInTheDocument();
 
@@ -355,9 +358,14 @@ describe("Keybinds section", () => {
   });
 
   it("keeps GRANT ACCESS when the OS did show a prompt", async () => {
-    // prompted:true means the sheet is on screen and unanswered. The answer
-    // arrives asynchronously via hotkeys:state, so this must NOT be mistaken
-    // for "granted" and must not jump the user to System Settings either.
+    // NOTE: `{prompted: true, permission: "denied"}` is NOT a state the real
+    // backend can produce. AXIsProcessTrustedWithOptions returns the CURRENT
+    // trust state, so prompted:true implies Status() is already granted --
+    // production only ever sees prompted:true alongside permission:"granted".
+    // The pair is exercised anyway because it isolates the branch: it proves
+    // the component keys OPEN SETTINGS off `prompted` rather than off
+    // `permission`, which is the distinction the whole "a prompt is not an
+    // answer" rule rests on. Read it as a branch test, not a real state.
     requestHotkeyPermission.mockResolvedValue({ prompted: true, permission: "denied" });
     denyPermission();
     render(<Keybinds />);
@@ -400,7 +408,7 @@ describe("Keybinds section", () => {
     expect(screen.getByText(/global hotkeys unavailable/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "GRANT ACCESS" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "OPEN SETTINGS" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/input monitoring permission/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/accessibility permission/i)).not.toBeInTheDocument();
   });
 
   it("tells the user to restart when access is granted but nothing registers", () => {
@@ -419,6 +427,7 @@ describe("Keybinds section", () => {
     });
     render(<Keybinds />);
 
+    expect(screen.getByText(/accessibility is granted/i)).toBeInTheDocument();
     expect(screen.getByText(/restart vcs for hotkeys to take effect/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "GRANT ACCESS" })).not.toBeInTheDocument();
