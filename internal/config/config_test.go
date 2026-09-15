@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,6 +59,12 @@ func TestSave_RoundTrip(t *testing.T) {
 	if got.LogLevel != cfg.LogLevel || got.ServerURL != cfg.ServerURL || got.PingIntervalSeconds != cfg.PingIntervalSeconds {
 		t.Fatalf("round-trip mismatch: got %+v want %+v", got, cfg)
 	}
+	if got.General != cfg.General {
+		t.Errorf("General lost in round trip: got %+v, want %+v", got.General, cfg.General)
+	}
+	if !maps.Equal(got.Keybinds, cfg.Keybinds) {
+		t.Errorf("Keybinds lost in round trip: got %v, want %v", got.Keybinds, cfg.Keybinds)
+	}
 }
 
 func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
@@ -71,6 +78,12 @@ func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
 	if cfg.LogLevel != def.LogLevel || cfg.ServerURL != def.ServerURL || cfg.PingIntervalSeconds != def.PingIntervalSeconds {
 		t.Fatalf("expected defaults, got %+v", cfg)
 	}
+	if cfg.General != def.General {
+		t.Errorf("expected General defaults, got %+v", cfg.General)
+	}
+	if !maps.Equal(cfg.Keybinds, def.Keybinds) {
+		t.Errorf("expected Keybinds defaults, got %v", cfg.Keybinds)
+	}
 	// The file must now exist on disk.
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected config file to be created: %v", err)
@@ -82,6 +95,12 @@ func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
 	}
 	if reloaded.LogLevel != def.LogLevel || reloaded.ServerURL != def.ServerURL || reloaded.PingIntervalSeconds != def.PingIntervalSeconds {
 		t.Fatalf("reloaded config differs from defaults: %+v", reloaded)
+	}
+	if reloaded.General != def.General {
+		t.Errorf("expected General to survive reload, got %+v", reloaded.General)
+	}
+	if !maps.Equal(reloaded.Keybinds, def.Keybinds) {
+		t.Errorf("expected Keybinds to survive reload, got %v", reloaded.Keybinds)
 	}
 }
 
@@ -162,5 +181,30 @@ func TestKeybindsRoundTrip(t *testing.T) {
 	}
 	if !got.General.StartMinimized {
 		t.Error("general lost in round trip")
+	}
+}
+
+func TestGeneralRoundTripAllFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	cfg := config.Default()
+	// Every field flipped away from its default, so a mistyped toml tag on any
+	// one of them shows up as a value reverting rather than passing silently.
+	cfg.General = config.General{
+		StartMinimized:       true,
+		MinimizeToTray:       false,
+		ShowTransmitterName:  false,
+		PlayConnectionSounds: false,
+		RadioSwitchAsPTT:     true,
+	}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.General != cfg.General {
+		t.Errorf("General round trip = %+v, want %+v", got.General, cfg.General)
 	}
 }
