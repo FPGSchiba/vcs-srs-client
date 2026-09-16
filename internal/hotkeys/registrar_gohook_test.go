@@ -1152,3 +1152,319 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Stale-latch watchdog
+// ---------------------------------------------------------------------------
+
+// staleWindow is the watchdog deadline the tests run at. Long enough that
+// nothing races it accidentally, short enough that the suite stays fast --
+// DefaultStaleLatchTimeout is two minutes, which no test can wait for.
+const staleWindow = 60 * time.Millisecond
+
+// newWatchdogRegistrar is newTestRegistrar with the watchdog wound down.
+func newWatchdogRegistrar(t *testing.T) (*hookRegistrar, *fakeSource, *staleRecorder) {
+	t.Helper()
+	src := newFakeSource()
+	r := newHookRegistrar(src)
+	r.setStaleLatchTimeout(staleWindow)
+	rec := &staleRecorder{}
+	t.Cleanup(func() { src.End() })
+	return r, src, rec
+}
+
+// staleRecorder is a recorder that also implements StaleReleaser, so a test
+// can tell a FORCED release from an ordinary one.
+type staleRecorder struct {
+	recorder
+	mu     sync.Mutex
+	forced []string
+}
+
+func (s *staleRecorder) ForceReleased(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forced = append(s.forced, id)
+}
+
+func (s *staleRecorder) forcedCalls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.forced...)
+}
+
+// TestStaleLatchIsForceReleasedExactlyOnce is the whole point of the
+// watchdog: a hold binding whose key-up never arrives must not leave the
+// microphone open forever.
+func TestStaleLatchIsForceReleasedExactlyOnce(t *testing.T) {
+	r, src, rec := newWatchdogRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down")
+
+	waitFor(t, func() bool { return len(rec.got()) == 2 })
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+
+	if held := r.d.heldCount(); held != 0 {
+		t.Errorf("%d actions still latched after the watchdog fired, want 0", held)
+	}
+	if forced := rec.forcedCalls(); len(forced) != 1 || forced[0] != "global.ptt" {
+		t.Errorf("ForceReleased calls = %v, want exactly [global.ptt]", forced)
+	}
+
+	// And it must not fire a second time.
+	time.Sleep(3 * staleWindow)
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+}
+
+// TestRealKeyUpCancelsTheWatchdog is the cancellation half, and the one that
+// would produce a DOUBLE Released if the timer were not cancelled exactly.
+// A key-up just inside the deadline must win outright.
+func TestRealKeyUpCancelsTheWatchdog(t *testing.T) {
+	r, src, rec := newWatchdogRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.send(t, up(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+
+	// Well past the deadline the press would have expired at.
+	time.Sleep(4 * staleWindow)
+
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+	if forced := rec.forcedCalls(); len(forced) != 0 {
+		t.Errorf("a real key-up should never be reported as forced; got %v", forced)
+	}
+}
+
+// TestWatchdogTimerDoesNotReleaseALaterPress is the generation check.
+//
+// Press, release, press again. The FIRST press's timer may already have fired
+// and be waiting on the lock, where Stop() cannot reach it. Without a
+// generation it would wake up, find the action latched again, and release a
+// press that is only milliseconds old.
+func TestWatchdogTimerDoesNotReleaseALaterPress(t *testing.T) {
+	r, src, rec := newWatchdogRegistrar(t)
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.send(t, up(t, "F1", 0))
+	src.flush(t)
+
+	// Re-press right at the moment the first press's deadline lands.
+	time.Sleep(staleWindow - 10*time.Millisecond)
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	rec.want(t, "global.ptt:down", "global.ptt:up", "global.ptt:down")
+
+	// The second press must survive the first press's expiry...
+	time.Sleep(staleWindow / 2)
+	if held := r.d.heldCount(); held != 1 {
+		t.Fatalf("the second press was released by the FIRST press's timer: held=%d", held)
+	}
+	rec.want(t, "global.ptt:down", "global.ptt:up", "global.ptt:down")
+
+	// ...and then expire on its own deadline.
+	waitFor(t, func() bool { return len(rec.got()) == 4 })
+	rec.want(t, "global.ptt:down", "global.ptt:up", "global.ptt:down", "global.ptt:up")
+}
+
+// TestWatchdogDeadlinesArePerLatch: two keys pressed at different times must
+// expire independently. One shared timer would release a freshly-pressed key
+// because an older one ran out.
+func TestWatchdogDeadlinesArePerLatch(t *testing.T) {
+	r, src, rec := newWatchdogRegistrar(t)
+	mustRegister(t, r, "early", "F1", true, rec)
+	mustRegister(t, r, "late", "F2", true, rec)
+
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+	time.Sleep(staleWindow * 2 / 3)
+	src.send(t, down(t, "F2", 0))
+	src.flush(t)
+	rec.want(t, "early:down", "late:down")
+
+	// "early" expires first and alone.
+	waitFor(t, func() bool { return len(rec.got()) == 3 })
+	rec.want(t, "early:down", "late:down", "early:up")
+	if held := r.d.heldCount(); held != 1 {
+		t.Errorf("held=%d after only the early latch expired, want 1", held)
+	}
+
+	// "late" follows on its own deadline.
+	waitFor(t, func() bool { return len(rec.got()) == 4 })
+	rec.want(t, "early:down", "late:down", "early:up", "late:up")
+}
+
+// TestWatchdogIgnoresPressOnlyBindings: a press binding has no release
+// semantics, so the watchdog must not invent one. Its latch exists only to
+// debounce auto-repeat.
+func TestWatchdogIgnoresPressOnlyBindings(t *testing.T) {
+	r, src, rec := newWatchdogRegistrar(t)
+	mustRegister(t, r, "global.mute_toggle", "M", false, rec)
+
+	src.send(t, down(t, "M", 0))
+	src.flush(t)
+	time.Sleep(4 * staleWindow)
+
+	rec.want(t, "global.mute_toggle:down")
+	if forced := rec.forcedCalls(); len(forced) != 0 {
+		t.Errorf("press-only binding was force-released: %v", forced)
+	}
+	// The debounce latch itself must survive: the key is still physically down.
+	if held := r.d.heldCount(); held != 1 {
+		t.Errorf("held=%d, want 1: the watchdog must not clear a press binding's "+
+			"auto-repeat latch either", held)
+	}
+}
+
+// TestDrainPathsCancelPendingWatchdogTimers covers the interaction the review
+// asked about: a latch removed by one of the existing drain paths must not
+// then be released a second time by its watchdog timer.
+func TestDrainPathsCancelPendingWatchdogTimers(t *testing.T) {
+	cases := []struct {
+		name  string
+		drain func(t *testing.T, r *hookRegistrar, src *fakeSource, rec *staleRecorder)
+	}{
+		{"UnregisterAll/clear", func(t *testing.T, r *hookRegistrar, _ *fakeSource, _ *staleRecorder) {
+			r.UnregisterAll()
+		}},
+		{"stream death/releaseHeld", func(t *testing.T, r *hookRegistrar, src *fakeSource, _ *staleRecorder) {
+			src.send(t, hook.Event{Kind: hook.HookDisabled})
+			src.flush(t)
+		}},
+		{"Close", func(t *testing.T, r *hookRegistrar, _ *fakeSource, _ *staleRecorder) {
+			r.Close()
+		}},
+		{"rebind/add", func(t *testing.T, r *hookRegistrar, _ *fakeSource, rec *staleRecorder) {
+			mustRegister(t, r, "global.ptt", "F2", true, rec)
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, src, rec := newWatchdogRegistrar(t)
+			mustRegister(t, r, "global.ptt", "F1", true, rec)
+
+			src.send(t, down(t, "F1", 0))
+			src.flush(t)
+			rec.want(t, "global.ptt:down")
+
+			c.drain(t, r, src, rec)
+			rec.want(t, "global.ptt:down", "global.ptt:up")
+
+			// Well past the deadline the latch would have expired at.
+			time.Sleep(4 * staleWindow)
+
+			rec.want(t, "global.ptt:down", "global.ptt:up")
+			if forced := rec.forcedCalls(); len(forced) != 0 {
+				t.Errorf("a latch already drained by %s was force-released again: %v",
+					c.name, forced)
+			}
+		})
+	}
+}
+
+// TestWatchdogDefaultIsTheApprovedTimeout pins the product decision so it
+// cannot drift silently. 120 s was chosen deliberately: below any plausible
+// single transmission is too aggressive, and unbounded is an open microphone.
+func TestWatchdogDefaultIsTheApprovedTimeout(t *testing.T) {
+	if DefaultStaleLatchTimeout != 120*time.Second {
+		t.Errorf("DefaultStaleLatchTimeout = %v, want 120s", DefaultStaleLatchTimeout)
+	}
+
+	src := newFakeSource()
+	t.Cleanup(func() { src.End() })
+	r := newHookRegistrar(src)
+	if got := r.d.staleAfter; got != DefaultStaleLatchTimeout {
+		t.Errorf("a registrar built the normal way has staleAfter=%v, want %v -- the "+
+			"watchdog must be on by default, not opt-in", got, DefaultStaleLatchTimeout)
+	}
+}
+
+// TestWatchdogCanBeDisabled: a non-positive timeout turns it off entirely,
+// which is what the rest of the suite relies on to assert that a latch STAYS
+// latched.
+func TestWatchdogCanBeDisabled(t *testing.T) {
+	src := newFakeSource()
+	r := newHookRegistrar(src)
+	r.setStaleLatchTimeout(0)
+	rec := &staleRecorder{}
+	t.Cleanup(func() { src.End() })
+
+	mustRegister(t, r, "global.ptt", "F1", true, rec)
+	src.send(t, down(t, "F1", 0))
+	src.flush(t)
+
+	time.Sleep(4 * staleWindow)
+	rec.want(t, "global.ptt:down")
+	if held := r.d.heldCount(); held != 1 {
+		t.Errorf("held=%d with the watchdog disabled, want 1", held)
+	}
+}
+
+// TestForceReleaseIgnoresAStaleGeneration pins the generation check on its
+// own, deterministically, by calling forceRelease directly.
+//
+// It needs its own test because the generation check and timer.Stop() are two
+// INDEPENDENT guards against the same hazard, so removing either one alone
+// leaves the other covering it and no timing-based test fails. The window the
+// generation check exists for -- a timer that has already fired and is blocked
+// on d.mu, where Stop() cannot reach it -- cannot be hit reliably from
+// outside. Driving forceRelease by hand reproduces exactly that state.
+func TestForceReleaseIgnoresAStaleGeneration(t *testing.T) {
+	d := newDispatcher(0) // watchdog off: this test supplies the timer's effect
+	rec := &staleRecorder{}
+	const code keyCode = 42
+
+	d.add("global.ptt", boundAction{code: code, hold: true, h: rec})
+	d.handle(keyEvent{edge: edgeDown, code: code})
+	rec.want(t, "global.ptt:down")
+
+	// A timer left over from an EARLIER press of the same action, waking up
+	// after a newer press has already latched. It must do nothing.
+	d.forceRelease("global.ptt", 999)
+
+	rec.want(t, "global.ptt:down")
+	if held := d.heldCount(); held != 1 {
+		t.Fatalf("a stale-generation timer released the current press: held=%d, want 1", held)
+	}
+	if forced := rec.forcedCalls(); len(forced) != 0 {
+		t.Errorf("stale timer reported a forced release: %v", forced)
+	}
+
+	// The timer belonging to THIS press does fire. gen starts at 1.
+	d.forceRelease("global.ptt", 1)
+
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+	if held := d.heldCount(); held != 0 {
+		t.Errorf("held=%d after the matching generation fired, want 0", held)
+	}
+	if forced := rec.forcedCalls(); len(forced) != 1 {
+		t.Errorf("ForceReleased calls = %v, want exactly one", forced)
+	}
+}
+
+// TestForceReleaseOnAnAbsentLatchIsANoOp: the ordinary cancellation case,
+// where the key-up already removed the latch and the timer is simply late.
+func TestForceReleaseOnAnAbsentLatchIsANoOp(t *testing.T) {
+	d := newDispatcher(0)
+	rec := &staleRecorder{}
+	const code keyCode = 42
+
+	d.add("global.ptt", boundAction{code: code, hold: true, h: rec})
+	d.handle(keyEvent{edge: edgeDown, code: code})
+	d.handle(keyEvent{edge: edgeUp, code: code})
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+
+	d.forceRelease("global.ptt", 1) // the timer fires after the real release
+	d.forceRelease("never.bound", 1)
+
+	rec.want(t, "global.ptt:down", "global.ptt:up")
+	if forced := rec.forcedCalls(); len(forced) != 0 {
+		t.Errorf("a late timer produced a second release: %v", forced)
+	}
+}

@@ -790,3 +790,53 @@ func TestHotkeyEdgesWithoutBackendDoNotPanic(t *testing.T) {
 		t.Errorf("no backend wired, so nothing should be logged; got %q", buf.String())
 	}
 }
+
+// TestForceReleasedLogsAtWarn pins the stale-latch watchdog's annotation.
+//
+// Warn, not Info: an ordinary hotkey edge is routine, but this one says a
+// release was LOST upstream and the user's microphone was open for the whole
+// timeout. Same privacy rule as everywhere else -- action ID, never a key.
+func TestForceReleasedLogsAtWarn(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	a.ForceReleased("global.ptt")
+
+	out := strings.TrimSpace(buf.String())
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("a forced release must log at Warn, got: %q", out)
+	}
+	if !strings.Contains(out, "action=global.ptt") {
+		t.Errorf("log line missing the action ID: %q", out)
+	}
+	if strings.Count(out, "\n") != 0 {
+		t.Errorf("expected exactly one log line, got: %q", out)
+	}
+}
+
+// TestForceReleasedIsAStaleReleaser: the OS layer only calls this through the
+// optional hotkeys.StaleReleaser interface, so App failing to satisfy it would
+// silently disable the Warn with nothing failing to compile.
+func TestForceReleasedIsAStaleReleaser(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	if _, ok := any(a).(hotkeys.StaleReleaser); !ok {
+		t.Fatal("*App must implement hotkeys.StaleReleaser, or forced releases " +
+			"are never annotated in the log")
+	}
+}
+
+// TestForceReleasedWithoutBackendDoesNotPanic: the watchdog fires from a timer
+// goroutine and can outlive teardown.
+func TestForceReleasedWithoutBackendDoesNotPanic(t *testing.T) {
+	a := NewForTest(state.New(), nil, nil)
+	var buf bytes.Buffer
+	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
+
+	a.ForceReleased("global.ptt")
+
+	if buf.Len() != 0 {
+		t.Errorf("no backend wired, so nothing should be logged; got %q", buf.String())
+	}
+}

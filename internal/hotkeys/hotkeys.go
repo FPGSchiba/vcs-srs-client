@@ -24,6 +24,29 @@ type Handler interface {
 	Released(actionID string)
 }
 
+// StaleReleaser is an OPTIONAL extra a Handler may implement to be told that
+// a Released was FORCED by the stale-latch watchdog rather than delivered by
+// the OS (see dispatcher.forceRelease).
+//
+// Optional, and for the same reason Closer is: every fake Handler in the test
+// suite implements the two-method Handler, and widening it to carry an
+// anomaly signal only one implementation cares about would break them all.
+//
+// It exists because this package has no logger and should not grow one -- the
+// application does, and it is already the thing that turns a hotkey edge into
+// a log line. A force-release means something upstream went wrong and the
+// user's microphone was open for the whole timeout, which is a Warn, not the
+// Info an ordinary edge gets.
+//
+// The ordinary Released still follows, so nothing downstream needs to know
+// about this: the frontend's push-to-talk indicator clears exactly as it would
+// on a real key-up.
+type StaleReleaser interface {
+	// ForceReleased reports that actionID was released by the watchdog.
+	// Called immediately before the matching Released. Must not block.
+	ForceReleased(actionID string)
+}
+
 // Registrar is the OS seam.
 type Registrar interface {
 	Register(actionID string, c chord.Chord, hold bool, h Handler) error

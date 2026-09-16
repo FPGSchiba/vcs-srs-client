@@ -680,6 +680,29 @@ func (a *App) Released(actionID string) {
 	a.settings.em.HotkeyReleased(actionID)
 }
 
+// ForceReleased implements hotkeys.StaleReleaser. The OS layer calls it when
+// its stale-latch watchdog had to release a hotkey that never got its key-up.
+//
+// Warn, not Info: an ordinary edge is routine, but this one means a release
+// was LOST somewhere upstream -- a dropped event, a key released while we were
+// backgrounded, a listener that died without saying so -- and the user's
+// microphone was open for the whole timeout before we noticed. It is rare by
+// construction, so it is worth waking someone reading the log.
+//
+// Action ID only. The OS layer sees every keystroke on the machine, so the
+// rule that a log line never carries a key identity holds here exactly as it
+// does in Pressed and Released.
+//
+// The matching Released arrives immediately after this and does the actual
+// work; this call only annotates it.
+func (a *App) ForceReleased(actionID string) {
+	if a.settings == nil {
+		return
+	}
+	a.logger.Warn("hotkey force-released after timeout: no key-up was ever delivered",
+		"action", actionID, "after", hotkeys.DefaultStaleLatchTimeout)
+}
+
 // keybindActions returns the full bindable action registry: static actions
 // plus per-radio actions derived from the LOCAL client's own radios. When not
 // connected (no self, no radios) only the static actions are returned.

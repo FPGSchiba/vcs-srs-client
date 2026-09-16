@@ -178,6 +178,18 @@ type hookRegistrar struct {
 	starts     int // how many times the stream has been started; tests assert on it
 }
 
+// DefaultStaleLatchTimeout is how long a hold binding may stay latched with
+// no key-up before the watchdog force-releases it (see
+// dispatcher.forceRelease).
+//
+// 120 seconds is a product decision, not a technical one, and it is a
+// two-sided trade. Too short and the watchdog cuts off a user mid-sentence on
+// a legitimately long transmission -- a new failure on the COMMON path, to fix
+// a rare one. Too long and a stranded microphone stays open. 120 s sits above
+// any plausible single push-to-talk transmission while still bounding the
+// damage when a release is genuinely lost.
+const DefaultStaleLatchTimeout = 120 * time.Second
+
 // readerStopTimeout bounds how long a teardown waits for the reader goroutine
 // to acknowledge its quit signal.
 //
@@ -197,7 +209,27 @@ func NewOSRegistrar() Registrar { return newHookRegistrar(gohookSource{}) }
 
 // newHookRegistrar builds a registrar over an injected event source.
 func newHookRegistrar(src eventSource) *hookRegistrar {
-	return &hookRegistrar{d: newDispatcher(), src: src, retryArmed: true}
+	return &hookRegistrar{
+		d:          newDispatcher(DefaultStaleLatchTimeout),
+		src:        src,
+		retryArmed: true,
+	}
+}
+
+// setStaleLatchTimeout overrides the stale-latch watchdog deadline.
+//
+// For tests only, and UNEXPORTED for that reason -- a test that genuinely
+// waits two minutes is a test nobody runs, but a timing knob reachable from
+// outside the package is one somebody eventually sets to something absurd.
+// A non-positive value disables the watchdog.
+//
+// Only safe before the first Register: it does not re-arm timers that are
+// already running, which is exactly what a test wants and not what a live
+// caller would expect.
+func (r *hookRegistrar) setStaleLatchTimeout(d time.Duration) {
+	r.d.mu.Lock()
+	r.d.staleAfter = d
+	r.d.mu.Unlock()
 }
 
 // Register records a chord to match and makes sure the OS stream is running.

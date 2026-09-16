@@ -933,6 +933,8 @@ guessed.** I would propose 120 s as a starting point — long enough that no rea
 hits it, short enough that a stranded mic is bounded — but that is a suggestion, not a
 decision I should make.
 
+> **Decided and implemented.** The project owner approved 120 s. See **§15**.
+
 The silent-death gap is now documented on `hookRegistrar` itself, pointing here.
 
 ## 14.2 I2 — `ensureStream` could deadlock holding `lifeMu`
@@ -1066,3 +1068,204 @@ $ npm run build                                       # built in 374ms
 
 All of `hotkeys_test.go`'s original 328 lines still pass unmodified, through both the
 lifecycle rewrite and the new `Closer` seam.
+
+---
+
+# Review round 3 — stale-latch watchdog
+
+Commit `823d06a`. Owner's approved timeout: **120 seconds**.
+
+## 15.1 What it does
+
+`dispatcher.forceRelease` — if a `hold` binding has been latched continuously for
+`DefaultStaleLatchTimeout`, it is released exactly as though a `KeyUp` had arrived: the latch
+clears and `Released` fires.
+
+It is deliberately **indifferent to why the release was lost**, which is the whole reason it
+earns its place. Every other guard in this package handles a cause we can observe — the stream
+reporting itself dead, the channel closing, a rebind, a suspend, a `Close`. This one covers the
+ones we cannot:
+
+- a `KeyUp` gohook dropped from its full 1024-slot buffer (`send()` discards rather than
+  stalling the input path);
+- a key released while the app was backgrounded;
+- the silent X11 death from §14.1, where `x11Loop` returns with no `HookDisabled` and no
+  channel close, and nothing at this layer can tell;
+- whatever we have not thought of.
+
+That last line is the point. A watchdog that only fires for causes we enumerated would be a
+fifth copy of the drain paths, not a last line of defence.
+
+## 15.2 Design
+
+**Per-latch deadline, armed at the moment the latch is set.** `latched` went from
+`map[string]bool` to `map[string]*latch`, where a `latch` carries its generation and its
+timer. One shared timer would release a freshly-pressed key because an older one expired.
+
+**Scoped to `hold` bindings.** A press binding still latches — that is the auto-repeat
+debounce — but has no release semantics to time out, so no timer is armed for it and its latch
+is left alone. Verified by `TestWatchdogIgnoresPressOnlyBindings`, which asserts both that no
+`Released` is invented *and* that the debounce latch survives.
+
+**It cannot fight a real release, because it uses the same drain path.** All latch removal now
+funnels through one primitive:
+
+```go
+// takeLatchLocked removes ONE latch, cancels its watchdog timer, and returns
+// the Released it owes. This is the ONLY place a latch is removed.
+func (d *dispatcher) takeLatchLocked(actionID string) []pending
+```
+
+`drainLatchedLocked` is now a loop over it, and the real key-up path, `add`, `clear`,
+`releaseHeld`, `Close` and `forceRelease` all go through it. Whichever of a real `KeyUp` and
+the timer reaches `d.mu` first removes the latch; the loser finds nothing and returns. A
+double-`Released` is not prevented by care at six call sites — it is unreachable because there
+is one call site.
+
+**Two independent guards against a stale timer**, and they are independent on purpose:
+
+1. `timer.Stop()` in `takeLatchLocked` — cancels a timer that has not fired yet. This is the
+   ordinary case and it is an *optimisation*: it avoids the wake-up entirely.
+2. A **generation** on each latch, compared in `forceRelease`. This is the correctness guard.
+   `Stop()` cannot reach a timer that has **already fired and is blocked on `d.mu`** — that
+   goroutine will wake up holding a stale intent, find the action latched again from a later
+   press, and release a press that is milliseconds old. Comparing generations makes that
+   wake-up a no-op.
+
+**Injectable timeout**, following `setCaptureTimeout` / `setHotkeyPermissionPoll`:
+unexported `(*hookRegistrar).setStaleLatchTimeout`. The suite runs the watchdog at 60 ms. A
+non-positive value disables it. Unexported for the same reason the others are — a timing knob
+reachable from outside is one somebody eventually sets to something absurd — and documented as
+safe only before the first `Register`, since it does not re-arm running timers.
+
+## 15.3 The Warn log
+
+`hotkeys` has no logger and should not grow one. Instead, an **optional** `StaleReleaser`
+interface, mirroring the `Closer` pattern from §14.3:
+
+```go
+type StaleReleaser interface{ ForceReleased(actionID string) }
+```
+
+`*App` implements it and logs at **Warn**:
+
+```
+level=WARN msg="hotkey force-released after timeout: no key-up was ever delivered"
+          action=global.ptt after=2m0s
+```
+
+Optional for the same reason `Closer` is: every fake `Handler` in the suite implements the
+two-method `Handler`, and widening it to carry an anomaly signal only one implementation cares
+about would break them all.
+
+Warn rather than the Info an ordinary edge gets, because it means a release was **lost**
+upstream and the user's microphone was open for two minutes. **Action ID only** — the privacy
+rule holds here exactly as in `Pressed`/`Released`. The ordinary `Released` follows
+immediately, so this call only annotates; it does not do the work.
+
+## 15.4 UI surfacing: **no**, and why
+
+I agree with the instinct, and there is a structural reason beyond "no alerting until Phase 7":
+
+**The UI is already correct without it.** The forced release goes out as an ordinary
+`Released`, so `hotkeys:released` fires and the frontend's push-to-talk indicator clears
+exactly as it would on a real key-up. The user's *state* is already repaired and visible. What
+is missing is only the *explanation*, and that is what the log is for.
+
+**The available surface would be the wrong one.** `hotkeys:state` describes **registration
+health** — `Registered`, `LastError`, `Failed` — and after a force-release every one of those
+is still true and correct. Registration is fine; a single event was lost. Pushing a transient
+runtime anomaly through a channel whose entire vocabulary is "is the binding live" would make
+`Registered()` mean two different things, which is precisely the conflation §7 of this report
+was written to avoid.
+
+So: not surfaced. If Phase 7 brings a real notification channel, this is a natural first
+customer — one line, `ForceReleased` already exists as the hook, and nothing in `hotkeys`
+would need to change.
+
+## 15.5 Tests
+
+12 new tests (8 watchdog + 2 deterministic `forceRelease` + 3 app-side, one shared).
+
+Covering each item asked for: force-released exactly once and not twice; a real `KeyUp` inside
+the deadline cancelling it with exactly one `Released` total; two latches with different start
+times expiring independently; press bindings unaffected; and all four existing drain paths
+(`clear`, `releaseHeld`, `Close`, `add`) cancelling a pending timeout without a double-release
+— that last one as a table so a fifth drain path added later has an obvious place to go.
+
+Plus `TestWatchdogDefaultIsTheApprovedTimeout`, which pins 120 s **and** that a registrar built
+the normal way has the watchdog on rather than opt-in, so the owner's decision cannot drift
+silently.
+
+### Load-bearing verification
+
+| # | break | caught by |
+| --- | --- | --- |
+| W1 | no timer ever armed (the pre-watchdog state) | `TestStaleLatchIsForceReleasedExactlyOnce`, `…TimerDoesNotReleaseALaterPress`, `…DeadlinesArePerLatch` |
+| W2 | generation check dropped | `TestForceReleaseIgnoresAStaleGeneration` (see below) |
+| W3 | `timer.Stop()` dropped | *(nothing — by design; see below)* |
+| W2+W3 | **both** guards dropped | `TestWatchdogTimerDoesNotReleaseALaterPress` — *"the second press was released by the FIRST press's timer: held=0"* |
+| W4 | `ForceReleased` logs at Info | `TestForceReleasedLogsAtWarn` |
+| W5 | `App.ForceReleased` renamed away | build failure across `internal/app` |
+| W6 | `forceRelease` skips the `StaleReleaser` call | `TestStaleLatchIsForceReleasedExactlyOnce`, `TestForceReleaseIgnoresAStaleGeneration` |
+| W7 | watchdog off by default | `TestWatchdogDefaultIsTheApprovedTimeout` |
+| W8 | `StaleReleaser` signature drifts while `App` still compiles | `TestForceReleasedIsAStaleReleaser` |
+
+**W2 and W3 individually caught nothing on the first pass, and that is correct rather than
+hollow** — they are two independent guards against the same hazard, so removing either one
+leaves the other covering it. I verified the pair properly two ways: removing **both** fails
+`TestWatchdogTimerDoesNotReleaseALaterPress`, and the generation check is now pinned *on its
+own* by `TestForceReleaseIgnoresAStaleGeneration`, which calls `forceRelease` directly with a
+stale generation.
+
+That direct test exists because the window the generation check guards — a timer already fired
+and blocked on the mutex — **cannot be hit reliably from outside**; any timing-based attempt
+would be flaky in one direction or vacuous in the other. Driving `forceRelease` by hand
+reproduces exactly that state deterministically. It fails against W2 with
+*"handler calls = [down up], want [down]"*.
+
+`timer.Stop()` has no test of its own, and I am not going to pretend otherwise: it is a pure
+optimisation (skip a wake-up), the generation check is what makes cancellation correct, and a
+test that "proves" `Stop()` would only be re-testing the standard library. Documented as such
+in the code.
+
+## 15.6 Not touched
+
+Bare-key modifier semantics — unchanged, per the owner.
+
+## 15.7 Verification
+
+```
+$ gofmt -l .                                         # (excluding node_modules) — empty
+$ go vet -tags purego ./...                          # clean
+$ GOOS=darwin  CGO_ENABLED=0 go vet -tags purego ./internal/hotkeys/    # OK
+$ GOOS=linux   CGO_ENABLED=0 go vet -tags purego ./internal/hotkeys/    # OK
+$ GOOS=windows CGO_ENABLED=0 go vet -tags purego ./internal/hotkeys/    # OK
+
+$ go test -tags purego -race -count=1 ./...
+ok  internal/app 6.939s     ok  internal/auth 1.423s     ok  internal/chord 1.965s
+ok  internal/config 2.249s  ok  internal/control 2.637s  ok  internal/events 2.868s
+ok  internal/hotkeys 5.855s ok  internal/keybinds 1.940s ok  internal/session 3.688s
+ok  internal/state 2.901s   ok  internal/windowstate 2.548s  ok  pkg/logger 2.678s
+
+320 passing Go tests across 12 packages (was 303).
+internal/hotkeys: 73 (darwin+cgo) / 74 (darwin CGO_ENABLED=0).
+internal/hotkeys coverage: 92.0% (was 91.3%).
+
+$ go build -tags purego -ldflags="-w -s" -o … .      # 15,289,426 bytes, links
+$ cd frontend && npx tsc --noEmit                     # clean
+$ npx vitest run                                      # 10 files, 57 tests passed
+$ npm run build                                       # built in 371ms
+```
+
+`hotkeys_test.go`'s original 328 lines still pass unmodified — now through the lifecycle
+rewrite, the `Closer` seam, the latch-type change and the watchdog.
+
+## 15.8 Still unverifiable here
+
+Unchanged from §12, with one addition: **the watchdog has never fired against a real dropped
+`KeyUp`.** Its trigger condition is by definition a bug upstream, so the tests drive it through
+a shortened deadline rather than by reproducing a lost event. What the tests prove is that when
+it fires it releases correctly, exactly once, for the right latch, and cannot fight a real
+release. Whether 120 s is the right number in the field is a judgement that needs real users,
+and it is now a single named constant to revise.

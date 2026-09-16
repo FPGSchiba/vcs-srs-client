@@ -3,6 +3,7 @@ package hotkeys
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
 )
@@ -51,11 +52,32 @@ type boundAction struct {
 type dispatcher struct {
 	mu      sync.Mutex
 	binds   map[string]boundAction
-	latched map[string]bool
+	latched map[string]*latch
+
+	// gen numbers latches so a stale watchdog timer cannot release a LATER
+	// press of the same action. Stopping a timer is not enough on its own: a
+	// timer that has already fired and is blocked on d.mu cannot be stopped,
+	// and would otherwise wake up holding a stale intent.
+	gen uint64
+
+	// staleAfter is how long a hold binding may stay latched before the
+	// watchdog force-releases it. Zero disables the watchdog entirely.
+	staleAfter time.Duration
 }
 
-func newDispatcher() *dispatcher {
-	return &dispatcher{binds: map[string]boundAction{}, latched: map[string]bool{}}
+// latch is one held hotkey: its generation, and the watchdog timer armed for
+// it (nil for a press-only binding, or when the watchdog is disabled).
+type latch struct {
+	gen   uint64
+	timer *time.Timer
+}
+
+func newDispatcher(staleAfter time.Duration) *dispatcher {
+	return &dispatcher{
+		binds:      map[string]boundAction{},
+		latched:    map[string]*latch{},
+		staleAfter: staleAfter,
+	}
 }
 
 // add registers one action, replacing any previous binding for that ID.
@@ -72,13 +94,9 @@ func newDispatcher() *dispatcher {
 // continuing to behave.
 func (d *dispatcher) add(actionID string, b boundAction) {
 	d.mu.Lock()
-	var release []pending
-	if d.latched[actionID] {
-		if prev, ok := d.binds[actionID]; ok && prev.hold {
-			release = append(release, pending{id: actionID, h: prev.h})
-		}
-		delete(d.latched, actionID)
-	}
+	// takeLatchLocked reads d.binds, which still holds the PREVIOUS binding
+	// at this point -- which is the one that owes the Released.
+	release := d.takeLatchLocked(actionID)
 	d.binds[actionID] = b
 	d.mu.Unlock()
 
@@ -136,16 +154,55 @@ type pending struct {
 	h  Handler
 }
 
+// takeLatchLocked removes ONE latch, cancels its watchdog timer, and returns
+// the Released it owes (nil for a press-only binding, or when nothing was
+// latched). Caller holds d.mu.
+//
+// This is the ONLY place a latch is removed. Every release path -- a real
+// key-up, a rebind, Suspend, a dead stream, Close, and the stale-latch
+// watchdog -- funnels through here, which is what makes "a latch never
+// disappears without its Released" and "a cancelled latch never fires later"
+// single facts rather than six coincidences.
+func (d *dispatcher) takeLatchLocked(actionID string) []pending {
+	l := d.latched[actionID]
+	if l == nil {
+		return nil
+	}
+	if l.timer != nil {
+		l.timer.Stop()
+	}
+	delete(d.latched, actionID)
+
+	if b, ok := d.binds[actionID]; ok && b.hold {
+		return []pending{{id: actionID, h: b.h}}
+	}
+	return nil
+}
+
+// setLatchLocked marks an action held and, for a hold binding, arms its
+// watchdog deadline. Caller holds d.mu.
+func (d *dispatcher) setLatchLocked(actionID string, b boundAction) {
+	d.gen++
+	l := &latch{gen: d.gen}
+	d.latched[actionID] = l
+
+	if b.hold && d.staleAfter > 0 {
+		gen := l.gen
+		l.timer = time.AfterFunc(d.staleAfter, func() {
+			d.forceRelease(actionID, gen)
+		})
+	}
+}
+
 // drainLatchedLocked empties the latch set and returns the hold bindings that
 // owe a Released. Caller holds d.mu.
 func (d *dispatcher) drainLatchedLocked() []pending {
 	var out []pending
+	// Deleting during range is defined behaviour in Go: entries removed
+	// before they are reached are simply not produced.
 	for id := range d.latched {
-		if b, ok := d.binds[id]; ok && b.hold {
-			out = append(out, pending{id: id, h: b.h})
-		}
+		out = append(out, d.takeLatchLocked(id)...)
 	}
-	d.latched = map[string]bool{}
 	sortPending(out)
 	return out
 }
@@ -173,21 +230,18 @@ func (d *dispatcher) handle(e keyEvent) {
 			if b.code != e.code || b.mods != e.mods {
 				continue
 			}
-			if d.latched[id] {
+			if d.latched[id] != nil {
 				continue // auto-repeat of a key already held
 			}
-			d.latched[id] = true
+			d.setLatchLocked(id, b)
 			press = append(press, pending{id: id, h: b.h})
 		}
 	case edgeUp:
 		for id, b := range d.binds {
-			if b.code != e.code || !d.latched[id] {
+			if b.code != e.code || d.latched[id] == nil {
 				continue
 			}
-			delete(d.latched, id)
-			if b.hold {
-				release = append(release, pending{id: id, h: b.h})
-			}
+			release = append(release, d.takeLatchLocked(id)...)
 		}
 	}
 	d.mu.Unlock()
@@ -201,6 +255,51 @@ func (d *dispatcher) handle(e keyEvent) {
 		p.h.Pressed(p.id)
 	}
 	for _, r := range release {
+		r.h.Released(r.id)
+	}
+}
+
+// forceRelease is the stale-latch watchdog firing: a hold binding has been
+// latched for staleAfter with no key-up, so we release it as though one had
+// arrived.
+//
+// THIS IS THE LAST LINE OF DEFENCE FOR AN OPEN MICROPHONE, and it is
+// deliberately indifferent to WHY the release was lost. Every other guard in
+// this package handles a cause we can observe -- the stream reporting itself
+// dead, the channel closing, a rebind, a suspend. This one covers the ones we
+// cannot: a KeyUp that gohook dropped from a full buffer, a key released while
+// the app was backgrounded, an X11 backend that died silently without telling
+// anyone (see hookRegistrar), and whatever else we have not thought of. If a
+// hotkey has been "held" for two minutes, something upstream went wrong and
+// the user's microphone has been open for two minutes.
+//
+// gen is what makes cancellation exact. Stopping the timer on a real key-up
+// covers the ordinary case, but a timer that has ALREADY fired and is waiting
+// on d.mu cannot be stopped -- it would wake up, find the action latched again
+// from a later press, and release that one instead. Comparing generations
+// makes the stale wake-up a no-op.
+//
+// Note it releases through takeLatchLocked like everything else, so a real
+// key-up racing this can never produce two Released calls: whichever reaches
+// the lock first removes the latch, and the loser finds nothing.
+func (d *dispatcher) forceRelease(actionID string, gen uint64) {
+	d.mu.Lock()
+	l := d.latched[actionID]
+	if l == nil || l.gen != gen {
+		// Already released, or this timer belongs to an older press.
+		d.mu.Unlock()
+		return
+	}
+	release := d.takeLatchLocked(actionID)
+	d.mu.Unlock()
+
+	for _, r := range release {
+		// Warn first, so the log explains the release that follows it. Action
+		// ID only -- never a key identity, same rule as everywhere else in
+		// this package.
+		if sr, ok := r.h.(StaleReleaser); ok {
+			sr.ForceReleased(r.id)
+		}
 		r.h.Released(r.id)
 	}
 }
