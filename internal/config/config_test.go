@@ -4,8 +4,11 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 )
 
@@ -62,7 +65,7 @@ func TestSave_RoundTrip(t *testing.T) {
 	if got.General != cfg.General {
 		t.Errorf("General lost in round trip: got %+v, want %+v", got.General, cfg.General)
 	}
-	if !maps.Equal(got.Keybinds, cfg.Keybinds) {
+	if !maps.EqualFunc(got.Keybinds, cfg.Keybinds, slices.Equal) {
 		t.Errorf("Keybinds lost in round trip: got %v, want %v", got.Keybinds, cfg.Keybinds)
 	}
 }
@@ -81,7 +84,7 @@ func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
 	if cfg.General != def.General {
 		t.Errorf("expected General defaults, got %+v", cfg.General)
 	}
-	if !maps.Equal(cfg.Keybinds, def.Keybinds) {
+	if !maps.EqualFunc(cfg.Keybinds, def.Keybinds, slices.Equal) {
 		t.Errorf("expected Keybinds defaults, got %v", cfg.Keybinds)
 	}
 	// The file must now exist on disk.
@@ -99,7 +102,7 @@ func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
 	if reloaded.General != def.General {
 		t.Errorf("expected General to survive reload, got %+v", reloaded.General)
 	}
-	if !maps.Equal(reloaded.Keybinds, def.Keybinds) {
+	if !maps.EqualFunc(reloaded.Keybinds, def.Keybinds, slices.Equal) {
 		t.Errorf("expected Keybinds to survive reload, got %v", reloaded.Keybinds)
 	}
 }
@@ -164,9 +167,9 @@ func TestKeybindsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	cfg := config.Default()
-	cfg.Keybinds = map[string]string{
-		"global.ptt":     "F1",
-		"radio.1.select": "Alt+1",
+	cfg.Keybinds = map[string]config.KeybindValue{
+		"global.ptt":     {"F1"},
+		"radio.1.select": {"Alt+1"},
 	}
 	cfg.General.StartMinimized = true
 	if err := config.Save(path, cfg); err != nil {
@@ -176,7 +179,10 @@ func TestKeybindsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.Keybinds["global.ptt"] != "F1" || got.Keybinds["radio.1.select"] != "Alt+1" {
+	if v := got.Keybinds["global.ptt"]; len(v) != 1 || v[0] != "F1" {
+		t.Errorf("keybinds lost in round trip: %v", got.Keybinds)
+	}
+	if v := got.Keybinds["radio.1.select"]; len(v) != 1 || v[0] != "Alt+1" {
 		t.Errorf("keybinds lost in round trip: %v", got.Keybinds)
 	}
 	if !got.General.StartMinimized {
@@ -263,7 +269,93 @@ func TestKeybindsKeyNameMatchesOnDiskContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.Keybinds["global.ptt"] != "F1" || got.Keybinds["radio.1.select"] != "Alt+1" {
+	if v := got.Keybinds["global.ptt"]; len(v) != 1 || v[0] != "F1" {
 		t.Errorf("keybinds from literal TOML = %v, want F1 and Alt+1 present", got.Keybinds)
+	}
+	if v := got.Keybinds["radio.1.select"]; len(v) != 1 || v[0] != "Alt+1" {
+		t.Errorf("keybinds from literal TOML = %v, want F1 and Alt+1 present", got.Keybinds)
+	}
+}
+
+func TestKeybindValueAcceptsStringOrArray(t *testing.T) {
+	// Literal fixture, not a symmetric round trip: Phase 3 proved a
+	// round-trip test stays green with a mistyped struct tag.
+	const in = `
+[keybinds]
+"global.push_to_mute" = "V"
+"global.ptt" = ["F1", "joy:throttle-a1:btn12"]
+"radio.1.ptt" = ["joy:throttle-a1:btn7+stick-c3:btn3"]
+`
+	var got config.Config
+	if _, err := toml.Decode(in, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v := got.Keybinds["global.push_to_mute"]; len(v) != 1 || v[0] != "V" {
+		t.Errorf("scalar keybind = %v, want [V]", v)
+	}
+	if v := got.Keybinds["global.ptt"]; len(v) != 2 ||
+		v[0] != "F1" || v[1] != "joy:throttle-a1:btn12" {
+		t.Errorf("array keybind = %v, want [F1 joy:throttle-a1:btn12]", v)
+	}
+	if v := got.Keybinds["radio.1.ptt"]; len(v) != 1 ||
+		v[0] != "joy:throttle-a1:btn7+stick-c3:btn3" {
+		t.Errorf("modifier keybind = %v", v)
+	}
+}
+
+func TestSingleKeyboardChordStaysAScalarOnDisk(t *testing.T) {
+	// Global constraint 8: a user who never binds a joystick must never see
+	// their config.toml change shape.
+	cfg := config.Default()
+	cfg.Keybinds = map[string]config.KeybindValue{
+		"global.push_to_mute": {"V"},
+		"global.ptt":          {"F1", "joy:throttle-a1:btn12"},
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"global.push_to_mute" = "V"`) {
+		t.Errorf("single keyboard chord was not written as a scalar:\n%s", text)
+	}
+	if !strings.Contains(text, `"global.ptt" = ["F1", "joy:throttle-a1:btn12"]`) {
+		t.Errorf("multi-trigger action was not written as an array:\n%s", text)
+	}
+}
+
+func TestLoneJoyTriggerIsWrittenAsArray(t *testing.T) {
+	// A single JOYSTICK trigger must still be an array: writing it bare
+	// would be legal TOML but would make the file's shape depend on which
+	// kind of trigger happens to be first, which is harder to reason about
+	// than "keyboard-only files never change".
+	cfg := config.Default()
+	cfg.Keybinds = map[string]config.KeybindValue{
+		"global.ptt": {"joy:throttle-a1:btn12"},
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `"global.ptt" = ["joy:throttle-a1:btn12"]`) {
+		t.Errorf("lone joy trigger not written as array:\n%s", raw)
+	}
+}
+
+func TestKeybindValueRejectsNonString(t *testing.T) {
+	const in = `
+[keybinds]
+global.ptt = [1, 2]
+`
+	var got config.Config
+	if _, err := toml.Decode(in, &got); err == nil {
+		t.Error("decode of numeric keybind entries = nil error, want failure")
 	}
 }

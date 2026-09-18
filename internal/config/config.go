@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -28,10 +30,67 @@ type Config struct {
 
 	General General `toml:"general"`
 
-	// Keybinds is the raw action-ID -> chord-string map. It is held raw rather
-	// than typed so that entries written by a newer client version survive a
-	// load/save cycle. internal/keybinds owns interpretation.
-	Keybinds map[string]string `toml:"keybinds"`
+	// Keybinds is the raw action-ID -> trigger-string list. It is held raw
+	// rather than typed so an unknown action ID written by a newer version
+	// survives a load/save cycle. internal/keybinds owns interpretation, and
+	// internal/trigger owns the string grammar -- this package deliberately
+	// knows neither.
+	Keybinds map[string]KeybindValue `toml:"keybinds"`
+
+	// KeybindDevices maps a device id to its product name, purely for
+	// display. It exists so a binding for a device that is NOT currently
+	// attached can still say which device it wants -- without it, a chip for
+	// an unplugged stick would render its raw id after a restart. Missing
+	// entries are harmless: the UI falls back to the id and the binding
+	// stays valid either way.
+	KeybindDevices map[string]string `toml:"keybind_devices"`
+}
+
+// KeybindValue is one action's trigger list on disk. It accepts a bare string
+// or an array of strings on read, and writes a bare string only when the
+// action has exactly one KEYBOARD trigger -- so a config.toml belonging to a
+// user who never binds a joystick is rewritten byte-identical.
+type KeybindValue []string
+
+// joyPrefix duplicates internal/trigger's constant rather than importing it.
+// internal/config stays a raw-strings layer with no knowledge of trigger
+// semantics; this one prefix is the only thing it needs, and importing the
+// trigger package to get it would invert the dependency.
+const joyPrefix = "joy:"
+
+// UnmarshalTOML accepts a string or an array of strings.
+func (k *KeybindValue) UnmarshalTOML(data any) error {
+	switch v := data.(type) {
+	case string:
+		*k = KeybindValue{v}
+		return nil
+	case []any:
+		out := make(KeybindValue, 0, len(v))
+		for _, e := range v {
+			s, ok := e.(string)
+			if !ok {
+				return fmt.Errorf("config: keybind entry is %T, want string", e)
+			}
+			out = append(out, s)
+		}
+		*k = out
+		return nil
+	default:
+		return fmt.Errorf("config: keybind value is %T, want string or array of strings", data)
+	}
+}
+
+// MarshalTOML writes the scalar form for a lone keyboard chord and the array
+// form otherwise. See the type comment for why.
+func (k KeybindValue) MarshalTOML() ([]byte, error) {
+	if len(k) == 1 && !strings.HasPrefix(k[0], joyPrefix) {
+		return []byte(strconv.Quote(k[0])), nil
+	}
+	parts := make([]string, len(k))
+	for i, s := range k {
+		parts[i] = strconv.Quote(s)
+	}
+	return []byte("[" + strings.Join(parts, ", ") + "]"), nil
 }
 
 // Default returns the baseline config used when no file exists.
@@ -47,7 +106,8 @@ func Default() *Config {
 			PlayConnectionSounds: true,
 			RadioSwitchAsPTT:     false,
 		},
-		Keybinds: map[string]string{},
+		Keybinds:       map[string]KeybindValue{},
+		KeybindDevices: map[string]string{},
 	}
 }
 
