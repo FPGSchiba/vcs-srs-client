@@ -148,17 +148,17 @@ This is a pure function of `H` and the trigger table. It is table-driven tested 
 
 ```toml
 [keybinds]
-global.push_to_mute = "V"                                    # unchanged
-global.ptt          = ["F1", "joy:vpc-throttle-a1b2:btn12"]
-channel.intercom    = ["joy:vpc-stick-c3d4:hat1.up"]         # hat direction
+"global.push_to_mute" = "V"                                    # unchanged
+"global.ptt"          = ["F1", "joy:vpc-throttle-a1b2:btn12"]
+"channel.intercom"    = ["joy:vpc-stick-c3d4:hat1.up"]         # hat direction
 
 # modifier form; the modifier comes first and may live on another device
-radio.1.ptt         = ["joy:vpc-stick-c3d4:btn5+vpc-stick-c3d4:btn3"]
-radio.2.ptt         = ["joy:vpc-throttle-a1b2:btn7+vpc-stick-c3d4:btn3"]
+"radio.1.ptt"         = ["joy:vpc-stick-c3d4:btn5+vpc-stick-c3d4:btn3"]
+"radio.2.ptt"         = ["joy:vpc-throttle-a1b2:btn7+vpc-stick-c3d4:btn3"]
 
 [keybind_devices]                                            # display names only
-vpc-throttle-a1b2 = "VPC MongoosT-50CM3 Throttle"
-vpc-stick-c3d4    = "VPC MongoosT-50CM3 Stick"
+"vpc-throttle-a1b2" = "VPC MongoosT-50CM3 Throttle"
+"vpc-stick-c3d4"    = "VPC MongoosT-50CM3 Stick"
 ```
 
 **Trigger string grammar.** A value is a keyboard chord (existing canonical form, §3 of the Phase 3 spec) unless it begins with `joy:`, in which case:

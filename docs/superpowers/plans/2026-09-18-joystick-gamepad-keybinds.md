@@ -732,9 +732,9 @@ func TestKeybindValueAcceptsStringOrArray(t *testing.T) {
 	// round-trip test stays green with a mistyped struct tag.
 	const in = `
 [keybinds]
-global.push_to_mute = "V"
-global.ptt = ["F1", "joy:throttle-a1:btn12"]
-radio.1.ptt = ["joy:throttle-a1:btn7+stick-c3:btn3"]
+"global.push_to_mute" = "V"
+"global.ptt" = ["F1", "joy:throttle-a1:btn12"]
+"radio.1.ptt" = ["joy:throttle-a1:btn7+stick-c3:btn3"]
 `
 	var got config.Config
 	if _, err := toml.Decode(in, &got); err != nil {
@@ -802,7 +802,7 @@ func TestLoneJoyTriggerIsWrittenAsArray(t *testing.T) {
 func TestKeybindValueRejectsNonString(t *testing.T) {
 	const in = `
 [keybinds]
-global.ptt = [1, 2]
+"global.ptt" = [1, 2]
 `
 	var got config.Config
 	if _, err := toml.Decode(in, &got); err == nil {
