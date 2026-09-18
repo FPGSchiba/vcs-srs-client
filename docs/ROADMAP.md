@@ -71,6 +71,30 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ---
 
+## Phase 3.5 — Joystick / gamepad keybinds
+
+**Status:** `[~]` in progress — started 2026-09-18 on `feat/joystick-gamepad-keybinds`.
+
+Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Audio at the user's request, and churning eight phase numbers to record that would cost more than it explains.
+
+**Design doc:** [`2026-09-18-joystick-gamepad-keybinds-design.md`](./superpowers/specs/2026-09-18-joystick-gamepad-keybinds-design.md)
+**Spike:** [`2026-09-18-gamepad-joystick-bindings-spike.md`](./superpowers/specs/2026-09-18-gamepad-joystick-bindings-spike.md)
+
+**Headline deliverables**
+- An action holds a *list* of triggers — keyboard chord and/or joystick button — instead of one. Purely additive; existing `config.toml` files load unchanged and are rewritten byte-identical.
+- `internal/trigger` (Trigger / JoyBinding value types) and `internal/joystick` (polled OS source, sibling to `internal/hotkeys`)
+- Non-exclusive background DirectInput on Windows via vendored `gonutz/di8`; `holoplot/go-evdev` on Linux; macOS reports unsupported
+- Buttons and POV hat directions, with an optional modifier button that may live on a different device
+- Per-action press refcount so keyboard + joystick held together cannot cut PTT mid-transmission
+
+**Why no SDL:** SDL unconditionally takes `DISCL_EXCLUSIVE` on every DirectInput joystick it opens, and Microsoft documents exclusive access as both required for force feedback and mutually exclusive between applications — so an SDL-based client would likely cost Star Citizen its force feedback. DCS-SRS, the closest prior art, uses `Background | NonExclusive`. See the spike for the evidence.
+
+**Blocking deps:** none
+
+**Hardware gate:** the phase is not done until verified on Windows with Star Citizen running and a force-feedback stick — SC must keep force feedback while VCS reads the same device.
+
+---
+
 ## Phase 4 — Audio I/O
 
 **Status:** `[ ]`
@@ -137,6 +161,10 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
   notification channel lands it is the right home, since a registration
   failure is exactly the kind of thing the user must learn about without
   having Settings open. See the Phase 3 spec's R12 for the origin.
+  **This covers joystick failures too** (Phase 3.5): the same two cases, plus
+  a third global state that is informational rather than an error —
+  "joystick input is unsupported on this platform" on macOS, which must never
+  render as a failure.
 - Fleet Mode popout (C2 view)
 - Transmission history view (local JSON ring buffer)
 - OS-keychain migration for session token (closes R4)
