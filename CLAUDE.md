@@ -84,12 +84,33 @@ Never check these in. Never edit by hand. CI re-generates them on every build (`
 
 ---
 
-## Phase 1 in-flight checklist
+## Current status
 
-Phase 1 is currently `[ ] design approved, implementation pending`. The next session that picks it up should:
+| | |
+|---|---|
+| **Phase 1** | `[x]` complete — merged to `main` (PR #11). Scaffold, windowing, guest auth, control gRPC, Comms popout. |
+| **Phase 2** | `[-]` **deferred** — plugin SSO is blocked on `vcs-vanguard-auth-plugin`, which is blocked on access to the Vanguard user-management backend. |
+| **Phase 3** | `[x]` complete 2026-09-15 — Settings + keybinds, global hotkeys, system tray. Automated suite green; **not yet verified on real hardware** — see `docs/superpowers/plans/2026-09-15-phase-3-manual-verification.md`. |
+| **Phase 4** | **next** — Audio I/O (malgo lifecycle, device picker, VU metering, SFX engine). |
 
-1. Confirm `docs/superpowers/specs/2026-05-31-vcs-client-design.md` is still current.
-2. Invoke `superpowers:writing-plans` to turn Phase 1 §6 (Definition of Done) into an executable plan.
-3. Then `superpowers:executing-plans` or `superpowers:subagent-driven-development` to do the work.
+### Login: guest-only, by decision
 
-The user must explicitly invite plan-writing — do not assume.
+Guest login is the **only** supported sign-in path until Phase 2 resumes. The SSO button in `frontend/src/windows/main/screens/Welcome.tsx` is rendered `disabled` on purpose — it is a placeholder, not an oversight. **Do not remove it, do not restructure the two-stage welcome UX around its absence, and do not build an alternative account-login path to work around it.** The screen stays exactly as the design prototype specifies so that re-enabling SSO later is a wiring job, not a redesign.
+
+The guest path is fully wired and verified against the server: `Welcome.tsx` → `App.Connect` → `session.Connect` → `InitAuth` → `GuestLogin` → `SyncClient` → `SubscribeToUpdates`. The server ships `enableGuestAuth: true` / `enablePluginAuth: false` by default, so no server change is needed for it.
+
+Password handling looks odd but is correct — do not "fix" it without reading both sides. The client bcrypt-hashes the typed password and sends the hash; the server calls `CheckPasswordHash(request.Password, coalition.Password)`, i.e. `bcrypt.CompareHashAndPassword(clientHash, storedPlaintext)`. That verifies iff the typed password equals the coalition's configured password. See `vngd-srs-server/srs/auth_service.go` and `utils/general.go`.
+
+### Known gap: no TLS
+
+`internal/session/dial.go` fails closed on any non-localhost host, so the client can currently only reach a **local** server. The deployed server already has certs. TLS is scheduled for Phase 7 (spec risk R5); pull it forward if remote testing becomes necessary.
+
+---
+
+## Picking up a phase
+
+The user must explicitly invite plan-writing — do not assume. When invited:
+
+1. Confirm `docs/superpowers/specs/2026-05-31-vcs-client-design.md` is still current (note: it predates the React 19 / Tailwind 4 / Vite 8 dependency bumps, and its §5.1 layout lists stub packages that were never created).
+2. Run `superpowers:brainstorming` to produce the phase design doc (mandatory — see above).
+3. Then `superpowers:writing-plans`, then `superpowers:executing-plans` or `superpowers:subagent-driven-development`.

@@ -1,4 +1,12 @@
 import { App } from "../../../bindings/github.com/FPGSchiba/vcs-srs-client/internal/app";
+import type {
+  Settings,
+  Keybind,
+  HotkeyState,
+  HotkeyPermissionResult,
+  Capture,
+  SetKeybindResult,
+} from "../store/settings";
 
 export interface RadioDTO {
   id: number;
@@ -42,4 +50,31 @@ export const api = {
   closeWindow: (id: string) => App.CloseWindow(id),
   toggleWindow: (id: string) => App.ToggleWindow(id),
   getOpenWindows: (): Promise<string[]> => App.GetOpenWindows() as Promise<string[]>,
+  getSettings: (): Promise<Settings> => App.GetSettings() as Promise<Settings>,
+  setSettings: (s: Settings): Promise<void> => App.SetSettings(s) as Promise<void>,
+  getKeybinds: (): Promise<Keybind[]> => App.GetKeybinds() as Promise<Keybind[]>,
+  setKeybind: (actionId: string, cap: Capture): Promise<SetKeybindResult> =>
+    App.SetKeybind(actionId, cap) as Promise<SetKeybindResult>,
+  clearKeybind: (actionId: string): Promise<void> =>
+    App.ClearKeybind(actionId) as Promise<void>,
+  // beginCapture returns a CAPTURE TOKEN that must be handed back to
+  // endCapture. The backend only re-arms OS hotkeys for the token of the
+  // capture that is still current, which is what makes switching rows
+  // mid-capture safe without the frontend ordering two IPC calls.
+  beginCapture: (): Promise<number> => App.BeginCapture() as Promise<number>,
+  endCapture: (token: number): Promise<void> => App.EndCapture(token) as Promise<void>,
+  getHotkeyState: (): Promise<HotkeyState> => App.GetHotkeyState() as Promise<HotkeyState>,
+  // requestHotkeyPermission fires the OS prompt for global hotkey capture
+  // (macOS Accessibility trust). The resolved `prompted` is NOT a grant signal
+  // -- see HotkeyPermissionResult. A grant arrives later on hotkeys:state,
+  // via the backend's bounded re-check or its window-focus re-check.
+  requestHotkeyPermission: (): Promise<HotkeyPermissionResult> =>
+    App.RequestHotkeyPermission() as Promise<HotkeyPermissionResult>,
+  openHotkeyPermissionSettings: (): Promise<void> =>
+    App.OpenHotkeyPermissionSettings() as Promise<void>,
+  // recheckHotkeyPermission forces the re-check the window-focus hook does
+  // automatically, for a user who granted access and wants an answer now.
+  // Re-applies the OS registrations and emits hotkeys:state if it flipped.
+  recheckHotkeyPermission: (): Promise<void> =>
+    App.RecheckHotkeyPermission() as Promise<void>,
 };

@@ -142,7 +142,10 @@ tasks:
     generates:
       - frontend/bindings/**/*
     cmds:
-      - wails3 generate bindings -ts -f '{{.BUILD_FLAGS}}' -clean=true{{if eq .OBFUSCATED "true"}} -obfuscated{{end}}
+      # -f carries the go build flags: `wails3 generate bindings` type-checks
+      # the Go packages, so it needs -tags purego for the same reason every
+      # other Go invocation here does (see the note in the root Taskfile.yml).
+      - wails3 generate bindings -ts -f '{{.BUILD_FLAGS | default "-tags purego"}}' -clean=true{{if eq .OBFUSCATED "true"}} -obfuscated{{end}}
 
   generate:icons:
     summary: Generates Windows `.ico` and Mac `.icns` from an image; on macOS, `-iconcomposerinput appicon.icon -macassetdir darwin` also produces `Assets.car` from a `.icon` file (skipped on other platforms).
@@ -201,7 +204,13 @@ tasks:
           BUILD_FLAGS:
             ref: .BUILD_FLAGS
     cmds:
-      - go build -tags server {{.BUILD_FLAGS}} -o {{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
+      # -tags goes LAST, after BUILD_FLAGS, on purpose. Go's flag parser keeps
+      # the FINAL occurrence of a repeated flag, so if BUILD_FLAGS ever grows
+      # its own -tags (the platform Taskfiles' BUILD_FLAGS already carry
+      # `production,purego`) an earlier -tags here would be silently dropped
+      # and `server` would vanish from the build with no error. Put anything
+      # extra in EXTRA_TAGS rather than adding a second -tags anywhere.
+      - go build {{.BUILD_FLAGS}} -tags server,purego{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -o {{.BIN_DIR}}/{{.APP_NAME}}-server{{exeExt}}
     vars:
       BUILD_FLAGS: "{{.BUILD_FLAGS}}"
 

@@ -85,3 +85,80 @@ func SnapshotFromProto(clients map[string]*srspb.ClientInfo, radios map[string]*
 	}
 	return snap
 }
+
+// SettingsDTO is the binding-facing shape of config.General.
+type SettingsDTO struct {
+	StartMinimized       bool `json:"start_minimized"`
+	MinimizeToTray       bool `json:"minimize_to_tray"`
+	ShowTransmitterName  bool `json:"show_transmitter_name"`
+	PlayConnectionSounds bool `json:"play_connection_sounds"`
+	RadioSwitchAsPTT     bool `json:"radio_switch_as_ptt"`
+}
+
+// CaptureDTO is a raw {code, modifiers} capture from the frontend's keydown
+// listener. The physical-key mapping table lives only in internal/chord, so
+// this carries the browser KeyboardEvent.code rather than a chord string.
+type CaptureDTO struct {
+	Code  string `json:"code"`
+	Ctrl  bool   `json:"ctrl"`
+	Alt   bool   `json:"alt"`
+	Shift bool   `json:"shift"`
+	Super bool   `json:"super"`
+}
+
+// KeybindDTO is one row of the joined action-registry + bound-chord list.
+type KeybindDTO struct {
+	ActionID string `json:"action_id"`
+	Label    string `json:"label"`
+	Desc     string `json:"desc"`
+	Category string `json:"category"` // "global" | "channel" | "per_radio" | "status"
+	Kind     string `json:"kind"`     // "hold" | "press"
+	Chord    string `json:"chord"`    // canonical form, "" when unbound
+}
+
+// StolenDTO reports which action lost its chord to a new binding.
+type StolenDTO struct {
+	ActionID string `json:"action_id"`
+	Label    string `json:"label"`
+	Chord    string `json:"chord"`
+}
+
+// SetKeybindResult is the result of SetKeybind.
+type SetKeybindResult struct {
+	Stolen *StolenDTO `json:"stolen"` // nil when there was no conflict
+}
+
+// HotkeyStateDTO reports whether OS hotkey registration is currently healthy.
+type HotkeyStateDTO struct {
+	Registered bool   `json:"registered"`
+	Error      string `json:"error"`
+	// Failed maps action ID -> reason for every binding that could not be
+	// registered. Needed because internal/chord accepts keys the OS layer
+	// cannot register (Numpad, F21-F24, punctuation, navigation keys), so the
+	// UI must say WHICH binding did not take effect, not just that something
+	// failed.
+	Failed map[string]string `json:"failed"`
+	// Permission is the OS grant state for global hotkey capture:
+	// "unknown" | "granted" | "denied" | "not_applicable" (see
+	// hotkeys.Permission.String). Present so the frontend branches on a
+	// STATE rather than parsing Error's text -- Error carries whatever the
+	// platform registrar said and is not a contract. Only macOS can report
+	// "denied"; Windows and Linux/X11 report "not_applicable", which is the
+	// UI's signal to offer no permission affordance at all.
+	Permission string `json:"permission"`
+}
+
+// HotkeyPermissionResultDTO is the result of RequestHotkeyPermission.
+type HotkeyPermissionResultDTO struct {
+	// Prompted reports what the OS request call returned. It is NOT the
+	// user's answer and must never be rendered as one -- see
+	// hotkeys.PermissionChecker.Request. Its only use is choosing the next
+	// button: false alongside a still-denied Permission means the one-shot
+	// prompt is spent and the user has to be sent to System Settings.
+	Prompted bool `json:"prompted"`
+	// Permission is the grant state read back immediately after the request.
+	// On the happy path it is still "denied" here -- TCC answers the prompt
+	// asynchronously -- and flips later through the bounded re-check poll or
+	// the window-focus re-check, both of which emit hotkeys:state.
+	Permission string `json:"permission"`
+}

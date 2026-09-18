@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,6 +47,8 @@ func TestLoad_ReadsExistingFile(t *testing.T) {
 func TestSave_RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := &config.Config{LogLevel: "WARN", ServerURL: "vcs.example:443", PingIntervalSeconds: 10}
+	cfg.General = config.Default().General
+	cfg.Keybinds = config.Default().Keybinds
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -53,8 +56,14 @@ func TestSave_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if *got != *cfg {
+	if got.LogLevel != cfg.LogLevel || got.ServerURL != cfg.ServerURL || got.PingIntervalSeconds != cfg.PingIntervalSeconds {
 		t.Fatalf("round-trip mismatch: got %+v want %+v", got, cfg)
+	}
+	if got.General != cfg.General {
+		t.Errorf("General lost in round trip: got %+v, want %+v", got.General, cfg.General)
+	}
+	if !maps.Equal(got.Keybinds, cfg.Keybinds) {
+		t.Errorf("Keybinds lost in round trip: got %v, want %v", got.Keybinds, cfg.Keybinds)
 	}
 }
 
@@ -65,8 +74,15 @@ func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if *cfg != *config.Default() {
+	def := config.Default()
+	if cfg.LogLevel != def.LogLevel || cfg.ServerURL != def.ServerURL || cfg.PingIntervalSeconds != def.PingIntervalSeconds {
 		t.Fatalf("expected defaults, got %+v", cfg)
+	}
+	if cfg.General != def.General {
+		t.Errorf("expected General defaults, got %+v", cfg.General)
+	}
+	if !maps.Equal(cfg.Keybinds, def.Keybinds) {
+		t.Errorf("expected Keybinds defaults, got %v", cfg.Keybinds)
 	}
 	// The file must now exist on disk.
 	if _, err := os.Stat(path); err != nil {
@@ -77,8 +93,14 @@ func TestLoadOrCreate_WritesDefaultsWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if *reloaded != *config.Default() {
+	if reloaded.LogLevel != def.LogLevel || reloaded.ServerURL != def.ServerURL || reloaded.PingIntervalSeconds != def.PingIntervalSeconds {
 		t.Fatalf("reloaded config differs from defaults: %+v", reloaded)
+	}
+	if reloaded.General != def.General {
+		t.Errorf("expected General to survive reload, got %+v", reloaded.General)
+	}
+	if !maps.Equal(reloaded.Keybinds, def.Keybinds) {
+		t.Errorf("expected Keybinds to survive reload, got %v", reloaded.Keybinds)
 	}
 }
 
@@ -95,5 +117,153 @@ func TestLoadOrCreate_LeavesExistingFileUntouched(t *testing.T) {
 	}
 	if cfg.LogLevel != "WARN" || cfg.ServerURL != "existing:443" || cfg.PingIntervalSeconds != 9 {
 		t.Fatalf("expected existing values preserved, got %+v", cfg)
+	}
+}
+
+func TestDefaultGeneral(t *testing.T) {
+	g := config.Default().General
+	if g.StartMinimized {
+		t.Error("StartMinimized should default false")
+	}
+	if !g.MinimizeToTray {
+		t.Error("MinimizeToTray should default true")
+	}
+	if !g.ShowTransmitterName {
+		t.Error("ShowTransmitterName should default true")
+	}
+	if !g.PlayConnectionSounds {
+		t.Error("PlayConnectionSounds should default true")
+	}
+	if g.RadioSwitchAsPTT {
+		t.Error("RadioSwitchAsPTT should default false")
+	}
+}
+
+func TestLoadPrePhase3ConfigGetsDefaults(t *testing.T) {
+	// A config.toml written before Phase 3 has neither [general] nor
+	// [keybinds]. It must still load, with defaults filled in.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	old := "log_level = \"DEBUG\"\nserver_url = \"localhost:5002\"\nping_interval_seconds = 7\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogLevel != "DEBUG" || cfg.PingIntervalSeconds != 7 {
+		t.Errorf("existing values lost: %+v", cfg)
+	}
+	if !cfg.General.MinimizeToTray {
+		t.Error("missing [general] should fall back to defaults")
+	}
+}
+
+func TestKeybindsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	cfg := config.Default()
+	cfg.Keybinds = map[string]string{
+		"global.ptt":     "F1",
+		"radio.1.select": "Alt+1",
+	}
+	cfg.General.StartMinimized = true
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Keybinds["global.ptt"] != "F1" || got.Keybinds["radio.1.select"] != "Alt+1" {
+		t.Errorf("keybinds lost in round trip: %v", got.Keybinds)
+	}
+	if !got.General.StartMinimized {
+		t.Error("general lost in round trip")
+	}
+}
+
+func TestGeneralRoundTripAllFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	cfg := config.Default()
+	// Verify all General fields serialize/deserialize correctly through Save/Load.
+	// Sets each field to a non-default value as a sanity check for round-trip
+	// encoding/decoding (not tag verification — symmetric round trips cannot catch
+	// tag typos since Save and Load use the same struct tags).
+	cfg.General = config.General{
+		StartMinimized:       true,
+		MinimizeToTray:       false,
+		ShowTransmitterName:  false,
+		PlayConnectionSounds: false,
+		RadioSwitchAsPTT:     true,
+	}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.General != cfg.General {
+		t.Errorf("General round trip = %+v, want %+v", got.General, cfg.General)
+	}
+}
+
+func TestGeneralKeyNamesMatchOnDiskContract(t *testing.T) {
+	// A literal fixture, not a Save() round trip: Save and Load share the same
+	// struct tags, so a round trip passes even when a tag is misspelled. Only
+	// asserting against hand-written key names pins the on-disk contract.
+	// Every value here is the OPPOSITE of its default, so a tag that fails to
+	// match leaves the field at its default and the assertion fails.
+	body := `
+[general]
+start_minimized = true
+minimize_to_tray = false
+show_transmitter_name = false
+play_connection_sounds = false
+radio_switch_as_ptt = true
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := config.General{
+		StartMinimized:       true,
+		MinimizeToTray:       false,
+		ShowTransmitterName:  false,
+		PlayConnectionSounds: false,
+		RadioSwitchAsPTT:     true,
+	}
+	if got.General != want {
+		t.Errorf("General from literal TOML = %+v, want %+v", got.General, want)
+	}
+}
+
+func TestKeybindsKeyNameMatchesOnDiskContract(t *testing.T) {
+	// Literal fixture to pin the on-disk key name for keybinds. A mistyped
+	// table name leaves Keybinds at its default empty map.
+	body := `
+[keybinds]
+"global.ptt" = "F1"
+"radio.1.select" = "Alt+1"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Keybinds["global.ptt"] != "F1" || got.Keybinds["radio.1.select"] != "Alt+1" {
+		t.Errorf("keybinds from literal TOML = %v, want F1 and Alt+1 present", got.Keybinds)
 	}
 }

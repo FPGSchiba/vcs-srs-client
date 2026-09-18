@@ -6,6 +6,7 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 - `[ ]` not started
 - `[~]` in progress
 - `[x]` complete
+- `[-]` deferred — consciously skipped; reason and unblock condition recorded on the phase
 
 ---
 
@@ -29,27 +30,39 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ## Phase 2 — Plugin SSO multi-step auth
 
-**Status:** `[ ]`
+**Status:** `[-]` deferred 2026-09-15 — skipped in favour of Phase 3.
 
-**Headline deliverables**
+**Why deferred:** the phase needs the `vcs-vanguard-auth-plugin` finished, and that work is itself blocked on access to the existing Vanguard user-management backend. Building the client-side flow driver against an unfinished plugin would be speculative.
+
+**Interim behaviour (shipped, not a stopgap to rip out):** guest login is the only supported sign-in path. The SSO entry point is deliberately rendered as a disabled placeholder in `Welcome.tsx` — the two-stage welcome UX stays exactly as designed, so picking this phase back up is a matter of enabling the button and wiring the flow behind it, not reworking the screen.
+
+**Headline deliverables** (unchanged, for when it resumes)
 - `InitAuth` → `DiscoverAuthenticationFlows` → `StartAuth` → `ContinueAuth` loop driver
 - Field-definition-driven form renderer (uses `FieldDefinition.type` to pick input widget)
 - Coalition / unit / role pickers after `LoginResult`
 - `UnitSelect` finalisation
 
-**Blocking deps:** none
+**Blocking deps:** `vcs-vanguard-auth-plugin` completion ← access to the Vanguard user-management backend.
+
+**Unblock condition:** that access lands and the plugin's `StartAuth` / `ContinueAuth` are servable end-to-end. No client-side proto or server change is needed first — `srs.proto` already carries the full multi-step surface and is byte-identical to the server's copy.
 
 ---
 
 ## Phase 3 — Settings + keybinds
 
-**Status:** `[ ]`
+**Status:** `[x]` complete 2026-09-15 — Settings screen, persisted keybinds with steal-on-conflict, real OS-level global hotkey registration (including hold-to-talk key-release, R11 resolved), and system tray all landed on `feat/phase-3-settings-keybinds`.
+
+**Verification status:** the full automated suite is green (`go vet`, `go test -race ./...`, `tsc --noEmit`, `vitest`, frontend production build — see Task 12's report). **The phase has NOT been verified on real hardware** — no GUI could be launched in the environment that closed out the phase. A concrete manual checklist covering every hardware-dependent DoD item (tray legibility in light/dark, close-to-tray/restore, global hotkeys firing with another app focused, non-US keyboard layout capture, macOS permission-prompt denial, Linux no-StatusNotifier-host behaviour, and more) is written up and waiting for a human to run: [`2026-09-15-phase-3-manual-verification.md`](./superpowers/plans/2026-09-15-phase-3-manual-verification.md). Treat Phase 3 as code-complete, not field-verified, until that checklist has been executed.
+
+**Design doc:** [`2026-09-15-vcs-client-phase-3-settings-keybinds-design.md`](./superpowers/specs/2026-09-15-vcs-client-phase-3-settings-keybinds-design.md)
+
+**Prerequisite:** Wails v3 `alpha.96` → `beta.22` upgrade lands as its own `chore(deps)` commit before implementation (spec §10). Verified to build and pass `go test -race ./...` with zero Go source changes; the open cost is the regenerated TypeScript bindings.
 
 **Headline deliverables**
 - Settings popout/section with audio, network, appearance, profiles sub-sections
 - Keybind capture UI (listening state visible in design as `.kbd.listening`)
 - Per-radio PTT + Select bindings, plus global PTT
-- TOML persistence (`config.toml`, `keybinds.toml`)
+- TOML persistence — single `config.toml` with `[general]` and `[keybinds]` tables
 - Settings exposed via Wails bindings; subscriber updates in all windows
 
 **Blocking deps:** none
@@ -113,6 +126,17 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 - Ship Mode popout (component registry from local TOML for now)
 - Messages popout (text channels mirroring radio frequencies; local ring buffer)
 - Notifications popout (local + future server-pushed alert channel)
+- Route hotkey-registration failures through the notification channel,
+  replacing Phase 3's inline banner in the Keybinds section. Two distinct
+  cases, and they must stay distinct: a GLOBAL failure (nothing registered at
+  all -- a denied macOS Accessibility grant, a missing backend) notifies
+  **once**, carrying the permission state and its remedial action; a
+  PER-BINDING failure (a chord `internal/chord` accepts but the OS cannot
+  register, e.g. `Numpad7`) notifies **per action**, naming the action. The
+  banner exists today because there is nowhere else to put this; once the
+  notification channel lands it is the right home, since a registration
+  failure is exactly the kind of thing the user must learn about without
+  having Settings open. See the Phase 3 spec's R12 for the origin.
 - Fleet Mode popout (C2 view)
 - Transmission history view (local JSON ring buffer)
 - OS-keychain migration for session token (closes R4)

@@ -92,3 +92,83 @@ func TestEmitter_SessionChanged(t *testing.T) {
 		t.Fatalf("unexpected: %q", f.last().name)
 	}
 }
+
+func TestEmitter_SettingsChanged(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	e.SettingsChanged(map[string]bool{"start_minimized": true})
+
+	got := f.last()
+	if got.name != events.EventSettingsChanged {
+		t.Fatalf("unexpected event name: %q", got.name)
+	}
+}
+
+func TestEmitter_KeybindsChanged(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	e.KeybindsChanged([]string{"global.ptt"})
+
+	got := f.last()
+	if got.name != events.EventKeybindsChanged {
+		t.Fatalf("unexpected event name: %q", got.name)
+	}
+}
+
+func TestEmitter_HotkeyPressed(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	e.HotkeyPressed("global.ptt")
+
+	got := f.last()
+	if got.name != events.EventHotkeyPressed {
+		t.Fatalf("unexpected event name: %q", got.name)
+	}
+	p, ok := got.payload.(struct {
+		ActionID string `json:"action_id"`
+	})
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", got.payload)
+	}
+	if p.ActionID != "global.ptt" {
+		t.Fatalf("unexpected action id: %q", p.ActionID)
+	}
+}
+
+func TestEmitter_HotkeyReleased(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	e.HotkeyReleased("global.ptt")
+
+	if f.last().name != events.EventHotkeyReleased {
+		t.Fatalf("unexpected: %q", f.last().name)
+	}
+}
+
+func TestEmitter_HotkeysState(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	failed := map[string]string{"global.ptt": "register global.ptt (F1): already bound"}
+	e.HotkeysState(false, "register F1: already bound", failed, "denied")
+
+	got := f.last()
+	if got.name != events.EventHotkeysState {
+		t.Fatalf("unexpected event name: %q", got.name)
+	}
+	p, ok := got.payload.(events.HotkeyStatePayload)
+	if !ok {
+		t.Fatalf("unexpected payload type: %T", got.payload)
+	}
+	if p.Registered || p.Error == "" {
+		t.Fatalf("unexpected payload: %+v", p)
+	}
+	if reason, ok := p.Failed["global.ptt"]; !ok || reason == "" {
+		t.Fatalf("expected a failure reason for global.ptt, got %+v", p.Failed)
+	}
+	// The permission state must survive onto the wire: the UI branches on it
+	// to decide whether the failure is one the user can act on, and a payload
+	// that dropped it would silently degrade to the old error-string parsing.
+	if p.Permission != "denied" {
+		t.Errorf("Permission = %q, want %q", p.Permission, "denied")
+	}
+}

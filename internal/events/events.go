@@ -23,6 +23,11 @@ const (
 	EventControlConnection = "control:connection"
 	EventWindowGeometry    = "window:geometry_changed"
 	EventWindowState       = "window:state" // payload: []string of open window ids
+	EventSettingsChanged   = "settings:changed"
+	EventKeybindsChanged   = "keybinds:changed"
+	EventHotkeyPressed     = "hotkey:pressed"
+	EventHotkeyReleased    = "hotkey:released"
+	EventHotkeysState      = "hotkeys:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -113,3 +118,55 @@ func (t *Tagged) SessionChanged(state string) { t.em.Emit(EventAuthSession, stat
 
 // ClientState emits EventClientState with a full snapshot payload.
 func (t *Tagged) ClientState(snapshot any) { t.em.Emit(EventClientState, snapshot) }
+
+// HotkeyStatePayload is the EventHotkeysState payload.
+type HotkeyStatePayload struct {
+	Registered bool   `json:"registered"`
+	Error      string `json:"error"`
+	// Failed maps action ID -> reason for every binding that could not be
+	// registered, mirroring app.HotkeyStateDTO.Failed. The UI needs to know
+	// WHICH binding did not take effect, not just that something failed.
+	Failed map[string]string `json:"failed"`
+	// Permission is the OS grant state for global hotkey capture, mirroring
+	// app.HotkeyStateDTO.Permission: "unknown" | "granted" | "denied" |
+	// "not_applicable". Carried here so the UI branches on a STATE rather
+	// than pattern-matching Error's text, which is a registrar message and
+	// not a stable contract.
+	Permission string `json:"permission"`
+}
+
+// SettingsChanged emits EventSettingsChanged with the full settings struct.
+func (t *Tagged) SettingsChanged(payload any) { t.em.Emit(EventSettingsChanged, payload) }
+
+// KeybindsChanged emits EventKeybindsChanged with the FULL binding list.
+// Full replacement rather than a delta: the list is small, and it removes a
+// class of frontend/backend divergence bug.
+func (t *Tagged) KeybindsChanged(payload any) { t.em.Emit(EventKeybindsChanged, payload) }
+
+// HotkeyPressed emits EventHotkeyPressed.
+func (t *Tagged) HotkeyPressed(actionID string) {
+	t.em.Emit(EventHotkeyPressed, struct {
+		ActionID string `json:"action_id"`
+	}{ActionID: actionID})
+}
+
+// HotkeyReleased emits EventHotkeyReleased (Hold actions only).
+func (t *Tagged) HotkeyReleased(actionID string) {
+	t.em.Emit(EventHotkeyReleased, struct {
+		ActionID string `json:"action_id"`
+	}{ActionID: actionID})
+}
+
+// HotkeysState emits EventHotkeysState so a failed registration is visible in
+// the UI rather than silent. failed maps action ID -> failure reason for
+// every binding that could not be registered; permission is the OS grant
+// state (see HotkeyStatePayload.Permission), which tells the UI whether the
+// failure is one the user can actually do something about.
+func (t *Tagged) HotkeysState(registered bool, errMsg string, failed map[string]string, permission string) {
+	t.em.Emit(EventHotkeysState, HotkeyStatePayload{
+		Registered: registered,
+		Error:      errMsg,
+		Failed:     failed,
+		Permission: permission,
+	})
+}

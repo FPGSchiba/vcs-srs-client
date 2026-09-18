@@ -8,17 +8,47 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// General holds the user-facing toggles from the Settings > General section.
+// ShowTransmitterName, PlayConnectionSounds and RadioSwitchAsPTT are stored and
+// exposed now; their consumers arrive in Phases 4/5.
+type General struct {
+	StartMinimized       bool `toml:"start_minimized"`
+	MinimizeToTray       bool `toml:"minimize_to_tray"`
+	ShowTransmitterName  bool `toml:"show_transmitter_name"`
+	PlayConnectionSounds bool `toml:"play_connection_sounds"`
+	RadioSwitchAsPTT     bool `toml:"radio_switch_as_ptt"`
+}
+
 // Config holds the persisted user/app settings. New fields MUST get a default
 // in Default() so older config files still load.
 type Config struct {
 	LogLevel            string `toml:"log_level"`
 	ServerURL           string `toml:"server_url"`
 	PingIntervalSeconds int    `toml:"ping_interval_seconds"`
+
+	General General `toml:"general"`
+
+	// Keybinds is the raw action-ID -> chord-string map. It is held raw rather
+	// than typed so that entries written by a newer client version survive a
+	// load/save cycle. internal/keybinds owns interpretation.
+	Keybinds map[string]string `toml:"keybinds"`
 }
 
 // Default returns the baseline config used when no file exists.
 func Default() *Config {
-	return &Config{LogLevel: "INFO", ServerURL: "", PingIntervalSeconds: 5}
+	return &Config{
+		LogLevel:            "INFO",
+		ServerURL:           "",
+		PingIntervalSeconds: 5,
+		General: General{
+			StartMinimized:       false,
+			MinimizeToTray:       true,
+			ShowTransmitterName:  true,
+			PlayConnectionSounds: true,
+			RadioSwitchAsPTT:     false,
+		},
+		Keybinds: map[string]string{},
+	}
 }
 
 // Load reads the TOML file at path. Missing file → defaults (no error).

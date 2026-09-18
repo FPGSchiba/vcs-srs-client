@@ -3,9 +3,14 @@ package app
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
+	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
+	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -36,6 +41,14 @@ type App struct {
 	st       *state.Store
 	sess     sessionAPI
 	windows  windowsAPI
+	settings *settingsBackend
+	tray     *application.SystemTray
+
+	// perm is the OS seam for the global-hotkey capture permission (macOS
+	// Accessibility). Filled in by SetSettingsBackend with the platform
+	// implementation unless a test has already injected a fake through
+	// setPermissionChecker. Written once, before anything reads it.
+	perm hotkeys.PermissionChecker
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.
@@ -60,6 +73,60 @@ func (a *App) SetBackend(sess sessionAPI, windows windowsAPI) {
 // SetApp injects the Wails application reference. Must be called before Run().
 func (a *App) SetApp(app *application.App) { a.wailsApp = app }
 
+// SetSettingsBackend wires the settings/keybind dependencies onto App and
+// seeds kb from cfg.Keybinds, falling back to keybinds.Defaults() when
+// cfg.Keybinds is empty (fresh config, or one written before Phase 3).
+func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybinds.Store, hk *hotkeys.Manager, em events.Emitter) {
+	raw := cfg.Keybinds
+	if len(raw) == 0 {
+		raw = defaultKeybindsRaw()
+	}
+	kb.Load(raw)
+
+	if a.perm == nil {
+		a.perm = hotkeys.NewPermissionChecker()
+	}
+
+	a.settings = &settingsBackend{
+		cfg:            cfg,
+		cfgPath:        cfgPath,
+		kb:             kb,
+		hk:             hk,
+		em:             events.New(em),
+		captureTimeout: defaultCaptureTimeout,
+		permInterval:   defaultPermissionPollInterval,
+		permTimeout:    defaultPermissionPollTimeout,
+	}
+	// Per-radio actions are derived from the local client's radios, which are
+	// empty at this point and only arrive at connect time. Observe the store
+	// so the keybind list and the OS registrations follow them (I2); without
+	// it the per-radio panel stays absent for the whole session unless the
+	// user happens to touch an unrelated keybind.
+	a.st.OnRadiosChanged(a.RefreshKeybinds)
+	// Seeds the initial OS registration AND emits the first hotkeys:state, so
+	// a startup registration failure (no backend, denied permission) reaches
+	// the UI without waiting for the user to change something. applyHotkeys
+	// reads the permission on its way through, which also seeds lastPerm for
+	// RecheckHotkeyPermission's early-out.
+	a.applyHotkeys()
+}
+
+// setPermissionChecker injects a fake PermissionChecker. For tests only, and
+// only before SetSettingsBackend -- that is what makes the field a
+// write-once value no goroutine can race.
+func (a *App) setPermissionChecker(p hotkeys.PermissionChecker) { a.perm = p }
+
+// defaultKeybindsRaw renders keybinds.Defaults() as the raw string map
+// keybinds.Store.Load expects.
+func defaultKeybindsRaw() map[string]string {
+	defaults := keybinds.Defaults()
+	out := make(map[string]string, len(defaults))
+	for id, c := range defaults {
+		out[string(id)] = c.String()
+	}
+	return out
+}
+
 // WailsApp returns the injected Wails app (for main.go window/event wiring).
 func (a *App) WailsApp() *application.App { return a.wailsApp }
 
@@ -69,8 +136,42 @@ func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) er
 	return nil
 }
 
-// ServiceShutdown is the Wails v3 lifecycle hook.
+// shutdownDisconnectTimeout bounds the clean-leave RPC on quit. Without it an
+// unresponsive server would hang the quit forever on a context.Background()
+// call the user cannot cancel.
+const shutdownDisconnectTimeout = 2 * time.Second
+
+// shutdownPollStopTimeout bounds how long quit waits for an armed
+// hotkey-permission re-check to return. Short: the goroutine returns
+// immediately on cancel unless it is mid-apply or waiting on writeMu.
+const shutdownPollStopTimeout = time.Second
+
+// ServiceShutdown is the Wails v3 lifecycle hook. It runs the clean
+// disconnect, so the server sees a proper leave rather than a dropped stream
+// on EVERY quit path -- tray Quit, Cmd+Q, and closing the window with
+// minimize_to_tray off (the ordinary quit on Windows and Linux). Doing this
+// in the tray's Quit handler alone covered exactly one of those.
 func (a *App) ServiceShutdown() error {
 	a.logger.Info("App service shutting down")
+	// Stop any armed hotkey-permission re-check first. Quitting within 30s of
+	// clicking GRANT ACCESS would otherwise leave a goroutine free to call
+	// into the hotkey library and emit a Wails event after teardown. Bounded,
+	// so a poll blocked behind an in-flight keybind write cannot hang quit.
+	a.stopPermissionPoll(shutdownPollStopTimeout)
+	// Then shut the OS key listener down. The stream is process-global and
+	// outlives every rebind (see internal/hotkeys/registrar_gohook.go), so
+	// this is its one closing bracket. It also releases a hotkey still being
+	// HELD at quit: someone hitting Cmd+Q mid-transmission would otherwise
+	// have Pressed emitted with no Released to match it.
+	if a.settings != nil && a.settings.hk != nil {
+		a.settings.hk.Close()
+	}
+	if a.sess != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownDisconnectTimeout)
+		defer cancel()
+		if err := a.sess.Disconnect(ctx); err != nil {
+			a.logger.Warn("clean disconnect on shutdown failed", "err", err)
+		}
+	}
 	return nil
 }
