@@ -14,14 +14,12 @@ func jb(d trigger.DeviceID, b trigger.Button) trigger.JoyButton {
 	return trigger.JoyButton{Device: d, Button: b}
 }
 
-// state builds a State with the given buttons held and their devices connected.
+// state builds a State with the given buttons held.
 func state(held ...trigger.JoyButton) joystick.State {
 	s := joystick.State{
-		Connected: map[trigger.DeviceID]bool{},
-		Held:      map[trigger.JoyButton]struct{}{},
+		Held: map[trigger.JoyButton]struct{}{},
 	}
 	for _, h := range held {
-		s.Connected[h.Device] = true
 		s.Held[h] = struct{}{}
 	}
 	return s
@@ -148,13 +146,12 @@ func TestActionWithSeveralTriggersIsHeldByAnyOfThem(t *testing.T) {
 	}
 }
 
-func TestDisconnectedDeviceHoldsNothing(t *testing.T) {
+func TestEmptyStateHoldsNothing(t *testing.T) {
 	binds := map[string][]joystick.Binding{
 		"global.ptt": {bare(dev, 3)},
 	}
 	empty := joystick.State{
-		Connected: map[trigger.DeviceID]bool{},
-		Held:      map[trigger.JoyButton]struct{}{},
+		Held: map[trigger.JoyButton]struct{}{},
 	}
 	if got := joystick.Active(binds, empty); len(got) != 0 {
 		t.Errorf("Active on empty state = %v, want nothing", keys(got))

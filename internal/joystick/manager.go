@@ -36,6 +36,31 @@ type Handler interface {
 type Manager struct {
 	mu sync.Mutex
 
+	// notifyMu serialises every "mutate active state under mu -> unlock mu ->
+	// call Handler" span across tick(), Apply(), Suspend() and Close(). It is
+	// what makes the edges balanced under concurrency.
+	//
+	// WHY A SECOND LOCK. Each of those four methods, taken alone, is race
+	// free: every shared field is read and written under mu. But each of
+	// them COMMITS its state change (mu held) and then NOTIFIES the Handler
+	// (mu released) as two separate steps, and two different goroutines can
+	// run those steps interleaved: tick() can set m.active[id] = true, unlock
+	// mu, and be preempted before it calls h.Pressed(id); in that window
+	// Suspend() can acquire mu, see id already in active, take it via
+	// takeActiveLocked, unlock, and call h.Released(id) -- so the Handler
+	// observes Released BEFORE the Pressed that logically preceded it. -race
+	// cannot see this: mu itself is never touched by two goroutines at once.
+	// It is an ordering race between two independently-unlocked
+	// commit-then-notify sequences, not a data race.
+	//
+	// notifyMu is held across the WHOLE span, including the Handler calls,
+	// in each of the four methods, so only one such span can be in flight at
+	// a time and Handler always sees the edges in true commit order. It is
+	// deliberately a separate lock from mu: Devices(), LastErr() and
+	// Supported() only ever need mu, and must not be blocked behind a slow
+	// Handler.
+	notifyMu sync.Mutex
+
 	src Source
 	h   Handler
 	log *slog.Logger
@@ -75,10 +100,16 @@ func New(src Source, h Handler, log *slog.Logger) *Manager {
 		done:               make(chan struct{}),
 	}
 	// Probe once so Supported() is meaningful before the loop starts and the
-	// UI can hide the affordance rather than showing a broken one.
-	if _, err := src.Devices(); errors.Is(err, ErrUnsupported) {
-		m.supported = false
+	// UI can hide the affordance rather than showing a broken one. ANY error
+	// here is recorded in lastErr -- including a transient enumeration
+	// failure that is not ErrUnsupported -- so LastErr() is never silently
+	// nil after a failed probe; only ErrUnsupported also flips supported to
+	// false, since that is the one case the UI must not offer as retryable.
+	if _, err := src.Devices(); err != nil {
 		m.lastErr = err
+		if errors.Is(err, ErrUnsupported) {
+			m.supported = false
+		}
 	}
 	return m
 }
@@ -108,6 +139,9 @@ func (m *Manager) Devices() []Device {
 // longer bound to what is currently held is released first, so the edge
 // balance the app-level refcount depends on is never broken by a rebind.
 func (m *Manager) Apply(binds map[string][]Binding) error {
+	m.notifyMu.Lock()
+	defer m.notifyMu.Unlock()
+
 	m.mu.Lock()
 	next := make(map[string][]Binding, len(binds))
 	hold := make(map[string]bool, len(binds))
@@ -135,6 +169,9 @@ func (m *Manager) Apply(binds map[string][]Binding) error {
 // Suspend stops driving handlers and releases anything held, so a capture
 // cannot transmit while the user is binding a button.
 func (m *Manager) Suspend() {
+	m.notifyMu.Lock()
+	defer m.notifyMu.Unlock()
+
 	m.mu.Lock()
 	if m.suspended {
 		m.mu.Unlock()
@@ -172,9 +209,16 @@ func (m *Manager) Start() {
 // Close stops the loop, releases anything held and closes the source. Safe to
 // call more than once.
 func (m *Manager) Close() {
+	// notifyMu is released BEFORE waiting on <-m.done below: holding it
+	// across that wait would deadlock against a concurrently-running tick()
+	// that is blocked acquiring notifyMu and can never reach the m.closed
+	// check that lets it return.
+	m.notifyMu.Lock()
+
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
+		m.notifyMu.Unlock()
 		return
 	}
 	m.closed = true
@@ -183,6 +227,7 @@ func (m *Manager) Close() {
 	m.mu.Unlock()
 
 	m.emitReleases(release)
+	m.notifyMu.Unlock()
 
 	if started {
 		close(m.stop)
@@ -235,6 +280,15 @@ func (m *Manager) tick() {
 	m.mu.Unlock()
 
 	state, err := m.src.Poll()
+
+	// notifyMu is acquired for the rest of this call, INCLUDING the Handler
+	// calls at the bottom: this is the commit-then-notify span that must not
+	// interleave with Suspend()/Apply()/Close() doing the same. See the
+	// notifyMu field doc for why a data-race-free mu is not enough on its
+	// own.
+	m.notifyMu.Lock()
+	defer m.notifyMu.Unlock()
+
 	if err != nil {
 		// A failing poll means we can no longer prove anything is down.
 		// Release everything: a stuck-open microphone is the worst outcome

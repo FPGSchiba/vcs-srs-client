@@ -4,8 +4,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
@@ -20,7 +22,6 @@ type fakeSource struct {
 	mu      sync.Mutex
 	devices []Device
 	held    map[trigger.JoyButton]struct{}
-	conn    map[trigger.DeviceID]bool
 	pollErr error
 	closed  int
 }
@@ -29,7 +30,6 @@ func newFakeSource() *fakeSource {
 	return &fakeSource{
 		devices: []Device{{ID: tdev, Name: "Test Stick", Buttons: 32, Hats: 1}},
 		held:    map[trigger.JoyButton]struct{}{},
-		conn:    map[trigger.DeviceID]bool{tdev: true},
 	}
 }
 
@@ -52,7 +52,6 @@ func (f *fakeSource) unplug() {
 	defer f.mu.Unlock()
 	f.devices = nil
 	f.held = map[trigger.JoyButton]struct{}{}
-	f.conn = map[trigger.DeviceID]bool{}
 }
 
 func (f *fakeSource) Devices() ([]Device, error) {
@@ -71,11 +70,7 @@ func (f *fakeSource) Poll() (State, error) {
 	for k := range f.held {
 		held[k] = struct{}{}
 	}
-	conn := make(map[trigger.DeviceID]bool, len(f.conn))
-	for k, v := range f.conn {
-		conn[k] = v
-	}
-	return State{Connected: conn, Held: held}, nil
+	return State{Held: held}, nil
 }
 
 func (f *fakeSource) Close() {
@@ -260,3 +255,147 @@ type unsupportedSource struct{}
 func (unsupportedSource) Devices() ([]Device, error) { return nil, ErrUnsupported }
 func (unsupportedSource) Poll() (State, error)       { return State{}, ErrUnsupported }
 func (unsupportedSource) Close()                     {}
+
+// seqEvent is one Handler call, tagged with a monotonic sequence number so
+// ordering can be asserted regardless of wall-clock resolution.
+type seqEvent struct {
+	seq  int64
+	id   string
+	edge string // "P" or "R"
+}
+
+// orderedRecorder is like recorder but tags every edge with a sequence
+// number, so a test can assert ORDER (never Released before its matching
+// Pressed) and not just counts. Its own mutex only protects the slice
+// append; it makes no assumption about which goroutine calls it.
+type orderedRecorder struct {
+	mu     sync.Mutex
+	seq    int64
+	events []seqEvent
+}
+
+func (r *orderedRecorder) Pressed(id string)  { r.record(id, "P") }
+func (r *orderedRecorder) Released(id string) { r.record(id, "R") }
+
+func (r *orderedRecorder) record(id, edge string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seq++
+	r.events = append(r.events, seqEvent{seq: r.seq, id: id, edge: edge})
+}
+
+func (r *orderedRecorder) snapshot() []seqEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := append([]seqEvent(nil), r.events...)
+	sort.Slice(out, func(i, j int) bool { return out[i].seq < out[j].seq })
+	return out
+}
+
+// assertNeverReleasedBeforePressed walks the recorded edges in sequence order
+// and fails the instant any action shows a Released with no outstanding
+// Pressed, or two Pressed in a row with no Released between -- the exact
+// shape of the commit-then-notify race between tick() and
+// Suspend()/Apply()/Close(): a concurrent Suspend can take an action out of
+// the active set and emit its Released before tick's own Pressed call for the
+// same transition actually runs.
+func assertNeverReleasedBeforePressed(t *testing.T, events []seqEvent) {
+	t.Helper()
+	if len(events) == 0 {
+		t.Fatal("no press/release edges recorded -- test did not exercise anything")
+	}
+	held := map[string]bool{}
+	for _, e := range events {
+		switch e.edge {
+		case "P":
+			if held[e.id] {
+				t.Fatalf("seq %d: Pressed(%s) observed while already pressed with no Released between", e.seq, e.id)
+			}
+			held[e.id] = true
+		case "R":
+			if !held[e.id] {
+				t.Fatalf("seq %d: Released(%s) observed before its matching Pressed -- commit-then-notify race", e.seq, e.id)
+			}
+			held[e.id] = false
+		}
+	}
+}
+
+// TestConcurrentSuspendNeverReordersReleaseBeforePress runs the REAL poll
+// loop via Start() -- every other test in this file drives tick()
+// synchronously and cannot exhibit this by construction -- while hammering
+// Suspend/Resume/Apply from other goroutines. This is exactly the shape
+// Suspend() exists for: the UI opens a bind-capture while Start()'s loop
+// keeps running.
+//
+// -race cannot see the bug this pins: every shared field is correctly
+// mutex-protected. The bug is a LOGICAL ordering race between two
+// independently-unlocked commit-then-notify sequences (tick() and
+// Suspend()/Apply()/Close()), each internally race-free.
+func TestConcurrentSuspendNeverReordersReleaseBeforePress(t *testing.T) {
+	src := newFakeSource()
+	rec := &orderedRecorder{}
+	m := New(src, rec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.PollInterval = 200 * time.Microsecond
+	m.RediscoverInterval = time.Hour // keep rediscovery out of the way
+
+	m.Apply(map[string][]Binding{"global.ptt": {holdBind(3)}})
+	m.Start()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Goroutine 1: hammer the physical button up and down.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			src.hold(tbtn(3))
+			src.release(tbtn(3))
+		}
+	}()
+
+	// Goroutine 2: hammer Suspend/Resume -- the exact operation whose
+	// takeActiveLocked() races tick()'s commit-then-notify window.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			m.Suspend()
+			m.Resume()
+		}
+	}()
+
+	// Goroutine 3: hammer Apply with the same binding table -- Apply()
+	// releases-then-lets-the-next-tick-re-press exactly like Suspend/Resume,
+	// so it races the same window.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			m.Apply(map[string][]Binding{"global.ptt": {holdBind(3)}})
+		}
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	m.Close()
+
+	assertNeverReleasedBeforePressed(t, rec.snapshot())
+}

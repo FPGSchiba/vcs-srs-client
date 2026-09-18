@@ -36,9 +36,14 @@ type Device struct {
 }
 
 // State is a snapshot of every held input across all connected devices.
+//
+// State deliberately does NOT carry per-device connectivity. Every consumer
+// -- Active, Manager.tick, Manager.rediscover -- only ever needs to know
+// which buttons are currently held, and a vanished device already reads as
+// "nothing held" on its own: that is what makes release-on-unplug
+// self-healing without a separate connected flag to keep in sync. Device
+// presence for the UI comes from Source.Devices, a separate call.
 type State struct {
-	// Connected names the devices the backend can currently see.
-	Connected map[trigger.DeviceID]bool
 	// Held is the set of currently-held inputs.
 	Held map[trigger.JoyButton]struct{}
 }
