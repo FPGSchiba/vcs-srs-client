@@ -421,7 +421,7 @@ EOF
 ```
 joy:[<ref>+]<ref>
 <ref>   := <device-id>:<input>
-<input> := btn<0-127> | hat<0-3>.<up|up_right|right|down_right|down|down_left|left|up_left>
+<input> :=  btn<1-128> | hat<1-4>.<up|up_right|right|down_right|down|down_left|left|up_left>
 ```
 
 Strip the `joy:` prefix, split on `+`. One part is a bare binding; **two parts mean the first is the modifier and the second the main input**. Each part splits on `:` into exactly two fields. A value without the `joy:` prefix is a keyboard chord, parsed by `chord.Parse`.

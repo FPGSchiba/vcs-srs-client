@@ -150,7 +150,7 @@ This is a pure function of `H` and the trigger table. It is table-driven tested 
 [keybinds]
 global.push_to_mute = "V"                                    # unchanged
 global.ptt          = ["F1", "joy:vpc-throttle-a1b2:btn12"]
-channel.intercom    = ["joy:vpc-stick-c3d4:hat0.up"]         # hat direction
+channel.intercom    = ["joy:vpc-stick-c3d4:hat1.up"]         # hat direction
 
 # modifier form; the modifier comes first and may live on another device
 radio.1.ptt         = ["joy:vpc-stick-c3d4:btn5+vpc-stick-c3d4:btn3"]
@@ -166,7 +166,7 @@ vpc-stick-c3d4    = "VPC MongoosT-50CM3 Stick"
 ```
 joy:[<ref>+]<ref>
 <ref>   := <device-id>:<input>
-<input> := btn<0-127> | hat<0-3>.<up|up_right|right|down_right|down|down_left|left|up_left>
+<input> :=  btn<1-128> | hat<1-4>.<up|up_right|right|down_right|down|down_left|left|up_left>
 ```
 
 Parse: strip the `joy:` prefix, split on `+`. **One part is a bare binding; two parts mean the
