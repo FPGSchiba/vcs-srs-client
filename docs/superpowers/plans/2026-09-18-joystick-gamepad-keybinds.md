@@ -2102,8 +2102,6 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
 // DefaultPollInterval is how often the manager samples device state. DCS-SRS
@@ -2432,10 +2430,6 @@ func (m *Manager) logEdge(actionID string, binds []Binding, s State) {
 		return
 	}
 }
-
-// compile-time assertion that trigger stays imported even if the logging
-// helper changes shape.
-var _ = trigger.DeviceID("")
 ```
 
 - [ ] **Step 4: Run the tests**
@@ -2500,8 +2494,6 @@ Create `internal/joystick/capture_test.go`:
 package joystick
 
 import (
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
@@ -2651,8 +2643,6 @@ func TestCaptureHatDirection(t *testing.T) {
 		t.Errorf("hat capture = %+v, want hat 0 dir 2", got)
 	}
 }
-
-var _ = slog.New(slog.NewTextHandler(io.Discard, nil))
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -3951,7 +3941,7 @@ Add to `internal/app/settings_test.go`:
 
 ```go
 func TestGetKeybindsReturnsAllTriggers(t *testing.T) {
-	a, _ := newTestAppWithSettings(t)
+	a, _, _ := newTestApp(t)
 	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("AddTrigger: %v", err)
 	}
@@ -3974,7 +3964,7 @@ func TestGetKeybindsReturnsAllTriggers(t *testing.T) {
 }
 
 func TestRemoveTriggerDropsOnlyThatOne(t *testing.T) {
-	a, _ := newTestAppWithSettings(t)
+	a, _, _ := newTestApp(t)
 	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
 	a.settings.kb.Add("global.ptt", trigger.Joy(trigger.JoyBinding{Device: "stick-c3", Button: 11}))
 
@@ -3988,7 +3978,7 @@ func TestRemoveTriggerDropsOnlyThatOne(t *testing.T) {
 }
 
 func TestRemoveTriggerOutOfRangeErrors(t *testing.T) {
-	a, _ := newTestAppWithSettings(t)
+	a, _, _ := newTestApp(t)
 	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
 	if err := a.RemoveTrigger("global.ptt", 5); err == nil {
 		t.Error("RemoveTrigger(5) = nil error, want out-of-range failure")
@@ -3997,22 +3987,22 @@ func TestRemoveTriggerOutOfRangeErrors(t *testing.T) {
 
 func TestHoldActionHeldByTwoSourcesEmitsOneEdgePair(t *testing.T) {
 	// The PTT-cut defect, end to end through App.Pressed/Released.
-	a, em := newTestAppWithSettings(t)
+	a, em, _ := newTestApp(t)
 	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}) // global.ptt is KindHold
 
 	a.Pressed("global.ptt")  // keyboard
 	a.Pressed("global.ptt")  // joystick
 	a.Released("global.ptt") // keyboard lets go; joystick still held
 
-	if n := em.countHotkeyPressed("global.ptt"); n != 1 {
+	if n := em.count(events.EventHotkeyPressed); n != 1 {
 		t.Errorf("HotkeyPressed emitted %d times, want 1", n)
 	}
-	if n := em.countHotkeyReleased("global.ptt"); n != 0 {
+	if n := em.count(events.EventHotkeyReleased); n != 0 {
 		t.Errorf("HotkeyReleased emitted while the joystick still held it (%d times)", n)
 	}
 
 	a.Released("global.ptt") // joystick lets go
-	if n := em.countHotkeyReleased("global.ptt"); n != 1 {
+	if n := em.count(events.EventHotkeyReleased); n != 1 {
 		t.Errorf("HotkeyReleased emitted %d times, want 1", n)
 	}
 }
@@ -4020,16 +4010,16 @@ func TestHoldActionHeldByTwoSourcesEmitsOneEdgePair(t *testing.T) {
 func TestPressKindActionIsNotRefcounted(t *testing.T) {
 	// global.mute_toggle is KindPress and never receives a Released, so
 	// refcounting it would silence every press after the first.
-	a, em := newTestAppWithSettings(t)
+	a, em, _ := newTestApp(t)
 	a.Pressed("global.mute_toggle")
 	a.Pressed("global.mute_toggle")
-	if n := em.countHotkeyPressed("global.mute_toggle"); n != 2 {
+	if n := em.count(events.EventHotkeyPressed); n != 2 {
 		t.Errorf("press-kind action emitted %d times, want 2", n)
 	}
 }
 
 func TestBeginCaptureSuspendsBothManagers(t *testing.T) {
-	a, _ := newTestAppWithSettings(t)
+	a, _, _ := newTestApp(t)
 	joySrc := newFakeJoySource()
 	jm := joystick.New(joySrc, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	a.SetJoystickBackend(jm)
@@ -4052,7 +4042,14 @@ func TestBeginCaptureSuspendsBothManagers(t *testing.T) {
 }
 ```
 
-Add whatever small helpers the existing `settings_test.go` lacks: `countHotkeyPressed` / `countHotkeyReleased` on the fake emitter, `newFakeJoySource` (a `joystick.Source` returning one device and no held buttons), and export a `Suspended()` on `hotkeys.Manager` **only if one does not already exist** — if adding one, it is a read-only accessor and does not change behaviour, which keeps global constraint 4 intact. Add `IsSuspendedForTest()` to `joystick.Manager` the same way.
+**Test-helper facts, already checked against the tree — do not re-derive them:**
+
+- The setup helper is `newTestApp(t) (*App, *recordingEmitter, *countingRegistrar)` in `internal/app/settings_test.go:113`. There is no `newTestAppWithSettings`.
+- `recordingEmitter` already has `count(name string) int` (`settings_test.go:47`). Use it with the event-name constants; do **not** add per-action counters. The tests above press only one action, so a plain count is exact.
+- Event names live in `internal/events`: `events.EventHotkeyPressed`, `events.EventHotkeyReleased`. Import that package in the test.
+- **`hotkeys.Manager.Suspended()` already exists** (`internal/hotkeys/hotkeys.go:216`). Do **not** add one.
+
+Still to add: `newFakeJoySource` (a `joystick.Source` returning one device and no held buttons) and `IsSuspendedForTest()` on `joystick.Manager` — a read-only accessor, which changes no behaviour.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -4522,18 +4519,27 @@ and wherever the store is seeded from config (in `SetSettingsBackend`), convert 
 
 - [ ] **Step 6: Add the event**
 
-In `internal/app/events.go`, add alongside `KeybindsChanged`:
+The emitter is **`internal/events/events.go`** (there is no `internal/app/events.go`). It declares an `Event*` name constant per event and a method on `*Tagged`. Add both, following `HotkeyPressed` at `events.go:146` exactly:
+
+```go
+// EventJoystickCaptured is emitted when a joystick capture completed and bound
+// itself.
+EventJoystickCaptured = "keybinds:joy_captured"
+```
 
 ```go
 // JoystickCaptured tells the UI that a joystick capture completed and bound
 // itself, so the listening chip can close. The binding itself arrives via
-// keybinds:changed.
-func (e *Tagged) JoystickCaptured(actionID string) {
-	e.emit("keybinds:joy_captured", actionID)
+// EventKeybindsChanged -- this carries only the action id, because the UI
+// needs to know WHICH row to close and nothing more.
+func (t *Tagged) JoystickCaptured(actionID string) {
+	t.em.Emit(EventJoystickCaptured, struct {
+		ActionID string `json:"action_id"`
+	}{ActionID: actionID})
 }
 ```
 
-Match the existing file's emit helper name and signature rather than inventing one.
+The payload is a struct with a JSON tag, not a bare string, matching `HotkeyPressed`/`HotkeyReleased` — the frontend destructures `{action_id}` from every other keybind event and an inconsistent payload here would be a trap.
 
 - [ ] **Step 7: Run the tests**
 
