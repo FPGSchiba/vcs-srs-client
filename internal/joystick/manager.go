@@ -76,6 +76,13 @@ type Manager struct {
 
 	devices []Device
 
+	// capture is the in-flight binding capture, if any. Touched only under
+	// mu -- see capture.go. It deliberately never interacts with notifyMu:
+	// nothing in the capture path reads or writes m.active/m.hold, so it
+	// carries none of the Pressed/Released ordering risk notifyMu exists to
+	// prevent.
+	capture *captureState
+
 	PollInterval       time.Duration
 	RediscoverInterval time.Duration
 
@@ -280,6 +287,31 @@ func (m *Manager) tick() {
 	m.mu.Unlock()
 
 	state, err := m.src.Poll()
+
+	// A capture owns the device while it is armed: pressing a button to bind
+	// it must never also fire the action being bound. This is checked here,
+	// on a successful poll, rather than via Suspend, so the app layer can
+	// arm a capture without having to remember to suspend and un-suspend
+	// around it.
+	//
+	// This runs BEFORE notifyMu is acquired below, and returns without ever
+	// touching notifyMu. That is deliberate, not merely "not yet needed":
+	// capture's completion callback commonly calls straight back into the
+	// Manager on this same goroutine (e.g. Apply, to persist the newly
+	// captured binding immediately). notifyMu is not reentrant, and this
+	// callback runs on the very goroutine that would be holding it if the
+	// check were moved after the Lock below -- a reentrant Apply/Suspend/
+	// Close from inside the callback would then deadlock the poll loop
+	// against itself. feedCapture only ever takes m.mu (see capture.go), and
+	// capture never reads or writes m.active/m.hold, so skipping notifyMu
+	// here does not reopen the Pressed/Released ordering bug notifyMu exists
+	// to close.
+	if err == nil && m.capturing() {
+		if done, result, ok := m.feedCapture(state); ok && done != nil {
+			done(result)
+		}
+		return
+	}
 
 	// notifyMu is acquired for the rest of this call, INCLUDING the Handler
 	// calls at the bottom: this is the commit-then-notify span that must not
