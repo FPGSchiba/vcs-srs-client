@@ -63,6 +63,14 @@ func isPerRadioID(id string) bool {
 // Entries that will not parse are dropped INDIVIDUALLY, keeping the rest of
 // that action's list; entries whose action ID is unrecognised are preserved
 // verbatim for the next Snapshot.
+//
+// An action holds AT MOST ONE keyboard trigger (see Add's doc comment for
+// why). Load is the boundary where a hand-edited or version-skewed
+// config.toml enters, so it enforces the same invariant defensively: only
+// the FIRST KindKey trigger in an action's list survives, in the same
+// silent, per-entry-drop spirit as an unparseable trigger. The file's order
+// is the user's order, so keeping the first is stable and predictable.
+// Joystick triggers are unaffected -- there is no limit on those.
 func (s *Store) Load(raw map[string][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,10 +83,17 @@ func (s *Store) Load(raw map[string][]string) {
 			continue
 		}
 		var out []trigger.Trigger
+		haveKey := false
 		for _, str := range list {
 			t, err := trigger.Parse(str)
 			if err != nil {
 				continue // malformed trigger: drop this entry, keep the rest
+			}
+			if t.Kind == trigger.KindKey {
+				if haveKey {
+					continue // at most one keyboard trigger per action: drop extras, first wins
+				}
+				haveKey = true
 			}
 			out = append(out, t)
 		}

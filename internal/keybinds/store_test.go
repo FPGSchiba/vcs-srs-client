@@ -183,6 +183,20 @@ func TestLoadDropsOnlyTheUnparseableEntry(t *testing.T) {
 	}
 }
 
+func TestLoadKeepsOnlyTheFirstKeyboardTrigger(t *testing.T) {
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"F1", "joy:stick-c3:btn12", "F2"},
+	})
+	got, _ := s.Get("global.ptt")
+	if len(got) != 2 {
+		t.Fatalf("Get = %+v, want exactly two triggers", got)
+	}
+	if !got[0].Equal(key(t, "F1")) || !got[1].Equal(joy("stick-c3", 11)) {
+		t.Errorf("wrong survivors: %+v, want F1 keyboard trigger and the joystick trigger (F2 dropped)", got)
+	}
+}
+
 func TestClearRemovesEveryTrigger(t *testing.T) {
 	s := keybinds.New()
 	s.Add("global.ptt", key(t, "F1"))
