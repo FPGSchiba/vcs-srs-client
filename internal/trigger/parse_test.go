@@ -24,7 +24,9 @@ func TestParseRoundTrip(t *testing.T) {
 	}{
 		{"V", trigger.Key(mustChord(t, "V"))},
 		{"Ctrl+Alt+F1", trigger.Key(mustChord(t, "Ctrl+Alt+F1"))},
+		{"joy:stick-c3:btn1", trigger.Joy(trigger.JoyBinding{Device: "stick-c3", Button: 0})},
 		{"joy:stick-c3:btn12", trigger.Joy(trigger.JoyBinding{Device: "stick-c3", Button: 11})},
+		{"joy:stick-c3:btn128", trigger.Joy(trigger.JoyBinding{Device: "stick-c3", Button: 127})},
 		{"joy:stick-c3:hat1.up", trigger.Joy(trigger.JoyBinding{
 			Device: "stick-c3", Button: trigger.HatButton(0, 0)})},
 		{"joy:stick-c3:hat4.up_left", trigger.Joy(trigger.JoyBinding{
