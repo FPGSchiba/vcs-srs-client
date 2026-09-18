@@ -81,6 +81,14 @@ Encoding hats as high button indices follows DCS-SRS and means **one** edge-dete
 
 `keybinds.Store` changes from `map[ActionID]chord.Chord` to `map[ActionID][]trigger.Trigger`.
 
+### One keyboard trigger, many joystick triggers
+
+An action holds **at most one** `KindKey` trigger and **any number** of `KindJoy` triggers. Adding a second keyboard chord replaces the first rather than appending.
+
+This is a constraint, not an accident. `internal/hotkeys` keys both `Manager.Apply(map[string]Binding)` and `dispatcher.binds map[string]boundAction` by action ID, one entry each. Supporting two chords for one action would mean widening both — reopening the shipped, tested keyboard path that D-series decisions and §7 exist to protect. Without the constraint the overflow is *silent*: the second chord saves fine, displays fine, and never fires.
+
+The constraint costs nothing against the actual requirement. "Keyboard PTT **and** HOTAS PTT on the same action" is fully served by one keyboard chord plus N joystick triggers; two keyboard chords for one action is a marginal want. If it is ever asked for, the honest fix is widening `internal/hotkeys` deliberately, as its own change.
+
 ### Device identity
 
 `DeviceID` is opaque to everything above the backend. Backends derive it to be stable across replug where the OS permits:
