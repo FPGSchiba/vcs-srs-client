@@ -70,9 +70,14 @@ func TestPerRadioActions(t *testing.T) {
 }
 
 func TestDefaultsParse(t *testing.T) {
-	for id, c := range Defaults() {
-		if c.IsZero() {
-			t.Errorf("default for %s is zero", id)
+	for id, triggers := range Defaults() {
+		if len(triggers) == 0 {
+			t.Errorf("default for %s has no triggers", id)
+		}
+		for _, tr := range triggers {
+			if tr.IsZero() {
+				t.Errorf("default for %s is zero", id)
+			}
 		}
 	}
 }

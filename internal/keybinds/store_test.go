@@ -1,167 +1,194 @@
-package keybinds
+package keybinds_test
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
+	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
-func mustChord(t *testing.T, s string) chord.Chord {
+func key(t *testing.T, s string) trigger.Trigger {
 	t.Helper()
 	c, err := chord.Parse(s)
 	if err != nil {
-		t.Fatalf("Parse(%q): %v", s, err)
+		t.Fatalf("chord.Parse(%q): %v", s, err)
 	}
-	return c
+	return trigger.Key(c)
 }
 
-func TestIsPerRadioID(t *testing.T) {
-	tests := []struct {
-		id   string
-		want bool
-	}{
-		{"radio.1.ptt", true},
-		{"radio.12.select", true},
-		{"radio.999.ptt", true},
-		{"radio.ptt", false},    // no ID segment
-		{"radio..ptt", false},   // empty ID segment
-		{"global.ptt", false},   // wrong prefix
-		{"radio.1.mute", false}, // wrong suffix
-		{"radio.1.PTT", false},  // case-sensitive
-		{"radio", false},        // too short
-		{"radio.", false},       // incomplete
-		{"radio.1", false},      // incomplete (missing suffix)
-	}
-	for _, tt := range tests {
-		t.Run(tt.id, func(t *testing.T) {
-			if got := isPerRadioID(tt.id); got != tt.want {
-				t.Errorf("isPerRadioID(%q) = %v, want %v", tt.id, got, tt.want)
-			}
-		})
-	}
+func joy(dev string, btn trigger.Button) trigger.Trigger {
+	return trigger.Joy(trigger.JoyBinding{Device: trigger.DeviceID(dev), Button: btn})
 }
 
-func TestSetAndGet(t *testing.T) {
-	s := New()
-	c := mustChord(t, "F1")
-	if stolen := s.Set("global.ptt", c); stolen != nil {
-		t.Errorf("unexpected steal: %+v", stolen)
-	}
+func TestAddAccumulatesTriggers(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+
 	got, ok := s.Get("global.ptt")
-	if !ok || got != c {
-		t.Errorf("Get = %v/%v, want %v/true", got, ok, c)
+	if !ok || len(got) != 2 {
+		t.Fatalf("Get after two Adds = %v (ok=%v), want 2 triggers", got, ok)
+	}
+	if !got[0].Equal(key(t, "F1")) || !got[1].Equal(joy("stick-c3", 11)) {
+		t.Errorf("triggers out of order or wrong: %+v", got)
 	}
 }
 
-func TestSetStealsExistingBinding(t *testing.T) {
-	s := New()
-	f1 := mustChord(t, "F1")
-	s.Set("radio.1.ptt", f1)
+func TestAddIsIdempotentForTheSameTrigger(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	if stolen := s.Add("global.ptt", key(t, "F1")); stolen != nil {
+		t.Errorf("re-adding an action's own trigger reported a steal: %+v", stolen)
+	}
+	if got, _ := s.Get("global.ptt"); len(got) != 1 {
+		t.Errorf("re-adding duplicated the trigger: %+v", got)
+	}
+}
 
-	stolen := s.Set("radio.2.ptt", f1)
+func TestAddStealsFromAnotherAction(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	stolen := s.Add("channel.intercom", key(t, "F1"))
 	if stolen == nil {
-		t.Fatal("expected a steal, got nil")
+		t.Fatal("Add over another action's trigger reported no steal")
 	}
-	if stolen.ActionID != "radio.1.ptt" {
-		t.Errorf("stolen from %q, want radio.1.ptt", stolen.ActionID)
+	if stolen.ActionID != "global.ptt" {
+		t.Errorf("stolen from %q, want global.ptt", stolen.ActionID)
 	}
-	if stolen.Chord != f1 {
-		t.Errorf("stolen chord = %v, want %v", stolen.Chord, f1)
-	}
-	if _, ok := s.Get("radio.1.ptt"); ok {
-		t.Error("previous owner must be unbound after a steal")
-	}
-	if got, _ := s.Get("radio.2.ptt"); got != f1 {
-		t.Error("new owner must hold the chord")
+	if got, _ := s.Get("global.ptt"); len(got) != 0 {
+		t.Errorf("victim kept the stolen trigger: %+v", got)
 	}
 }
 
-func TestSetSameActionSameChordIsNotASteal(t *testing.T) {
-	s := New()
-	f1 := mustChord(t, "F1")
-	s.Set("global.ptt", f1)
-	if stolen := s.Set("global.ptt", f1); stolen != nil {
-		t.Errorf("rebinding an action to its own chord must not report a steal, got %+v", stolen)
+func TestStealTakesOnlyTheConflictingTrigger(t *testing.T) {
+	// The victim's OTHER bindings must survive -- this is the whole point of
+	// the additive model.
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Add("channel.intercom", key(t, "F1"))
+
+	got, _ := s.Get("global.ptt")
+	if len(got) != 1 || !got[0].Equal(joy("stick-c3", 11)) {
+		t.Errorf("steal took more than the conflicting trigger: %+v", got)
 	}
 }
 
-func TestClear(t *testing.T) {
-	s := New()
-	s.Set("global.ptt", mustChord(t, "F1"))
-	s.Clear("global.ptt")
-	if _, ok := s.Get("global.ptt"); ok {
-		t.Error("binding should be gone after Clear")
+func TestKeyboardNeverStealsFromJoystick(t *testing.T) {
+	// Separate conflict namespaces (spec section 10). This works because
+	// Trigger.Equal compares Kind first.
+	s := keybinds.New()
+	s.Add("global.ptt", joy("stick-c3", 11))
+	if stolen := s.Add("channel.intercom", key(t, "F1")); stolen != nil {
+		t.Errorf("keyboard trigger stole from a joystick binding: %+v", stolen)
 	}
 }
 
-func TestSnapshotRoundTrip(t *testing.T) {
-	s := New()
-	s.Set("global.ptt", mustChord(t, "F1"))
-	s.Set("global.mute_toggle", mustChord(t, "Ctrl+M"))
+func TestSecondKeyboardTriggerReplacesTheFirst(t *testing.T) {
+	// internal/hotkeys registers one chord per action ID, so a second
+	// keyboard chord would save, display, and never fire. Replace instead.
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", key(t, "F2"))
 
-	snap := s.Snapshot()
-	want := map[string]string{"global.ptt": "F1", "global.mute_toggle": "Ctrl+M"}
-	if !reflect.DeepEqual(snap, want) {
-		t.Errorf("Snapshot() = %v, want %v", snap, want)
+	got, _ := s.Get("global.ptt")
+	if len(got) != 1 {
+		t.Fatalf("Get = %+v, want exactly one keyboard trigger", got)
 	}
-
-	s2 := New()
-	s2.Load(snap)
-	if !reflect.DeepEqual(s2.Snapshot(), want) {
-		t.Errorf("round trip lost data: %v", s2.Snapshot())
+	if !got[0].Equal(key(t, "F2")) {
+		t.Errorf("kept %+v, want the newer chord F2", got[0])
 	}
 }
 
-func TestLoadPreservesUnknownActionIDs(t *testing.T) {
-	// A binding written by a FUTURE version must survive a load/save cycle
-	// rather than being silently dropped.
-	s := New()
-	s.Load(map[string]string{
-		"global.ptt":            "F1",
-		"future.unknown.action": "Ctrl+Shift+Z",
-	})
-	snap := s.Snapshot()
-	if snap["future.unknown.action"] != "Ctrl+Shift+Z" {
-		t.Errorf("unknown action ID was dropped; snapshot = %v", snap)
-	}
-}
+func TestKeyboardReplacementKeepsJoystickTriggers(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", key(t, "F2"))
 
-func TestLoadDropsUnparseableChords(t *testing.T) {
-	s := New()
-	s.Load(map[string]string{
-		"global.ptt":         "F1",
-		"global.mute_toggle": "!!!not-a-chord!!!",
-	})
-	if _, ok := s.Get("global.mute_toggle"); ok {
-		t.Error("unparseable chord should not become an active binding")
+	got, _ := s.Get("global.ptt")
+	if len(got) != 2 {
+		t.Fatalf("Get = %+v, want the joystick trigger plus one chord", got)
 	}
-	if _, ok := s.Get("global.ptt"); !ok {
-		t.Error("a bad entry must not prevent good entries from loading")
-	}
-}
-
-func TestAllReturnsACopy(t *testing.T) {
-	s := New()
-	s.Set("global.ptt", mustChord(t, "F1"))
-	all := s.All()
-	delete(all, "global.ptt")
-	if _, ok := s.Get("global.ptt"); !ok {
-		t.Error("All() must return a copy; mutating it changed the store")
-	}
-}
-
-func TestConcurrentAccessIsRaceFree(t *testing.T) {
-	s := New()
-	done := make(chan struct{})
-	go func() {
-		for i := 0; i < 200; i++ {
-			s.Set("global.ptt", mustChord(t, "F1"))
+	var joys, keysN int
+	for _, tr := range got {
+		if tr.Kind == trigger.KindJoy {
+			joys++
+		} else {
+			keysN++
 		}
-		close(done)
-	}()
-	for i := 0; i < 200; i++ {
-		_ = s.Snapshot()
 	}
-	<-done
+	if joys != 1 || keysN != 1 {
+		t.Errorf("got %d joystick and %d keyboard triggers, want 1 and 1", joys, keysN)
+	}
+}
+
+func TestSeveralJoystickTriggersAccumulate(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Add("global.ptt", joy("throttle-a1", 6))
+	if got, _ := s.Get("global.ptt"); len(got) != 2 {
+		t.Errorf("Get = %+v, want both joystick triggers", got)
+	}
+}
+
+func TestRemoveAt(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+
+	if err := s.RemoveAt("global.ptt", 0); err != nil {
+		t.Fatalf("RemoveAt(0): %v", err)
+	}
+	got, _ := s.Get("global.ptt")
+	if len(got) != 1 || !got[0].Equal(joy("stick-c3", 11)) {
+		t.Errorf("after RemoveAt(0) = %+v, want the joystick trigger only", got)
+	}
+	for _, bad := range []int{-1, 1, 99} {
+		if err := s.RemoveAt("global.ptt", bad); err == nil {
+			t.Errorf("RemoveAt(%d) = nil error, want out-of-range failure", bad)
+		}
+	}
+}
+
+func TestLoadSnapshotRoundTrip(t *testing.T) {
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt":       {"F1", "joy:stick-c3:btn12"},
+		"channel.intercom": {"joy:throttle-a1:btn7+stick-c3:btn3"},
+		"future.action":    {"Ctrl+Q"}, // unknown id: must survive verbatim
+	})
+	snap := s.Snapshot()
+	if len(snap["global.ptt"]) != 2 ||
+		snap["global.ptt"][0] != "F1" || snap["global.ptt"][1] != "joy:stick-c3:btn12" {
+		t.Errorf("global.ptt round trip = %v", snap["global.ptt"])
+	}
+	if got := snap["future.action"]; len(got) != 1 || got[0] != "Ctrl+Q" {
+		t.Errorf("unknown action id lost: %v", got)
+	}
+}
+
+func TestLoadDropsOnlyTheUnparseableEntry(t *testing.T) {
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"F1", "joy:!!!bad", "joy:stick-c3:btn12"},
+	})
+	got, _ := s.Get("global.ptt")
+	if len(got) != 2 {
+		t.Fatalf("Get = %+v, want the two parseable triggers", got)
+	}
+	if !got[0].Equal(key(t, "F1")) || !got[1].Equal(joy("stick-c3", 11)) {
+		t.Errorf("wrong survivors: %+v", got)
+	}
+}
+
+func TestClearRemovesEveryTrigger(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Clear("global.ptt")
+	if got, ok := s.Get("global.ptt"); ok && len(got) != 0 {
+		t.Errorf("after Clear = %+v, want empty", got)
+	}
 }

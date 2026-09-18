@@ -1,33 +1,42 @@
 package keybinds
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
-// Stolen reports which action lost a chord when another action took it.
+// ErrNoSuchTrigger means the index handed to RemoveAt was out of range.
+var ErrNoSuchTrigger = errors.New("keybinds: no such trigger")
+
+// Stolen reports which action lost a trigger when another action took it.
 type Stolen struct {
 	ActionID ActionID
-	Chord    chord.Chord
+	Trigger  trigger.Trigger
 }
 
-// Store holds the live action->chord map. Safe for concurrent use.
+// Store holds the live action->triggers map. Safe for concurrent use.
+//
+// An action holds a LIST of triggers, so a user can drive the same action
+// from a keyboard chord and a joystick button at once. Nothing here assumes
+// a trigger's kind.
 type Store struct {
 	mu sync.RWMutex
-	// binds holds bindings for action IDs we understand.
-	binds map[ActionID]chord.Chord
+	// binds holds triggers for action IDs we understand.
+	binds map[ActionID][]trigger.Trigger
 	// unknown holds raw entries whose action ID we do not recognise, so a
 	// config written by a newer version survives a load/save cycle here.
-	unknown map[string]string
+	unknown map[string][]string
 }
 
 // New returns an empty Store.
 func New() *Store {
 	return &Store{
-		binds:   map[ActionID]chord.Chord{},
-		unknown: map[string]string{},
+		binds:   map[ActionID][]trigger.Trigger{},
+		unknown: map[string][]string{},
 	}
 }
 
@@ -51,80 +60,148 @@ func isPerRadioID(id string) bool {
 }
 
 // Load replaces the store contents from a raw map (as read from config.toml).
-// Entries whose chord will not parse are dropped; entries whose action ID is
-// unrecognised are preserved verbatim for the next Snapshot.
-func (s *Store) Load(raw map[string]string) {
+// Entries that will not parse are dropped INDIVIDUALLY, keeping the rest of
+// that action's list; entries whose action ID is unrecognised are preserved
+// verbatim for the next Snapshot.
+func (s *Store) Load(raw map[string][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.binds = map[ActionID]chord.Chord{}
-	s.unknown = map[string]string{}
+	s.binds = map[ActionID][]trigger.Trigger{}
+	s.unknown = map[string][]string{}
 	known := knownIDs()
-	for id, str := range raw {
+	for id, list := range raw {
 		if !known[ActionID(id)] && !isPerRadioID(id) {
-			s.unknown[id] = str
+			s.unknown[id] = append([]string(nil), list...)
 			continue
 		}
-		c, err := chord.Parse(str)
-		if err != nil {
-			continue // malformed chord: drop this entry, keep the rest
+		var out []trigger.Trigger
+		for _, str := range list {
+			t, err := trigger.Parse(str)
+			if err != nil {
+				continue // malformed trigger: drop this entry, keep the rest
+			}
+			out = append(out, t)
 		}
-		s.binds[ActionID(id)] = c
+		if len(out) > 0 {
+			s.binds[ActionID(id)] = out
+		}
 	}
 }
 
-// Snapshot renders the store as a raw map for persistence, including preserved
-// unknown entries.
-func (s *Store) Snapshot() map[string]string {
+// Snapshot renders the store as a raw map for persistence, including
+// preserved unknown entries.
+func (s *Store) Snapshot() map[string][]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[string]string, len(s.binds)+len(s.unknown))
-	for id, c := range s.binds {
-		out[string(id)] = c.String()
+	out := make(map[string][]string, len(s.binds)+len(s.unknown))
+	for id, list := range s.binds {
+		strs := make([]string, 0, len(list))
+		for _, t := range list {
+			strs = append(strs, t.String())
+		}
+		out[string(id)] = strs
 	}
-	for id, str := range s.unknown {
-		out[id] = str
+	for id, list := range s.unknown {
+		out[id] = append([]string(nil), list...)
 	}
 	return out
 }
 
-// Get returns the chord bound to id.
-func (s *Store) Get(id ActionID) (chord.Chord, bool) {
+// Get returns the triggers bound to id.
+func (s *Store) Get(id ActionID) ([]trigger.Trigger, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	c, ok := s.binds[id]
-	return c, ok
+	list, ok := s.binds[id]
+	return append([]trigger.Trigger(nil), list...), ok
 }
 
 // All returns a copy of the live bindings.
-func (s *Store) All() map[ActionID]chord.Chord {
+func (s *Store) All() map[ActionID][]trigger.Trigger {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[ActionID]chord.Chord, len(s.binds))
+	out := make(map[ActionID][]trigger.Trigger, len(s.binds))
 	for k, v := range s.binds {
-		out[k] = v
+		out[k] = append([]trigger.Trigger(nil), v...)
 	}
 	return out
 }
 
-// Set binds c to id. If another action already holds c, that action is unbound
-// and returned as Stolen. Rebinding an action to the chord it already holds is
-// not a steal.
-func (s *Store) Set(id ActionID, c chord.Chord) *Stolen {
+// Add appends t to id's trigger list. If another action already holds t, that
+// action loses just that one trigger and it is returned as Stolen -- its
+// other bindings survive, which is the point of the additive model. Adding a
+// trigger an action already holds is a no-op, not a steal.
+//
+// Keyboard and joystick triggers can never collide because trigger.Equal
+// compares Kind first, so the two kinds are separate conflict namespaces
+// without a special case here.
+//
+// An action holds AT MOST ONE keyboard trigger: adding a second chord
+// replaces the first. internal/hotkeys registers one chord per action ID
+// (Manager.Apply and dispatcher.binds are both keyed that way), so a second
+// chord would persist, render, and never fire. Replacing keeps that
+// impossible without reopening the shipped keyboard path. Joystick triggers
+// have no such limit.
+func (s *Store) Add(id ActionID, t trigger.Trigger) *Stolen {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	for _, existing := range s.binds[id] {
+		if existing.Equal(t) {
+			return nil // already bound here
+		}
+	}
+
+	if t.Kind == trigger.KindKey {
+		kept := s.binds[id][:0:0]
+		for _, existing := range s.binds[id] {
+			if existing.Kind != trigger.KindKey {
+				kept = append(kept, existing)
+			}
+		}
+		s.binds[id] = kept
+	}
+
 	var stolen *Stolen
-	for other, existing := range s.binds {
-		if other != id && existing == c {
-			stolen = &Stolen{ActionID: other, Chord: existing}
-			delete(s.binds, other)
+	for other, list := range s.binds {
+		if other == id {
+			continue
+		}
+		for i, existing := range list {
+			if !existing.Equal(t) {
+				continue
+			}
+			stolen = &Stolen{ActionID: other, Trigger: existing}
+			s.binds[other] = append(list[:i:i], list[i+1:]...)
+			if len(s.binds[other]) == 0 {
+				delete(s.binds, other)
+			}
+			break
+		}
+		if stolen != nil {
 			break
 		}
 	}
-	s.binds[id] = c
+
+	s.binds[id] = append(s.binds[id], t)
 	return stolen
 }
 
-// Clear removes any binding for id.
+// RemoveAt drops the trigger at index i from id's list.
+func (s *Store) RemoveAt(id ActionID, i int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.binds[id]
+	if i < 0 || i >= len(list) {
+		return fmt.Errorf("%w: %s[%d]", ErrNoSuchTrigger, id, i)
+	}
+	s.binds[id] = append(list[:i:i], list[i+1:]...)
+	if len(s.binds[id]) == 0 {
+		delete(s.binds, id)
+	}
+	return nil
+}
+
+// Clear removes every binding for id.
 func (s *Store) Clear(id ActionID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
