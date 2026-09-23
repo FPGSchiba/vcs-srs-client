@@ -52,15 +52,6 @@ func (p *pressCount) release(actionID string) bool {
 	return false
 }
 
-// forget drops any held state for actionID without emitting. Used when an
-// action is rebound, so a count left behind by a missed release cannot
-// deaden it for the rest of the session.
-func (p *pressCount) forget(actionID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.n, actionID)
-}
-
 // reset drops every held count.
 func (p *pressCount) reset() {
 	p.mu.Lock()

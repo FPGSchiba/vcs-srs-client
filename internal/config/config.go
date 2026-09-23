@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -84,13 +83,62 @@ func (k *KeybindValue) UnmarshalTOML(data any) error {
 // form otherwise. See the type comment for why.
 func (k KeybindValue) MarshalTOML() ([]byte, error) {
 	if len(k) == 1 && !strings.HasPrefix(k[0], joyPrefix) {
-		return []byte(strconv.Quote(k[0])), nil
+		return []byte(quoteTOML(k[0])), nil
 	}
 	parts := make([]string, len(k))
 	for i, s := range k {
-		parts[i] = strconv.Quote(s)
+		parts[i] = quoteTOML(s)
 	}
 	return []byte("[" + strings.Join(parts, ", ") + "]"), nil
+}
+
+// quoteTOML renders s as a TOML basic string.
+//
+// Deliberately NOT strconv.Quote, which is a GO literal quoter: it escapes an
+// ASCII control character as \xNN, and TOML has no \x escape at all. That is
+// reachable, not theoretical -- keybinds.Store passes the values of
+// unrecognised action IDs through verbatim, so a config file (hand-edited, or
+// written by a future version) carrying U+0007 in one of them came back out as
+// "\a", which the TOML parser then rejects. The next Load fails, main.go falls
+// back to in-memory defaults, and the first subsequent Save overwrites every
+// setting and keybind the user had. Tiny probability, total cost.
+//
+// Control characters therefore go out as \uNNNN (or their TOML shorthand),
+// which is what the format specifies. U+007F counts as one; so does every
+// code point below U+0020 other than tab.
+//
+// Invalid UTF-8 becomes U+FFFD. TOML is defined over valid UTF-8 and has no
+// way to spell a lone byte, so substituting is the only option that still
+// produces a loadable file -- which is the whole point of this function.
+func quoteTOML(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\u%04X`, r)
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // Default returns the baseline config used when no file exists.
@@ -106,8 +154,19 @@ func Default() *Config {
 			PlayConnectionSounds: true,
 			RadioSwitchAsPTT:     false,
 		},
-		Keybinds:       map[string]KeybindValue{},
-		KeybindDevices: map[string]string{},
+		Keybinds: map[string]KeybindValue{},
+		// KeybindDevices is deliberately left NIL, not an empty map. The
+		// TOML encoder writes a bare "[keybind_devices]" table header for an
+		// empty-but-non-nil map and omits it entirely for a nil one, so
+		// initialising it here made the first Save after upgrading append a
+		// table header to every existing keyboard-only config.toml -- a
+		// diff on a file the user never asked to change, and a breach of the
+		// Definition of Done's byte-identical-rewrite requirement.
+		//
+		// Nothing needs it non-nil: every read is a range or a len (both
+		// nil-safe), and rememberDevice -- the only writer -- allocates a
+		// fresh map before copying into it.
+		KeybindDevices: nil,
 	}
 }
 

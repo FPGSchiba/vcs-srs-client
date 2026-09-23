@@ -43,7 +43,7 @@ type fakeSource struct {
 
 func newFakeSource() *fakeSource {
 	return &fakeSource{
-		devices: []Device{{ID: tdev, Name: "Test Stick", Buttons: 32, Hats: 1}},
+		devices: []Device{{ID: tdev, Name: "Test Stick"}},
 		held:    map[trigger.JoyButton]struct{}{},
 	}
 }

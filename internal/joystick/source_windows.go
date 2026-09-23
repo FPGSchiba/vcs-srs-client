@@ -121,12 +121,7 @@ func (s *winSource) Devices() ([]Device, error) {
 			dev.Release()
 			return di8.ENUM_CONTINUE
 		}
-		info := Device{
-			ID:      id,
-			Name:    inst.GetProductName(),
-			Buttons: int(trigger.MaxButton) + 1,
-			Hats:    trigger.HatCount,
-		}
+		info := Device{ID: id, Name: inst.GetProductName()}
 		s.devices[id] = &winDevice{dev: dev, info: info}
 		out = append(out, info)
 		return di8.ENUM_CONTINUE

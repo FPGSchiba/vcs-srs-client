@@ -22,6 +22,13 @@ import (
 var ErrUnsupported = errors.New("joystick: not supported on this platform")
 
 // Device is one attached input device.
+//
+// It carries NOTHING but the id and the name. Button and hat COUNTS were
+// removed for the same reason State.Connected was: both backends populated
+// them and nothing ever read them -- JoystickDeviceDTO carries only the id and
+// the name, and binding is driven by what a button actually reports held,
+// never by a declared count. A field no consumer reads is a field that
+// silently rots.
 type Device struct {
 	// ID is stable across replug where the OS permits. Always a legal
 	// trigger.DeviceID -- backends sanitise.
@@ -29,10 +36,6 @@ type Device struct {
 	// Name is the human-readable product name, shown in the UI and persisted
 	// as display metadata so an absent device is still nameable.
 	Name string
-	// Buttons is how many plain buttons the device reports.
-	Buttons int
-	// Hats is how many POV hats the device reports.
-	Hats int
 }
 
 // State is a snapshot of every held input across all connected devices.

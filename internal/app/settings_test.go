@@ -30,7 +30,7 @@ type fakeJoySource struct{}
 func newFakeJoySource() *fakeJoySource { return &fakeJoySource{} }
 
 func (f *fakeJoySource) Devices() ([]joystick.Device, error) {
-	return []joystick.Device{{ID: "stick-c3", Name: "Fake Stick", Buttons: 16, Hats: 1}}, nil
+	return []joystick.Device{{ID: "stick-c3", Name: "Fake Stick"}}, nil
 }
 
 func (f *fakeJoySource) Poll() (joystick.State, error) {
@@ -52,7 +52,7 @@ type controllableJoySource struct {
 
 func newControllableJoySource(deviceID trigger.DeviceID) *controllableJoySource {
 	return &controllableJoySource{
-		device: joystick.Device{ID: deviceID, Name: "Fake Stick", Buttons: 16, Hats: 1},
+		device: joystick.Device{ID: deviceID, Name: "Fake Stick"},
 		held:   map[trigger.JoyButton]struct{}{},
 	}
 }

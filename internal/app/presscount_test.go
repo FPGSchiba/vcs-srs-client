@@ -54,17 +54,6 @@ func TestPressCountActionsAreIndependent(t *testing.T) {
 	}
 }
 
-func TestForgetClearsALeakedCount(t *testing.T) {
-	// Rebinding an action drops its held state; without forget, a count left
-	// behind by a missed release would deaden the action for the session.
-	p := newPressCount()
-	p.press("global.ptt")
-	p.forget("global.ptt")
-	if !p.press("global.ptt") {
-		t.Error("press after forget = false, want true")
-	}
-}
-
 func TestPressCountIsRaceFree(t *testing.T) {
 	// Both managers call into this from their own goroutines.
 	p := newPressCount()

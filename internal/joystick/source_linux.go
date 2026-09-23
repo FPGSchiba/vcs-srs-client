@@ -331,15 +331,12 @@ func (s *linuxSource) Devices() ([]Device, error) {
 			next++
 		}
 
-		// hatSeen counts DISTINCT hats, not axis codes: each hat reports an
-		// X and a Y code, so counting codes would double the real total.
 		// The hatIdx >= trigger.HatCount guard is defence in depth rather
 		// than a reachable path today: evdev defines exactly
 		// ABS_HAT0X..ABS_HAT3Y (4 hats), which already equals
 		// trigger.HatCount, so hatIdx can never exceed 3. It is kept for the
-		// same reason the button guard above is kept for real: callers of
+		// same reason the button guard above is kept: callers of
 		// trigger.HatButton must clamp, and this is that clamp.
-		hatSeen := map[int]bool{}
 		for _, c := range dev.CapableEvents(evdev.EV_ABS) {
 			if c < evdev.ABS_HAT0X || c > evdev.ABS_HAT3Y {
 				continue
@@ -349,15 +346,9 @@ func (s *linuxSource) Devices() ([]Device, error) {
 				continue
 			}
 			ld.hatAxes[c] = hatIdx
-			hatSeen[hatIdx] = true
 		}
 
-		ld.info = Device{
-			ID:      id,
-			Name:    name,
-			Buttons: len(ld.buttons),
-			Hats:    len(hatSeen),
-		}
+		ld.info = Device{ID: id, Name: name}
 		s.devices[id] = ld
 		out = append(out, ld.info)
 	}

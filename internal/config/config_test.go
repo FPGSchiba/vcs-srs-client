@@ -359,3 +359,79 @@ global.ptt = [1, 2]
 		t.Error("decode of numeric keybind entries = nil error, want failure")
 	}
 }
+
+// TestSaveLoadRoundTripsAControlCharacterInAnUnknownKeybind is the end-to-end
+// half of the M2 guard: the file Save writes must be readable by Load. With
+// strconv.Quote it was not -- a control character came out as a Go escape TOML
+// rejects, and the next startup silently fell back to defaults and then
+// overwrote the user's real settings and keybinds on the first Save.
+func TestSaveLoadRoundTripsAControlCharacterInAnUnknownKeybind(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	cfg := config.Default()
+	cfg.Keybinds = map[string]config.KeybindValue{
+		"future.action":  {"\a"},                        // the bell, the original report
+		"future.action2": {"Ctrl+\x1b", "joy:x\x00y"},   // array form, ESC and NUL
+		"future.action3": {"quote\"back\\slash\ttab\n"}, // the ordinary escapes
+		"global.ptt":     {"Ctrl+Shift+T"},              // an unremarkable neighbour
+	}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load after Save: %v -- the file Save wrote is not valid TOML", err)
+	}
+	for id, want := range cfg.Keybinds {
+		have, ok := got.Keybinds[id]
+		if !ok {
+			t.Errorf("keybind %q missing after round trip", id)
+			continue
+		}
+		if !slices.Equal([]string(have), []string(want)) {
+			t.Errorf("keybind %q = %q, want %q", id, have, want)
+		}
+	}
+}
+
+// TestRewritingAKeyboardOnlyConfigIsByteIdentical is the M1 guard.
+//
+// Default() used to initialise KeybindDevices to an empty, non-nil map. The
+// TOML encoder writes a bare "[keybind_devices]" table header for that and
+// omits the key entirely for a nil map, so the first Save after upgrading
+// appended a table header to every existing keyboard-only config.toml -- a
+// diff on a file the user never asked to change.
+func TestRewritingAKeyboardOnlyConfigIsByteIdentical(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	cfg := config.Default()
+	cfg.Keybinds = map[string]config.KeybindValue{"global.ptt": {"Ctrl+Shift+T"}}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after first Save: %v", err)
+	}
+	if strings.Contains(string(first), "keybind_devices") {
+		t.Errorf("a keyboard-only config must not mention keybind_devices, got:\n%s", first)
+	}
+
+	// Load and re-save, which is exactly what startup followed by any
+	// settings change does.
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := config.Save(path, loaded); err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after second Save: %v", err)
+	}
+	if string(second) != string(first) {
+		t.Errorf("load-then-save changed the file.\nbefore:\n%s\nafter:\n%s", first, second)
+	}
+}
