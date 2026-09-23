@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,10 +16,28 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
+	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
+
+// fakeJoySource is a joystick.Source with one device and nothing held. Used
+// by tests that need a real joystick.Manager without a real OS backend.
+type fakeJoySource struct{}
+
+func newFakeJoySource() *fakeJoySource { return &fakeJoySource{} }
+
+func (f *fakeJoySource) Devices() ([]joystick.Device, error) {
+	return []joystick.Device{{ID: "stick-c3", Name: "Fake Stick", Buttons: 16, Hats: 1}}, nil
+}
+
+func (f *fakeJoySource) Poll() (joystick.State, error) {
+	return joystick.State{Held: map[trigger.JoyButton]struct{}{}}, nil
+}
+
+func (f *fakeJoySource) Close() {}
 
 // recordingEmitter records every emitted event name and payload. Guarded by
 // a mutex because emits now also originate off the caller's goroutine (the
@@ -125,7 +144,7 @@ func newTestAppWithPath(t *testing.T, cfgPath string) (*App, *recordingEmitter, 
 	a := NewForTest(state.New(), nil, nil)
 	cfg := config.Default()
 	kb := keybinds.New()
-	kb.Load(map[string]string{})
+	kb.Load(map[string][]string{})
 	hk := hotkeys.New(reg, a)
 	a.SetSettingsBackend(cfg, cfgPath, kb, hk, em)
 	return a, em, reg
@@ -138,7 +157,7 @@ func newTestAppOn(t *testing.T, st *state.Store, reg hotkeys.Registrar) (*App, *
 	em := &recordingEmitter{}
 	a := NewForTest(st, nil, nil)
 	kb := keybinds.New()
-	kb.Load(map[string]string{})
+	kb.Load(map[string][]string{})
 	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(reg, a), em)
 	return a, em
 }
@@ -200,7 +219,7 @@ func TestGetKeybindsJoinsRegistryWithChords(t *testing.T) {
 
 func TestSetKeybindStoresAndEmits(t *testing.T) {
 	a, em, _ := newTestApp(t)
-	res, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"})
+	res, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
 	if err != nil {
 		t.Fatalf("SetKeybind: %v", err)
 	}
@@ -211,18 +230,18 @@ func TestSetKeybindStoresAndEmits(t *testing.T) {
 		t.Error("expected keybinds:changed event")
 	}
 	for _, k := range a.GetKeybinds() {
-		if k.ActionID == "global.ptt" && k.Chord != "F1" {
-			t.Errorf("chord = %q, want F1", k.Chord)
+		if k.ActionID == "global.ptt" && firstChord(k) != "F1" {
+			t.Errorf("chord = %q, want F1", firstChord(k))
 		}
 	}
 }
 
 func TestSetKeybindReportsSteal(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	if _, err := a.SetKeybind("global.mute_toggle", CaptureDTO{Code: "F1"}); err != nil {
+	if _, err := a.AddTrigger("global.mute_toggle", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"})
+	res, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,20 +258,20 @@ func TestSetKeybindReportsSteal(t *testing.T) {
 
 func TestSetKeybindRejectsBadCapture(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "ControlLeft", Ctrl: true}); err == nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "ControlLeft", Ctrl: true}); err == nil {
 		t.Error("a bare modifier must be rejected")
 	}
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "Nonsense"}); err == nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "Nonsense"}); err == nil {
 		t.Error("an unknown code must be rejected")
 	}
 }
 
 func TestBeginCaptureSuspendsAndEndCaptureRestores(t *testing.T) {
 	a, _, reg := newTestApp(t)
-	a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"})
+	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
 	before := reg.unregisters
 
-	token := a.BeginCapture()
+	token := a.BeginCapture("global.ptt")
 	if token == 0 {
 		t.Fatal("BeginCapture must return a non-zero capture token")
 	}
@@ -275,10 +294,10 @@ func TestBeginCaptureSuspendsAndEndCaptureRestores(t *testing.T) {
 // new capture and the OS would swallow the keypress meant to rebind it.
 func TestEndCaptureWithStaleTokenDoesNotResume(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"})
+	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
 
-	first := a.BeginCapture()  // chip A starts listening
-	second := a.BeginCapture() // user clicks chip B -- dispatched FIRST
+	first := a.BeginCapture("global.ptt")  // chip A starts listening
+	second := a.BeginCapture("global.ptt") // user clicks chip B -- dispatched FIRST
 	if second == first {
 		t.Fatalf("BeginCapture returned the same token twice: %d", second)
 	}
@@ -299,7 +318,7 @@ func TestEndCaptureWithStaleTokenDoesNotResume(t *testing.T) {
 func TestCaptureAutoResumesAfterTimeout(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	a.setCaptureTimeout(50 * time.Millisecond)
-	a.BeginCapture()
+	a.BeginCapture("global.ptt")
 	// Never call EndCapture — simulates the frontend dying mid-capture.
 	time.Sleep(150 * time.Millisecond)
 	if !a.hotkeysResumed() {
@@ -320,10 +339,10 @@ func TestSupersededCaptureTimeoutDoesNotResume(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	a.setCaptureTimeout(50 * time.Millisecond)
 
-	first := a.BeginCapture() // generation 1, times out in 50ms
+	first := a.BeginCapture("global.ptt") // generation 1, times out in 50ms
 
 	a.setCaptureTimeout(10 * time.Second) // generation 2 gets a long timeout
-	second := a.BeginCapture()
+	second := a.BeginCapture("global.ptt")
 
 	time.Sleep(150 * time.Millisecond) // long enough for generation 1's timer
 	if a.hotkeysResumed() {
@@ -344,13 +363,13 @@ func TestSupersededCaptureTimeoutDoesNotResume(t *testing.T) {
 
 func TestClearKeybind(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"})
+	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
 	if err := a.ClearKeybind("global.ptt"); err != nil {
 		t.Fatal(err)
 	}
 	for _, k := range a.GetKeybinds() {
-		if k.ActionID == "global.ptt" && k.Chord != "" {
-			t.Errorf("chord = %q, want empty after clear", k.Chord)
+		if k.ActionID == "global.ptt" && firstChord(k) != "" {
+			t.Errorf("chord = %q, want empty after clear", firstChord(k))
 		}
 	}
 }
@@ -375,12 +394,12 @@ func TestSetSettingsFailsWithoutMutatingOnPersistError(t *testing.T) {
 func TestSetKeybindFailsWithoutMutatingOnPersistError(t *testing.T) {
 	a, em, _ := newTestAppWithPath(t, unwritablePath(t))
 
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err == nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err == nil {
 		t.Fatal("expected SetKeybind to fail when the config path is unwritable")
 	}
 	for _, k := range a.GetKeybinds() {
-		if k.ActionID == "global.ptt" && k.Chord != "" {
-			t.Errorf("chord = %q, want empty after a failed SetKeybind", k.Chord)
+		if k.ActionID == "global.ptt" && firstChord(k) != "" {
+			t.Errorf("chord = %q, want empty after a failed SetKeybind", firstChord(k))
 		}
 	}
 	if contains(em.names(), events.EventKeybindsChanged) {
@@ -396,7 +415,7 @@ func TestSetKeybindStealFailsRestoresVictim(t *testing.T) {
 	a, em, _ := newTestAppWithPath(t, cfgPath)
 
 	// Seed a real binding while the path is still writable.
-	if _, err := a.SetKeybind("global.mute_toggle", CaptureDTO{Code: "F1"}); err != nil {
+	if _, err := a.AddTrigger("global.mute_toggle", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("seed SetKeybind: %v", err)
 	}
 
@@ -406,19 +425,19 @@ func TestSetKeybindStealFailsRestoresVictim(t *testing.T) {
 	}
 
 	// Attempt to steal F1 for global.ptt; the write must fail.
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err == nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err == nil {
 		t.Fatal("expected the steal to fail once the config directory is gone")
 	}
 
 	for _, k := range a.GetKeybinds() {
 		switch k.ActionID {
 		case "global.mute_toggle":
-			if k.Chord != "F1" {
-				t.Errorf("victim chord = %q, want F1 restored after the failed steal", k.Chord)
+			if firstChord(k) != "F1" {
+				t.Errorf("victim chord = %q, want F1 restored after the failed steal", firstChord(k))
 			}
 		case "global.ptt":
-			if k.Chord != "" {
-				t.Errorf("thief chord = %q, want empty after the failed steal", k.Chord)
+			if firstChord(k) != "" {
+				t.Errorf("thief chord = %q, want empty after the failed steal", firstChord(k))
 			}
 		}
 	}
@@ -434,7 +453,7 @@ func TestClearKeybindFailsWithoutMutatingOnPersistError(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.toml")
 	a, em, _ := newTestAppWithPath(t, cfgPath)
 
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("seed SetKeybind: %v", err)
 	}
 	seedEvents := len(em.names())
@@ -447,8 +466,8 @@ func TestClearKeybindFailsWithoutMutatingOnPersistError(t *testing.T) {
 		t.Fatal("expected ClearKeybind to fail once the config directory is gone")
 	}
 	for _, k := range a.GetKeybinds() {
-		if k.ActionID == "global.ptt" && k.Chord != "F1" {
-			t.Errorf("chord = %q, want F1 still present after a failed ClearKeybind", k.Chord)
+		if k.ActionID == "global.ptt" && firstChord(k) != "F1" {
+			t.Errorf("chord = %q, want F1 still present after a failed ClearKeybind", firstChord(k))
 		}
 	}
 	if len(em.names()) != seedEvents {
@@ -486,7 +505,7 @@ func TestConcurrentMutationsKeepCfgAndStoreConsistent(t *testing.T) {
 			id := actionIDs[i%len(actionIDs)]
 			switch i % 3 {
 			case 0:
-				_, _ = a.SetKeybind(id, CaptureDTO{Code: codes[i%len(codes)]})
+				_, _ = a.AddTrigger(id, CaptureDTO{Code: codes[i%len(codes)]})
 			case 1:
 				_ = a.ClearKeybind(id)
 			case 2:
@@ -508,8 +527,15 @@ func TestConcurrentMutationsKeepCfgAndStoreConsistent(t *testing.T) {
 		t.Fatalf("cfg.Keybinds has %d entries, kb.Snapshot() has %d: cfg=%v store=%v", len(gotCfg), len(want), gotCfg, want)
 	}
 	for id, c := range want {
-		if gotCfg[id] != c {
-			t.Errorf("cfg.Keybinds[%q] = %q, want %q (from the live store)", id, gotCfg[id], c)
+		gc, ok := gotCfg[id]
+		if !ok || len(gc) != len(c) {
+			t.Errorf("cfg.Keybinds[%q] = %v, want %v (from the live store)", id, gc, c)
+			continue
+		}
+		for i := range c {
+			if gc[i] != c[i] {
+				t.Errorf("cfg.Keybinds[%q][%d] = %q, want %q (from the live store)", id, i, gc[i], c[i])
+			}
 		}
 	}
 }
@@ -520,11 +546,11 @@ func TestGetHotkeyStateReportsPerActionFailures(t *testing.T) {
 	a := NewForTest(state.New(), nil, nil)
 	cfg := config.Default()
 	kb := keybinds.New()
-	kb.Load(map[string]string{})
+	kb.Load(map[string][]string{})
 	hk := hotkeys.New(reg, a)
 	a.SetSettingsBackend(cfg, "", kb, hk, em)
 
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("SetKeybind: %v", err)
 	}
 
@@ -561,6 +587,18 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
+// firstChord renders the canonical chord of k's single keyboard trigger, or
+// "" if k has no triggers. Existing tests were written against the old
+// KeybindDTO.Chord field (one action, one chord); this keeps them exercising
+// the same "is a keyboard chord bound" assertion against the new triggers
+// list without weakening what they check.
+func firstChord(k KeybindDTO) string {
+	if len(k.Triggers) == 0 {
+		return ""
+	}
+	return k.Triggers[0].Chord
+}
+
 // TestPartialRegistrationFailureKeepsHotkeysRegistered is the I4 guard.
 // Registered() drives the "Global hotkeys unavailable" banner, so it must
 // mean "nothing is registered at all", not "at least one binding failed".
@@ -571,13 +609,13 @@ func TestPartialRegistrationFailureKeepsHotkeysRegistered(t *testing.T) {
 	em := &recordingEmitter{}
 	a := NewForTest(state.New(), nil, nil)
 	kb := keybinds.New()
-	kb.Load(map[string]string{})
+	kb.Load(map[string][]string{})
 	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, a), em)
 
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("SetKeybind(global.ptt): %v", err)
 	}
-	if _, err := a.SetKeybind("global.mute_toggle", CaptureDTO{Code: "F2"}); err != nil {
+	if _, err := a.AddTrigger("global.mute_toggle", CaptureDTO{Code: "F2"}); err != nil {
 		t.Fatalf("SetKeybind(global.mute_toggle): %v", err)
 	}
 
@@ -604,10 +642,10 @@ func TestApplyHotkeysEmitsHotkeyState(t *testing.T) {
 	em := &recordingEmitter{}
 	a := NewForTest(state.New(), nil, nil)
 	kb := keybinds.New()
-	kb.Load(map[string]string{})
+	kb.Load(map[string][]string{})
 	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, a), em)
 
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("SetKeybind: %v", err)
 	}
 
@@ -626,7 +664,7 @@ func TestSetSettingsBackendEmitsInitialHotkeyState(t *testing.T) {
 	// SetSettingsBackend seeds the store from cfg.Keybinds (falling back to
 	// the shipped defaults when empty), so the binding has to go through cfg.
 	cfg := config.Default()
-	cfg.Keybinds = map[string]string{"global.ptt": "F1"}
+	cfg.Keybinds = map[string]config.KeybindValue{"global.ptt": {"F1"}}
 	a.SetSettingsBackend(cfg, "", keybinds.New(), hotkeys.New(deadRegistrar{}, a), em)
 
 	got := em.lastHotkeyState(t)
@@ -647,11 +685,11 @@ func TestResumeAfterCaptureEmitsHotkeyState(t *testing.T) {
 	em := &recordingEmitter{}
 	a := NewForTest(state.New(), nil, nil)
 	kb := keybinds.New()
-	kb.Load(map[string]string{})
+	kb.Load(map[string][]string{})
 	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, a), em)
 
-	token := a.BeginCapture()
-	if _, err := a.SetKeybind("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+	token := a.BeginCapture("global.ptt")
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("SetKeybind: %v", err)
 	}
 	a.EndCapture(token)
@@ -838,5 +876,106 @@ func TestForceReleasedWithoutBackendDoesNotPanic(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("no backend wired, so nothing should be logged; got %q", buf.String())
+	}
+}
+
+func TestGetKeybindsReturnsAllTriggers(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
+		t.Fatalf("AddTrigger: %v", err)
+	}
+	rows := a.GetKeybinds()
+	var got *KeybindDTO
+	for i := range rows {
+		if rows[i].ActionID == "global.ptt" {
+			got = &rows[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("global.ptt missing from GetKeybinds")
+	}
+	if len(got.Triggers) != 1 {
+		t.Fatalf("Triggers = %+v, want one", got.Triggers)
+	}
+	if got.Triggers[0].Kind != "key" || got.Triggers[0].Chord != "F1" {
+		t.Errorf("trigger = %+v, want key/F1", got.Triggers[0])
+	}
+}
+
+func TestRemoveTriggerDropsOnlyThatOne(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
+	a.settings.kb.Add("global.ptt", trigger.Joy(trigger.JoyBinding{Device: "stick-c3", Button: 11}))
+
+	if err := a.RemoveTrigger("global.ptt", 0); err != nil {
+		t.Fatalf("RemoveTrigger: %v", err)
+	}
+	list, _ := a.settings.kb.Get("global.ptt")
+	if len(list) != 1 || list[0].Kind != trigger.KindJoy {
+		t.Errorf("after RemoveTrigger = %+v, want the joystick trigger only", list)
+	}
+}
+
+func TestRemoveTriggerOutOfRangeErrors(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"})
+	if err := a.RemoveTrigger("global.ptt", 5); err == nil {
+		t.Error("RemoveTrigger(5) = nil error, want out-of-range failure")
+	}
+}
+
+func TestHoldActionHeldByTwoSourcesEmitsOneEdgePair(t *testing.T) {
+	// The PTT-cut defect, end to end through App.Pressed/Released.
+	a, em, _ := newTestApp(t)
+	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}) // global.ptt is KindHold
+
+	a.Pressed("global.ptt")  // keyboard
+	a.Pressed("global.ptt")  // joystick
+	a.Released("global.ptt") // keyboard lets go; joystick still held
+
+	if n := em.count(events.EventHotkeyPressed); n != 1 {
+		t.Errorf("HotkeyPressed emitted %d times, want 1", n)
+	}
+	if n := em.count(events.EventHotkeyReleased); n != 0 {
+		t.Errorf("HotkeyReleased emitted while the joystick still held it (%d times)", n)
+	}
+
+	a.Released("global.ptt") // joystick lets go
+	if n := em.count(events.EventHotkeyReleased); n != 1 {
+		t.Errorf("HotkeyReleased emitted %d times, want 1", n)
+	}
+}
+
+func TestPressKindActionIsNotRefcounted(t *testing.T) {
+	// global.mute_toggle is KindPress and never receives a Released, so
+	// refcounting it would silence every press after the first.
+	a, em, _ := newTestApp(t)
+	a.Pressed("global.mute_toggle")
+	a.Pressed("global.mute_toggle")
+	if n := em.count(events.EventHotkeyPressed); n != 2 {
+		t.Errorf("press-kind action emitted %d times, want 2", n)
+	}
+}
+
+func TestBeginCaptureSuspendsBothManagers(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	joySrc := newFakeJoySource()
+	jm := joystick.New(joySrc, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.SetJoystickBackend(jm)
+
+	token := a.BeginCapture("global.ptt")
+	if token == 0 {
+		t.Fatal("BeginCapture returned no token")
+	}
+	if !a.settings.hk.Suspended() {
+		t.Error("keyboard manager not suspended during capture")
+	}
+	if !jm.IsSuspendedForTest() {
+		t.Error("joystick manager not suspended during capture")
+	}
+
+	a.EndCapture(token)
+	if jm.IsSuspendedForTest() {
+		t.Error("joystick manager still suspended after EndCapture")
 	}
 }

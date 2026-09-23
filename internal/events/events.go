@@ -28,6 +28,9 @@ const (
 	EventHotkeyPressed     = "hotkey:pressed"
 	EventHotkeyReleased    = "hotkey:released"
 	EventHotkeysState      = "hotkeys:state"
+	// EventJoystickCaptured is emitted when a joystick capture completed and bound
+	// itself.
+	EventJoystickCaptured = "keybinds:joy_captured"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -153,6 +156,16 @@ func (t *Tagged) HotkeyPressed(actionID string) {
 // HotkeyReleased emits EventHotkeyReleased (Hold actions only).
 func (t *Tagged) HotkeyReleased(actionID string) {
 	t.em.Emit(EventHotkeyReleased, struct {
+		ActionID string `json:"action_id"`
+	}{ActionID: actionID})
+}
+
+// JoystickCaptured tells the UI that a joystick capture completed and bound
+// itself, so the listening chip can close. The binding itself arrives via
+// EventKeybindsChanged -- this carries only the action id, because the UI
+// needs to know WHICH row to close and nothing more.
+func (t *Tagged) JoystickCaptured(actionID string) {
+	t.em.Emit(EventJoystickCaptured, struct {
 		ActionID string `json:"action_id"`
 	}{ActionID: actionID})
 }

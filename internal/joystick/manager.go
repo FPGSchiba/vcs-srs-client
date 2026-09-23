@@ -199,6 +199,16 @@ func (m *Manager) Resume() {
 	m.mu.Unlock()
 }
 
+// IsSuspendedForTest reports whether the manager is currently suspended. A
+// read-only accessor for tests -- it changes no behaviour. Named distinctly
+// from hotkeys.Manager.Suspended so the two are never confused across the two
+// sibling packages in a test that wires both.
+func (m *Manager) IsSuspendedForTest() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.suspended
+}
+
 // Start begins the poll loop. Safe to call once; later calls are no-ops.
 func (m *Manager) Start() {
 	m.mu.Lock()
