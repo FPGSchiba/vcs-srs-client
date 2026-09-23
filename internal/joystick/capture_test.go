@@ -21,6 +21,12 @@ func TestCaptureBareButton(t *testing.T) {
 	var got *Captured
 	m.BeginCapture(func(c Captured) { got = &c })
 
+	// The baseline is established by the first poll after arming, not at the
+	// BeginCapture call itself (BeginCapture never touches Source -- see its
+	// doc comment). Production always has this tick: the loop is already
+	// running and polls every PollInterval, long before a human can react.
+	m.tick()
+
 	src.hold(tbtn(11))
 	m.tick()
 	if got != nil {
@@ -44,6 +50,10 @@ func TestCaptureInfersModifierFromHoldOrder(t *testing.T) {
 	m, src, _ := captureManager(t)
 	var got *Captured
 	m.BeginCapture(func(c Captured) { got = &c })
+
+	// Baseline established by the first poll after arming; see the comment
+	// in TestCaptureBareButton.
+	m.tick()
 
 	src.hold(tbtn(5)) // held FIRST -> modifier
 	m.tick()
@@ -89,6 +99,10 @@ func TestSameTickTieBreakIsDeterministic(t *testing.T) {
 	var got *Captured
 	m.BeginCapture(func(c Captured) { got = &c })
 
+	// Baseline established by the first poll after arming; see the comment
+	// in TestCaptureBareButton.
+	m.tick()
+
 	src.hold(tbtn(7))
 	src.hold(tbtn(2))
 	m.tick()
@@ -114,6 +128,10 @@ func TestCaptureSuppressesHandlerDispatch(t *testing.T) {
 	m.Apply(map[string][]Binding{"global.ptt": {holdBind(3)}})
 	m.BeginCapture(func(Captured) {})
 
+	// Baseline established by the first poll after arming; see the comment
+	// in TestCaptureBareButton.
+	m.tick()
+
 	src.hold(tbtn(3))
 	m.tick()
 	src.release(tbtn(3))
@@ -128,6 +146,13 @@ func TestCancelCaptureStopsCapturing(t *testing.T) {
 	m, src, _ := captureManager(t)
 	called := false
 	m.BeginCapture(func(Captured) { called = true })
+
+	// Baseline established by the first poll after arming; see the comment
+	// in TestCaptureBareButton. Not load-bearing here (CancelCapture below
+	// disarms before any button is ever pressed), kept only so every capture
+	// test models the same arm -> poll -> press sequence production has.
+	m.tick()
+
 	m.CancelCapture()
 
 	src.hold(tbtn(3))
@@ -144,6 +169,10 @@ func TestCaptureHatDirection(t *testing.T) {
 	m, src, _ := captureManager(t)
 	var got *Captured
 	m.BeginCapture(func(c Captured) { got = &c })
+
+	// Baseline established by the first poll after arming; see the comment
+	// in TestCaptureBareButton.
+	m.tick()
 
 	hat := trigger.JoyButton{Device: tdev, Button: trigger.HatButton(0, 2)}
 	src.hold(hat)

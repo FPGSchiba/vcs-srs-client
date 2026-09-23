@@ -19,10 +19,11 @@ type Captured struct {
 type captureState struct {
 	// baseline is everything held when capture began. Ignored throughout.
 	//
-	// nil is a sentinel, distinct from an empty-but-initialised map: it means
-	// BeginCapture could not poll a baseline itself (the poll loop owned
-	// Source exclusively) and feedCapture's first call must populate it from
-	// that tick's own sample instead. See BeginCapture and feedCapture.
+	// It ALWAYS starts nil: BeginCapture never calls Source itself (see its
+	// doc comment), so it can never populate this directly. nil is a
+	// sentinel, distinct from an empty-but-initialised map: it means
+	// feedCapture's first call for this capture must populate it from that
+	// tick's own sample instead. See BeginCapture and feedCapture.
 	baseline map[trigger.JoyButton]struct{}
 	// order is the newly-pressed inputs in the order they first appeared.
 	order []trigger.JoyButton
@@ -46,39 +47,26 @@ type captureState struct {
 // capture window, and its Released could be lost outright if the physical
 // button comes up while still armed.
 func (m *Manager) BeginCapture(done func(Captured)) {
-	m.mu.Lock()
-	started := m.started
-	m.mu.Unlock()
-
-	// Source may only ever be called from the poll loop's own goroutine once
-	// that loop exists -- see the Source doc comment: the real backends
+	// BeginCapture never touches Source, unconditionally -- not even before
+	// Start() has been called. Source may ONLY ever be called from the poll
+	// loop's own goroutine: see the Source doc comment. The real backends
 	// Tasks 8/9 add (vendored DirectInput COM objects, evdev file handles)
-	// are not merely "not safe for concurrent calls", some are apartment-
-	// threaded and require the SAME goroutine/thread every time. So while
-	// the loop is running, BeginCapture must not poll itself: it arms with a
-	// nil (pending) baseline instead, and the first feedCapture call --
-	// which runs on the poll goroutine, inside tick() -- fills it in from
-	// that tick's own sample. That makes "already held" mean "held as of
-	// the poll immediately after BeginCapture" rather than "held at the
-	// exact BeginCapture call", i.e. correct to within one poll interval,
-	// which is the same bound every other observation in this package is
-	// already subject to.
+	// are not merely "not safe for concurrent calls" -- some require the
+	// SAME goroutine/thread on every call (COM apartment threading), which
+	// no amount of mutual exclusion from a second goroutine can satisfy.
 	//
-	// Before Start() there IS no poll goroutine yet, so polling here directly
-	// cannot race anything -- and every test in this package that arms a
-	// capture and drives tick() manually relies on exactly that: it is what
-	// makes "a button already held at BeginCapture time" precisely knowable
-	// with no interval fuzz.
-	baseline := map[trigger.JoyButton]struct{}{}
-	if !started {
-		if state, err := m.src.Poll(); err == nil {
-			for b := range state.Held {
-				baseline[b] = struct{}{}
-			}
-		}
-	} else {
-		baseline = nil // pending; see feedCapture.
-	}
+	// So capture arms with a PENDING baseline (nil), and the first
+	// feedCapture call for it -- which only ever runs on the poll goroutine,
+	// inside tick() -- fills it in from that tick's own sample. In
+	// production the loop is already running by the time any UI can call
+	// BeginCapture (Task 11 calls Start() at wiring time), and it polls
+	// every PollInterval (10ms by default): the baseline is established
+	// within one tick of arming, long before a human can react by pressing
+	// anything. "Already held" therefore means "held as of the poll
+	// immediately after BeginCapture", not "held at the exact BeginCapture
+	// call" -- a bound every other observation in this package already
+	// lives with, and the only one obtainable without ever letting a second
+	// goroutine touch Source.
 
 	// notifyMu, then mu: the same order Suspend/Apply/Close use. Safe here
 	// because BeginCapture is called from the app goroutine, never from
@@ -89,9 +77,9 @@ func (m *Manager) BeginCapture(done func(Captured)) {
 
 	m.mu.Lock()
 	m.capture = &captureState{
-		baseline: baseline,
-		seen:     map[trigger.JoyButton]struct{}{},
-		done:     done,
+		// baseline starts nil (pending): see the field doc and feedCapture.
+		seen: map[trigger.JoyButton]struct{}{},
+		done: done,
 	}
 	release := m.takeActiveLocked()
 	m.mu.Unlock()
@@ -132,12 +120,11 @@ func (m *Manager) feedCapture(s State) (func(Captured), Captured, bool) {
 	}
 
 	if c.baseline == nil {
-		// BeginCapture armed this while the poll loop owned Source
-		// exclusively and could not poll a baseline itself (see
-		// BeginCapture). This tick's own sample becomes the baseline
-		// instead, and nothing can be captured on the same sample that
-		// establishes the baseline -- otherwise a button already held would
-		// look identical to one pressed in this very instant.
+		// BeginCapture never polls Source itself (see its doc comment), so
+		// every capture starts pending. This tick's own sample becomes the
+		// baseline instead, and nothing can be captured on the same sample
+		// that establishes the baseline -- otherwise a button already held
+		// would look identical to one pressed in this very instant.
 		baseline := make(map[trigger.JoyButton]struct{}, len(s.Held))
 		for b := range s.Held {
 			baseline[b] = struct{}{}
