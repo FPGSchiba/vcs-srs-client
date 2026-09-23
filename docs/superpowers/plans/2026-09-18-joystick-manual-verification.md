@@ -134,6 +134,25 @@ have to be run, and neither is optional because "the slow one passed".
 - [ ] Press Escape mid-capture. Confirm keyboard hotkeys still work
       afterwards.
 
+### Capture expiry
+
+The capture auto-resume timer used to be an invisible safety net for a
+crashed frontend. It is now a **user-visible** event, and both of the last
+changes here live on this path — so it needs its own rows. Before the fix,
+the timer tore the capture down silently, the row kept saying "Press a key or
+joystick button", and the next press **transmitted on air** instead of
+binding.
+
+- [ ] Click `+` on a row and then do nothing at all for the full capture
+      timeout (see `defaultCaptureTimeout`). Confirm the row STOPS rendering
+      "Press a key or joystick button…" of its own accord.
+- [ ] Immediately afterwards, press a button that is already bound to another
+      action. Confirm it **fires that existing binding** — i.e. it behaves
+      like a normal press — and does NOT appear to bind to the row you had
+      open. A live transmission here is correct; a silent nothing is the bug.
+- [ ] Confirm global keyboard hotkeys are re-armed at that point (they are
+      suspended for the whole capture and must come back when it expires).
+
 ## 10. Threading and the helper window (Windows)
 
 `internal/joystick` calls DirectInput from more than one goroutine over the
