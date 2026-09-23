@@ -1,6 +1,9 @@
 package audio
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // FakeBackend is an in-memory Backend for tests. It is compiled into the
 // package (not a _test.go file) so other packages' tests can build a manager
@@ -58,6 +61,9 @@ func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, e
 	if err := b.takeFailure(); err != nil {
 		return nil, err
 	}
+	if err := checkDeviceID(id, b.inputs); err != nil {
+		return nil, err
+	}
 	b.onFrame = onFrame
 	return &fakeStream{b: b, capture: true}, nil
 }
@@ -66,6 +72,9 @@ func (b *FakeBackend) OpenPlayback(id string, fill func([]float32)) (Stream, err
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.takeFailure(); err != nil {
+		return nil, err
+	}
+	if err := checkDeviceID(id, b.outputs); err != nil {
 		return nil, err
 	}
 	b.fill = fill
@@ -80,6 +89,27 @@ func (b *FakeBackend) takeFailure() error {
 		return err
 	}
 	return nil
+}
+
+// checkDeviceID mirrors malgoBackend.setDeviceID's contract so the fake
+// cannot be more forgiving than reality: an empty id always means "follow
+// the system default" and succeeds unconditionally (backend.go's
+// DeviceInfo.ID doc), while a non-empty id must match something currently
+// enumerable or the open fails, exactly as it would against real hardware
+// when the persisted device has been unplugged. Without this check, a
+// manager's "saved device is gone -> fall back to default" path could never
+// be exercised against the fake and would only fail the first time it met
+// real hardware.
+func checkDeviceID(id string, list []DeviceInfo) error {
+	if id == "" {
+		return nil
+	}
+	for _, d := range list {
+		if d.ID == id {
+			return nil
+		}
+	}
+	return fmt.Errorf("audio: device %q not found", id)
 }
 
 func (b *FakeBackend) Close() {

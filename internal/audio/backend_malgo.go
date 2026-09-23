@@ -4,6 +4,7 @@ package audio
 
 import (
 	"fmt"
+	"sync"
 	"unsafe"
 
 	"github.com/gen2brain/malgo"
@@ -108,22 +109,37 @@ func (b *malgoBackend) setDeviceID(cfg *malgo.DeviceConfig, kind malgo.DeviceTyp
 	return fmt.Errorf("audio: device %q not found", id)
 }
 
+// maxDeviceFrames bounds the pre-allocated byte<->float32 conversion
+// scratch buffer. PeriodSizeInFrames (FrameSamples, 480) is only a hint to
+// miniaudio, so a callback's actual frame count can differ -- but backends
+// don't hand out chunks anywhere near this large in practice. Sizing the
+// scratch buffer generously here means the accumulate/fill adaptation below
+// (frameAccumulator/frameFiller) never has to grow anything at callback
+// time; a chunk that somehow exceeded this bound would be clamped rather
+// than crash, which is an intentionally defensive edge far outside any
+// observed hardware behavior, not the mismatch this fix targets.
+const maxDeviceFrames = 65536
+
 func (b *malgoBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, error) {
 	cfg := b.deviceConfig(malgo.Capture)
 	if err := b.setDeviceID(&cfg, malgo.Capture, id); err != nil {
 		return nil, err
 	}
-	// Scratch buffer owned by the callback goroutine; allocated ONCE here so
-	// the realtime path never allocates.
-	scratch := make([]float32, FrameSamples)
+	// Scratch buffers owned by the callback goroutine; allocated ONCE here
+	// so the realtime path never allocates. acc re-slices whatever length
+	// miniaudio actually delivers into exact FrameSamples-sized frames --
+	// see frame_buffer.go -- so onFrame's "exactly FrameSamples" contract
+	// holds regardless of what the period-size hint actually yields.
+	scratch := make([]float32, maxDeviceFrames)
+	acc := newFrameAccumulator(FrameSamples, onFrame)
 	dev, err := malgo.InitDevice(b.ctx.Context, cfg, malgo.DeviceCallbacks{
 		Data: func(_, in []byte, frames uint32) {
 			n := int(frames)
-			if n > FrameSamples {
-				n = FrameSamples
+			if n > len(scratch) {
+				n = len(scratch)
 			}
 			bytesToFloat32(in, scratch[:n])
-			onFrame(scratch[:n])
+			acc.push(scratch[:n])
 		},
 	})
 	if err != nil {
@@ -141,14 +157,19 @@ func (b *malgoBackend) OpenPlayback(id string, fill func([]float32)) (Stream, er
 	if err := b.setDeviceID(&cfg, malgo.Playback, id); err != nil {
 		return nil, err
 	}
-	scratch := make([]float32, FrameSamples)
+	// Same discipline as OpenCapture: filler serves the hardware's
+	// requested length out of fixed FrameSamples-sized frames it pulls
+	// from fill on demand, so the entire out buffer is always written in
+	// full even when frames != FrameSamples.
+	scratch := make([]float32, maxDeviceFrames)
+	filler := newFrameFiller(FrameSamples, fill)
 	dev, err := malgo.InitDevice(b.ctx.Context, cfg, malgo.DeviceCallbacks{
 		Data: func(out, _ []byte, frames uint32) {
 			n := int(frames)
-			if n > FrameSamples {
-				n = FrameSamples
+			if n > len(scratch) {
+				n = len(scratch)
 			}
-			fill(scratch[:n])
+			filler.pull(scratch[:n])
 			float32ToBytes(scratch[:n], out)
 		},
 	})
@@ -170,15 +191,27 @@ func (b *malgoBackend) Close() {
 	}
 }
 
-type malgoStream struct{ dev *malgo.Device }
+type malgoStream struct {
+	dev *malgo.Device
+
+	// stopOnce guards teardown. backend.go's Stream.Stop contract says
+	// "idempotent", and idempotent must mean safe under CONCURRENT
+	// invocation here, not merely safe to call twice in sequence: a plain
+	// "if s.dev == nil { return }" nil-check has a window where two
+	// goroutines both read a non-nil s.dev before either clears it, so
+	// both reach dev.Uninit() -> ma_device_uninit + ma_free on the same C
+	// pointer -- a double-free that crashes the process, not a Go panic.
+	// sync.Once makes exactly one caller run the teardown body; every
+	// other concurrent (or later) caller blocks until it finishes and
+	// then returns without touching dev again.
+	stopOnce sync.Once
+}
 
 func (s *malgoStream) Stop() error {
-	if s.dev == nil {
-		return nil
-	}
-	_ = s.dev.Stop()
-	s.dev.Uninit()
-	s.dev = nil
+	s.stopOnce.Do(func() {
+		_ = s.dev.Stop()
+		s.dev.Uninit()
+	})
 	return nil
 }
 
