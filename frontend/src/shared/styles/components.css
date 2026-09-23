@@ -1217,6 +1217,14 @@ input:focus, select:focus, textarea:focus {
   padding: 0 2px;
 }
 .trigger-remove:hover { color: var(--ac-alert); }
+.trigger-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.kbd.add-binding { color: var(--tx-3); }
 
 /* ========== Tooltip-like helpers ========== */
 .sep-v {

@@ -45,6 +45,17 @@ export function useSettingsSync(): void {
         // so the console line is the only trace of why.
         console.error("getHotkeyState failed; hotkey health is unknown", err);
       });
+    api
+      .getJoystickState()
+      .then((j) => useSettings.getState().setJoystickState(j))
+      .catch((err) => {
+        // Logged for the same reason as getHotkeyState above: the store's
+        // honest `supported: false` default hides the capture affordance's
+        // joystick half, so a rejection here silently leaves it hidden even
+        // on a machine that does support it, with nothing but this line to
+        // explain why.
+        console.error("getJoystickState failed; joystick support is unknown", err);
+      });
 
     const offs = [
       on<Settings>(EV.settingsChanged, (s) => useSettings.getState().setSettings(s)),

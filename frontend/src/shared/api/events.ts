@@ -16,6 +16,7 @@ export const EV = {
   hotkeyPressed: "hotkey:pressed",
   hotkeyReleased: "hotkey:released",
   hotkeysState: "hotkeys:state",
+  joystickCaptured: "keybinds:joy_captured",
 } as const;
 
 // on subscribes to a Wails event and returns an unsubscribe function.
