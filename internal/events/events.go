@@ -160,14 +160,34 @@ func (t *Tagged) HotkeyReleased(actionID string) {
 	}{ActionID: actionID})
 }
 
+// JoystickCapturedPayload is the EventJoystickCaptured payload.
+type JoystickCapturedPayload struct {
+	ActionID string `json:"action_id"`
+	// Stolen names the action that lost this trigger to the new binding, and
+	// is nil when there was no conflict.
+	//
+	// It has to travel on the event because a joystick capture completes in
+	// the BACKEND and returns no result to any caller -- unlike the keyboard
+	// path, where AddTrigger hands its StolenDTO straight back. Without it
+	// the steal was logged and dropped: the losing row's chip just vanished
+	// on the next keybinds:changed with no warning at all, while the
+	// identical action performed with a key showed one.
+	//
+	// Typed as any for the same reason KeybindsChanged's payload is: the
+	// concrete shape is app.StolenDTO, and internal/app already imports this
+	// package, so naming it here would be an import cycle.
+	Stolen any `json:"stolen"`
+}
+
 // JoystickCaptured tells the UI that a joystick capture completed and bound
-// itself, so the listening chip can close. The binding itself arrives via
-// EventKeybindsChanged -- this carries only the action id, because the UI
-// needs to know WHICH row to close and nothing more.
-func (t *Tagged) JoystickCaptured(actionID string) {
-	t.em.Emit(EventJoystickCaptured, struct {
-		ActionID string `json:"action_id"`
-	}{ActionID: actionID})
+// itself, so the listening chip can close and any steal can be reported. The
+// binding itself arrives via EventKeybindsChanged; this carries the action id
+// and the steal, which is everything the UI cannot derive from that list.
+func (t *Tagged) JoystickCaptured(actionID string, stolen any) {
+	t.em.Emit(EventJoystickCaptured, JoystickCapturedPayload{
+		ActionID: actionID,
+		Stolen:   stolen,
+	})
 }
 
 // HotkeysState emits EventHotkeysState so a failed registration is visible in

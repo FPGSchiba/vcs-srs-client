@@ -1576,3 +1576,75 @@ func TestApplyHotkeysTreatsANewHoldActionAsHoldInsideTheApplyWindow(t *testing.T
 		}
 	}
 }
+
+// lastJoystickCaptured returns the payload of the most recent
+// keybinds:joy_captured event, and reports whether there was one.
+func (r *recordingEmitter) lastJoystickCaptured() (events.JoystickCapturedPayload, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.events) - 1; i >= 0; i-- {
+		if r.events[i] != events.EventJoystickCaptured {
+			continue
+		}
+		p, ok := r.payloads[i].(events.JoystickCapturedPayload)
+		return p, ok
+	}
+	return events.JoystickCapturedPayload{}, false
+}
+
+// TestJoystickCaptureReportsTheSteal is the I1 guard.
+//
+// onJoystickCaptured logged the *keybinds.Stolen and discarded it, and the
+// event carried only action_id -- so binding a button that another action
+// already owned made that action's chip vanish on the next keybinds:changed
+// with no warning at all. The same steal performed with a key showed
+// "taken from ...", because AddTrigger hands its StolenDTO back to the
+// caller. Spec section 10 requires steal reporting for BOTH kinds.
+func TestJoystickCaptureReportsTheSteal(t *testing.T) {
+	a, em, _ := newTestApp(t)
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	btn := trigger.JoyButton{Device: "stick-c3", Button: 4}
+	a.settings.kb.Add(keybinds.ActionID("global.mute_toggle"),
+		trigger.Joy(trigger.JoyBinding{Device: btn.Device, Button: btn.Button}))
+	a.applyHotkeys()
+
+	if token := a.BeginCapture("global.ptt"); token == 0 {
+		t.Fatal("BeginCapture returned no token")
+	}
+	base := src.pollCount()
+	waitFor(t, 2*time.Second, "capture baseline never sampled",
+		func() bool { return src.pollCount() > base+1 })
+
+	src.setHeld(btn, true)
+	held := src.pollCount()
+	waitFor(t, 2*time.Second, "held button never sampled",
+		func() bool { return src.pollCount() > held+1 })
+	src.setHeld(btn, false)
+
+	waitFor(t, 2*time.Second, "keybinds:joy_captured was never emitted", func() bool {
+		_, ok := em.lastJoystickCaptured()
+		return ok
+	})
+
+	p, _ := em.lastJoystickCaptured()
+	if p.ActionID != "global.ptt" {
+		t.Fatalf("joy_captured action_id = %q, want global.ptt", p.ActionID)
+	}
+	stolen, ok := p.Stolen.(*StolenDTO)
+	if !ok || stolen == nil {
+		t.Fatalf("joy_captured carried no steal (%#v); the losing row gets no warning at all, "+
+			"while the same steal by keyboard shows one", p.Stolen)
+	}
+	if stolen.ActionID != "global.mute_toggle" {
+		t.Errorf("stolen from %q, want global.mute_toggle", stolen.ActionID)
+	}
+	if stolen.Trigger.Label == "" {
+		t.Error("stolen trigger has no label; the banner renders it verbatim")
+	}
+}

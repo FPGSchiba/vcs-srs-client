@@ -7,7 +7,7 @@ import { TriggerChip } from "../../../../../shared/components/TriggerChip";
 import { api } from "../../../../../shared/api/client";
 import { on, EV } from "../../../../../shared/api/events";
 import { useSettings } from "../../../../../shared/store/settings";
-import type { Keybind } from "../../../../../shared/store/settings";
+import type { Keybind, Stolen } from "../../../../../shared/store/settings";
 
 interface StolenInfo {
   actionId: string;
@@ -236,14 +236,27 @@ export function Keybinds() {
   };
 
   // Closes the listening chip when a joystick capture completes and binds
-  // itself server-side (see the doc-comment's property 5). Guarded on the
-  // action id still matching so a late/stale event for a row the user has
-  // already moved away from cannot reopen or re-end a capture that finished
-  // through some other path.
+  // itself server-side (see the doc-comment's property 5), and reports any
+  // steal it caused. Guarded on the action id still matching so a late/stale
+  // event for a row the user has already moved away from cannot reopen or
+  // re-end a capture that finished through some other path.
+  //
+  // The steal has to arrive HERE rather than from a call's return value: a
+  // joystick capture completes in the backend and returns to no caller, so
+  // without the event the losing row's chip would simply vanish on the next
+  // `keybinds:changed` with no warning -- while the identical steal performed
+  // with a key shows one. Same banner, same shape, either input.
   useEffect(() => {
-    return on<{ action_id: string }>(EV.joystickCaptured, ({ action_id }) => {
-      if (capturingId === action_id) closeCapture(action_id);
-    });
+    return on<{ action_id: string; stolen?: Stolen | null }>(
+      EV.joystickCaptured,
+      ({ action_id, stolen: taken }) => {
+        if (capturingId !== action_id) return;
+        setStolen(
+          taken ? { actionId: action_id, triggerLabel: taken.trigger.label, label: taken.label } : null,
+        );
+        closeCapture(action_id);
+      },
+    );
   }, [capturingId]);
 
   // Unsupported (macOS) is not denied -- there is nothing the user can grant

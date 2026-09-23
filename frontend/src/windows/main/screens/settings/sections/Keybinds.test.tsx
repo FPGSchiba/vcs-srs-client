@@ -615,6 +615,49 @@ describe("Keybinds section", () => {
     expect(endCapture).toHaveBeenCalledWith(1);
   });
 
+  it("reports a steal that a joystick capture caused, on the row that captured", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    // The backend bound BTN 5 to global.ptt and took it off radio.1.ptt. It
+    // returns to no caller, so the steal can only arrive on this event -- and
+    // without it the losing row's chip would just vanish on the next
+    // keybinds:changed with no warning, while the same steal by keyboard
+    // shows one.
+    emit(EV.joystickCaptured, {
+      action_id: "global.ptt",
+      stolen: {
+        action_id: "radio.1.ptt",
+        label: "R01 · GUARD (PTT)",
+        trigger: {
+          kind: "joy", chord: "", device: "stick-c3", device_name: "Test Stick",
+          label: "BTN 5", connected: true,
+        },
+      },
+    });
+
+    const capturingRow = screen.getByText("Global PTT").closest("[data-row]") as HTMLElement;
+    await waitFor(() =>
+      expect(
+        within(capturingRow).getByText(/BTN 5 taken from R01 · GUARD \(PTT\)/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("shows no steal banner when a joystick capture took nothing", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    emit(EV.joystickCaptured, { action_id: "global.ptt", stolen: null });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add binding/i })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/taken from/i)).not.toBeInTheDocument();
+  });
+
   it("ignores a joystick capture event for a row that is not currently capturing", async () => {
     renderWithKeybinds([pttRow([])]);
     fireEvent.click(screen.getByRole("button", { name: /add binding/i }));

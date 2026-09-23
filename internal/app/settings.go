@@ -476,8 +476,23 @@ func (a *App) onJoystickCaptured(token int64, c joystick.Captured) {
 		return
 	}
 	a.applyHotkeys()
+
+	// The steal rides the event. A joystick capture completes here rather
+	// than returning to the caller, so this is the ONLY channel it has --
+	// logging it and dropping it left the losing row's chip vanishing on the
+	// next keybinds:changed with no warning, while the same steal performed
+	// with a key showed "taken from ..." (spec section 10 requires it for
+	// both kinds).
+	var stolenDTO *StolenDTO
+	if stolen != nil {
+		stolenDTO = &StolenDTO{
+			ActionID: string(stolen.ActionID),
+			Label:    a.labelFor(stolen.ActionID),
+			Trigger:  a.triggerDTO(stolen.Trigger, a.connectedDevices()),
+		}
+	}
 	sb.em.KeybindsChanged(a.GetKeybinds())
-	sb.em.JoystickCaptured(actionID)
+	sb.em.JoystickCaptured(actionID, stolenDTO)
 	sb.writeMu.Unlock()
 
 	if stolen != nil {

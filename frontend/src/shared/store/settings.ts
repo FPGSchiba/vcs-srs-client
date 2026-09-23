@@ -75,8 +75,19 @@ export interface HotkeyPermissionResult {
 
 export type { Capture };
 
+/** The action that lost a trigger to a new binding, mirroring Go's
+ * `app.StolenDTO`. It reaches the UI two ways: as `SetKeybindResult.stolen`
+ * for a keyboard capture (which round-trips through `addTrigger`), and on the
+ * `keybinds:joy_captured` event for a joystick capture (which completes in the
+ * backend and returns to no caller). Both feed the same banner. */
+export interface Stolen {
+  action_id: string;
+  label: string;
+  trigger: Trigger;
+}
+
 export interface SetKeybindResult {
-  stolen: { action_id: string; label: string; trigger: Trigger } | null;
+  stolen: Stolen | null;
 }
 
 interface SettingsState {
