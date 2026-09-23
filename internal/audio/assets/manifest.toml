@@ -1,0 +1,32 @@
+# Effect slots, matching the design prototype's Radio Effects panel.
+# `file` is the DEFAULT sample name; a user's config.toml may override it.
+# A slot whose file is absent from this directory plays silence and logs
+# once -- never a crash, never a dialog.
+
+[tx_start]
+label = "TX Start"
+file = "transmit_open.wav"
+
+[tx_end]
+label = "TX End"
+file = "transmit_close.wav"
+
+[rx_start]
+label = "RX Start"
+file = "receive_open.wav"
+
+[rx_end]
+label = "RX End"
+file = "receive_close.wav"
+
+[intercom_start]
+label = "Intercom Start"
+file = "intercom_open.wav"
+
+[intercom_end]
+label = "Intercom End"
+file = "intercom_close.wav"
+
+[encryption_beep]
+label = "Encryption Beep"
+file = "crypto_handshake.wav"
