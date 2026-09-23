@@ -3,6 +3,8 @@
 package joystick
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 
 	evdev "github.com/holoplot/go-evdev"
@@ -92,7 +94,12 @@ func TestIsDigitiserButton(t *testing.T) {
 // belongs to Manager.New's probe, which keeps Supported() true and surfaces
 // the message. Construction must therefore succeed whatever /dev/input says.
 func TestNewOSSourceDoesNotFailOnEnumeration(t *testing.T) {
-	src, err := NewOSSource()
+	// A real discard logger, not nil. The Linux backend ignores the argument
+	// today, so nil would not panic -- but the signature exists because the
+	// WINDOWS backend logs through it, and a test that passes nil here is one
+	// refactor away from a nil dereference. Every other test in this package
+	// constructs its logger the same way.
+	src, err := NewOSSource(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewOSSource() error = %v, want nil -- an enumeration or permission "+
 			"failure must reach the UI through Manager.lastErr, not delete the manager", err)
