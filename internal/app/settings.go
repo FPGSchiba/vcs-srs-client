@@ -401,10 +401,13 @@ func (a *App) ClearKeybind(actionID string) error {
 //
 // BeginCapture suspends BOTH managers (spec section 9): without suspending
 // the joystick manager too, binding a joystick button would transmit while
-// it is being bound. jm.Suspend() and jm.BeginCapture() are called OUTSIDE
-// sb.mu: Suspend can synchronously call back into a.Released (a still-held
-// action's forced release), which itself takes sb.mu, so holding it across
-// the call would deadlock.
+// it is being bound. hk.Suspend(), jm.Suspend() and jm.BeginCapture() are
+// ALL called OUTSIDE sb.mu: either Suspend can synchronously call back into
+// a.Released (a still-held action's forced release), which itself takes
+// sb.mu, so holding it across the call would deadlock. This is not
+// theoretical for the keyboard manager either -- hotkeys.Manager.Suspend()
+// calls Registrar.UnregisterAll(), and the real registrar's
+// dispatcher.clear() releases every latched hold action from inside it.
 func (a *App) BeginCapture(actionID string) int64 {
 	sb := a.settings
 	sb.mu.Lock()
@@ -412,7 +415,6 @@ func (a *App) BeginCapture(actionID string) int64 {
 	gen := sb.captureGen
 	sb.captureAction = actionID
 	jm := sb.joy
-	sb.hk.Suspend()
 	if sb.captureTimer != nil {
 		sb.captureTimer.Stop()
 	}
@@ -425,6 +427,19 @@ func (a *App) BeginCapture(actionID string) int64 {
 	sb.captureTimer = time.AfterFunc(timeout, func() { a.resumeCapture(gen) })
 	sb.mu.Unlock()
 
+	// Both Suspend calls are OUTSIDE sb.mu, and for the same reason -- see
+	// the doc comment above. hk.Suspend() reaches
+	// registrar.UnregisterAll() -> dispatcher.clear(), which synchronously
+	// calls a.Released for every latched hold action on THIS goroutine;
+	// a.Released asks isHold(), which takes sb.mu. Holding sb.mu here would
+	// self-deadlock the whole app with the microphone still open.
+	//
+	// Everything sb.mu protects has already been committed above (the
+	// generation bump, the capture action, the auto-resume timer), so the
+	// token this call returns is decided before either manager is touched:
+	// a Released re-entering a.Released between here and the return can
+	// only read that already-consistent state.
+	sb.hk.Suspend()
 	if jm != nil {
 		jm.Suspend()
 		jm.BeginCapture(func(c joystick.Captured) {

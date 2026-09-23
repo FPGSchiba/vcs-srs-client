@@ -191,6 +191,76 @@ func (deadRegistrar) Register(string, chord.Chord, bool, hotkeys.Handler) error 
 }
 func (deadRegistrar) UnregisterAll() {}
 
+// latchingRegistrar is the only fake in this file that reproduces the ONE
+// behaviour of the real OS registrar that matters to the app layer's locking:
+// UnregisterAll() releases every latched HOLD action SYNCHRONOUSLY, on the
+// caller's goroutine, before it returns. That is exactly what
+// registrar_gohook.go does -- UnregisterAll -> dispatcher.clear() ->
+// drainLatchedLocked() -> h.Released(id) -- and it is the reason
+// hotkeys.Manager.Suspend()/Apply() can re-enter App.Released from inside the
+// call.
+//
+// countingRegistrar, failingRegistrar and deadRegistrar all implement
+// UnregisterAll as a no-op, so every test built on them is structurally blind
+// to that re-entrancy: App.BeginCapture could (and did) call hk.Suspend()
+// while holding sb.mu, self-deadlock against isHold()'s sb.mu.Lock(), and
+// still pass the entire suite. Keep this fake, and keep using it for any test
+// that exercises a suspend/apply path with an action HELD.
+type latchingRegistrar struct {
+	mu      sync.Mutex
+	h       hotkeys.Handler
+	hold    map[string]bool
+	latched map[string]bool
+}
+
+func newLatchingRegistrar() *latchingRegistrar {
+	return &latchingRegistrar{hold: map[string]bool{}, latched: map[string]bool{}}
+}
+
+func (r *latchingRegistrar) Register(actionID string, _ chord.Chord, hold bool, h hotkeys.Handler) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.h = h
+	r.hold[actionID] = hold
+	return nil
+}
+
+// UnregisterAll mirrors dispatcher.clear(): drop the registrations AND
+// release whatever is latched, outside the fake's own lock, on this
+// goroutine.
+func (r *latchingRegistrar) UnregisterAll() {
+	r.mu.Lock()
+	h := r.h
+	release := make([]string, 0, len(r.latched))
+	for id := range r.latched {
+		release = append(release, id)
+	}
+	r.latched = map[string]bool{}
+	r.hold = map[string]bool{}
+	r.mu.Unlock()
+
+	for _, id := range release {
+		if h != nil {
+			h.Released(id)
+		}
+	}
+}
+
+// pressForTest latches actionID and drives Pressed, the way a real key-down
+// through the dispatcher does. Only HOLD actions latch, matching
+// dispatcher.keyDown.
+func (r *latchingRegistrar) pressForTest(actionID string) {
+	r.mu.Lock()
+	h := r.h
+	if r.hold[actionID] {
+		r.latched[actionID] = true
+	}
+	r.mu.Unlock()
+	if h != nil {
+		h.Pressed(actionID)
+	}
+}
+
 // newTestApp wires an App with in-memory settings deps and no Wails.
 func newTestApp(t *testing.T) (*App, *recordingEmitter, *countingRegistrar) {
 	t.Helper()
@@ -1140,5 +1210,59 @@ func TestApplyHotkeysDuringRebindDoesNotStrandAHeldAction(t *testing.T) {
 	if pressed != released {
 		t.Errorf("Pressed=%d Released=%d after releasing during the rebind window; "+
 			"want them equal -- the action must not be left permanently \"held\"", pressed, released)
+	}
+}
+
+// TestBeginCaptureDoesNotDeadlockWhileAHotkeyIsHeld is the C1 guard.
+//
+// BeginCapture used to call sb.hk.Suspend() while holding sb.mu. Suspend
+// reaches registrar.UnregisterAll(), which -- in the REAL registrar, and in
+// latchingRegistrar above -- synchronously calls Handler.Released for every
+// latched hold action. App.Released asks isHold(), which takes sb.mu. sb.mu
+// is not reentrant, so the whole app hung on the caller's goroutine with the
+// microphone still open. Go's deadlock detector never fires for it because
+// the other goroutines stay runnable.
+//
+// The timeout is what makes this a FAILING test rather than a hanging suite:
+// BeginCapture runs on its own goroutine and the test fails if it has not
+// returned. jm.Suspend() was already hoisted out of sb.mu for precisely this
+// hazard; the keyboard manager one line above it was not.
+func TestBeginCaptureDoesNotDeadlockWhileAHotkeyIsHeld(t *testing.T) {
+	em := &recordingEmitter{}
+	a := NewForTest(state.New(), nil, nil)
+	reg := newLatchingRegistrar()
+	kb := keybinds.New()
+	kb.Load(map[string][]string{})
+	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(reg, a), em)
+
+	c, err := chord.FromCode("F8", false, false, false, false)
+	if err != nil {
+		t.Fatalf("chord.FromCode: %v", err)
+	}
+	a.settings.kb.Add(keybinds.ActionID("global.ptt"), trigger.Key(c))
+	a.applyHotkeys()
+
+	// global.ptt is a HOLD action, so this leaves it latched in the
+	// registrar: the next UnregisterAll owes it a Released.
+	reg.pressForTest("global.ptt")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.BeginCapture("global.ptt")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BeginCapture did not return within 5s: sb.hk.Suspend() is being " +
+			"called while sb.mu is held, and the synchronous Released it triggers " +
+			"self-deadlocks on isHold()")
+	}
+
+	if em.count(events.EventHotkeyPressed) != 1 || em.count(events.EventHotkeyReleased) != 1 {
+		t.Errorf("Pressed=%d Released=%d across the suspend; want 1 and 1 -- "+
+			"the held action must be released exactly once when registrations drop",
+			em.count(events.EventHotkeyPressed), em.count(events.EventHotkeyReleased))
 	}
 }
