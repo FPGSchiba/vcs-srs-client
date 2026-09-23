@@ -189,15 +189,26 @@ type Property interface {
 	propHeader() *PROPHEADER
 }
 
-// SetProperty sets one of the PROP_* properties for the device. Predefined
-// property types are: PROPCPOINTS, PROPDWORD, PROPRANGE, PROPCAL, PROPCALPOV,
+// PropID identifies one of DirectInput's predefined per-object or
+// per-device properties -- the PROP_* / IPROP_* sentinels declared in
+// constants_windows.go. In the C API these are cast from small integers to
+// a REFGUID via the MAKEDIPROP macro purely so SetProperty can dispatch on
+// identity; they are never dereferenced as real memory. PropID keeps that
+// identity as a plain uintptr instead of a *GUID fabricated with
+// unsafe.Pointer(uintptr(n)), so there is no unsafe.Pointer conversion of a
+// non-pointer value for go vet's unsafeptr check to (correctly) flag.
+type PropID uintptr
+
+// SetProperty sets one of the PROP_* properties for the device. propID is
+// one of the PROP_* / IPROP_* constants. Predefined property value types
+// are: PROPCPOINTS, PROPDWORD, PROPRANGE, PROPCAL, PROPCALPOV,
 // PROPGUIDANDPATH, PROPSTRING and PROPPOINTER. Create them with the NewProp*
 // functions.
-func (obj *Device) SetProperty(guid *GUID, prop Property) Error {
+func (obj *Device) SetProperty(propID PropID, prop Property) Error {
 	ret, _, _ := syscall.SyscallN(
 		obj.vtbl.SetProperty,
 		uintptr(unsafe.Pointer(obj)),
-		uintptr(unsafe.Pointer(guid)),
+		uintptr(propID),
 		uintptr(unsafe.Pointer(prop.propHeader())),
 	)
 	return toErr(ret)
