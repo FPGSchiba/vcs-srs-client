@@ -31,6 +31,11 @@ const (
 	// EventJoystickCaptured is emitted when a joystick capture completed and bound
 	// itself.
 	EventJoystickCaptured = "keybinds:joy_captured"
+	// EventJoystickState is emitted when the joystick subsystem's health
+	// changes -- a device attached or detached, or the reported error
+	// appeared or cleared. The sibling of EventHotkeysState, and for the same
+	// reason: the UI must not have to re-ask.
+	EventJoystickState = "joystick:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -187,6 +192,40 @@ func (t *Tagged) JoystickCaptured(actionID string, stolen any) {
 	t.em.Emit(EventJoystickCaptured, JoystickCapturedPayload{
 		ActionID: actionID,
 		Stolen:   stolen,
+	})
+}
+
+// JoystickDevicePayload is one attached device, mirroring
+// app.JoystickDeviceDTO.
+type JoystickDevicePayload struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// JoystickStatePayload is the EventJoystickState payload, mirroring
+// app.JoystickStateDTO.
+type JoystickStatePayload struct {
+	Supported bool   `json:"supported"`
+	Error     string `json:"error"`
+	// Devices is the attached device list. Deliberately carried in full
+	// rather than as a delta, for the same reason KeybindsChanged is: the
+	// list is tiny and a replacement removes a class of divergence bug.
+	Devices []JoystickDevicePayload `json:"devices"`
+}
+
+// JoystickState emits EventJoystickState.
+//
+// Pushed rather than polled, and emitted only when something actually
+// changed: the health DTO used to be fetched exactly once, when a window
+// mounted, so a transient error pinned the "unavailable" banner forever and a
+// stick plugged in afterwards stayed invisible. The manager's poll loop runs
+// at 100Hz and its enumeration every 3s, so emitting per tick instead of per
+// change would flood the event bus.
+func (t *Tagged) JoystickState(supported bool, errMsg string, devices []JoystickDevicePayload) {
+	t.em.Emit(EventJoystickState, JoystickStatePayload{
+		Supported: supported,
+		Error:     errMsg,
+		Devices:   devices,
 	})
 }
 

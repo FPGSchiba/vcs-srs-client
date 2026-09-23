@@ -72,9 +72,27 @@ type Manager struct {
 	suspended bool
 	closed    bool
 	supported bool
-	lastErr   error
+
+	// discoverErr and pollErr are the most recent failure from each of the
+	// two Source calls, kept SEPARATELY rather than in one lastErr slot.
+	//
+	// Both halves matter. Each is CLEARED by its own call succeeding, which
+	// is what stops a single transient failure from pinning "Joystick
+	// unavailable -- ..." in the UI for the life of the process. And neither
+	// is cleared by the OTHER call succeeding, which is what stops them
+	// flapping: on Linux an 'input'-group denial fails enumeration every 3s
+	// while polling the already-open handles keeps succeeding at 100Hz, and
+	// a shared slot would set and clear the reported error in turn -- which,
+	// now that the state is PUSHED to the UI on every change, would strobe
+	// the banner.
+	discoverErr error
+	pollErr     error
 
 	devices []Device
+
+	// onState is notified when the observable state -- the device set or the
+	// reported error -- changes. See OnStateChanged.
+	onState func()
 
 	// capture is the in-flight binding capture, if any. Touched only under
 	// mu -- see capture.go. It deliberately never interacts with notifyMu:
@@ -113,7 +131,7 @@ func New(src Source, h Handler, log *slog.Logger) *Manager {
 	// nil after a failed probe; only ErrUnsupported also flips supported to
 	// false, since that is the one case the UI must not offer as retryable.
 	if _, err := src.Devices(); err != nil {
-		m.lastErr = err
+		m.discoverErr = err
 		if errors.Is(err, ErrUnsupported) {
 			m.supported = false
 		}
@@ -132,7 +150,75 @@ func (m *Manager) Supported() bool {
 func (m *Manager) LastErr() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.lastErr
+	return m.lastErrLocked()
+}
+
+// lastErrLocked derives the single error the UI reports from the two slots. A
+// poll failure wins: it is both more recent and more specific than an
+// enumeration failure. Caller holds m.mu.
+func (m *Manager) lastErrLocked() error {
+	if m.pollErr != nil {
+		return m.pollErr
+	}
+	return m.discoverErr
+}
+
+// errText renders an error for CHANGE DETECTION only. Comparing the rendered
+// text rather than the error value keeps a backend that builds a fresh error
+// value on every failing call -- both of ours do -- from reading as a new
+// state on every single attempt.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// OnStateChanged registers fn, called whenever the observable joystick state
+// -- the attached device set, or the reported error -- CHANGES. Set it before
+// Start().
+//
+// It exists because the health DTO was designed to be pushed and was only
+// ever pulled, once, when the Settings window mounted: a stick plugged in
+// afterwards stayed invisible until some unrelated event forced a re-render.
+//
+// ON CHANGE, never per tick: rediscover runs every 3s and tick at 100Hz, and
+// notifying on each would flood whatever the callback feeds.
+//
+// fn runs on the poll goroutine and must not block. It is called with NEITHER
+// m.mu nor m.notifyMu held, so it is free to call back into the Manager --
+// which it does: the app layer's callback reads Supported/LastErr/Devices to
+// build the payload it emits.
+func (m *Manager) OnStateChanged(fn func()) {
+	m.mu.Lock()
+	m.onState = fn
+	m.mu.Unlock()
+}
+
+// notifyState invokes the state observer, if one is registered. Must be
+// called with no lock held.
+func (m *Manager) notifyState() {
+	m.mu.Lock()
+	fn := m.onState
+	m.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// devicesEqual reports whether two enumerations describe the same device set.
+// Device is a comparable struct of exactly the two fields the UI shows, so
+// this is the whole of "did anything the user can see change".
+func devicesEqual(a, b []Device) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Devices returns the most recently enumerated device list.
@@ -273,16 +359,24 @@ func (m *Manager) loop(poll, rediscover time.Duration) {
 	}
 }
 
-// rediscover re-enumerates devices so hot-plugged hardware starts working.
+// rediscover re-enumerates devices so hot-plugged hardware starts working,
+// and pushes the result to the state observer when anything visible changed.
 func (m *Manager) rediscover() {
 	devs, err := m.src.Devices()
+
 	m.mu.Lock()
-	if err != nil {
-		m.lastErr = err
-	} else {
+	before := errText(m.lastErrLocked())
+	m.discoverErr = err // nil on success: a transient failure is forgotten here
+	changed := errText(m.lastErrLocked()) != before
+	if err == nil && !devicesEqual(m.devices, devs) {
 		m.devices = devs
+		changed = true
 	}
 	m.mu.Unlock()
+
+	if changed {
+		m.notifyState()
+	}
 }
 
 // tick samples the source once and drives the resulting edges. It is the
@@ -316,6 +410,21 @@ func (m *Manager) tick() {
 	}
 
 	state, err := m.src.Poll()
+
+	// Record the poll's outcome -- INCLUDING its success, which clears a
+	// previous failure -- and push the change out before anything else in
+	// this tick. Deliberately here rather than in the error branch below:
+	// that branch never ran on success, so a transient read failure was
+	// never forgotten, and it sits under notifyMu, which the observer
+	// callback must not be called under.
+	m.mu.Lock()
+	beforeErr := errText(m.lastErrLocked())
+	m.pollErr = err
+	errChanged := errText(m.lastErrLocked()) != beforeErr
+	m.mu.Unlock()
+	if errChanged {
+		m.notifyState()
+	}
 
 	// A capture owns the device while it is armed: pressing a button to bind
 	// it must never also fire the action being bound. The app layer is still
@@ -361,8 +470,7 @@ func (m *Manager) tick() {
 		// Release everything: a stuck-open microphone is the worst outcome
 		// available here.
 		m.mu.Lock()
-		m.lastErr = err
-		release := m.takeActiveLocked()
+		release := m.takeActiveLocked() // m.pollErr was already recorded above
 		m.mu.Unlock()
 		m.emitReleases(release)
 		return

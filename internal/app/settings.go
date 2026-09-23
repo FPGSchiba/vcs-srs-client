@@ -119,7 +119,31 @@ func (a *App) SetJoystickBackend(jm *joystick.Manager) {
 	sb.joy = jm
 	sb.mu.Unlock()
 	a.applyHotkeys()
+	// Registered BEFORE Start: the loop's first act is an enumeration, and
+	// that first "nil -> one device" transition is itself a change the UI
+	// wants. Without this the DTO was pull-only, fetched once when a window
+	// mounted, so a stick plugged in later never appeared and a transient
+	// error never cleared.
+	jm.OnStateChanged(a.emitJoystickState)
 	jm.Start()
+}
+
+// emitJoystickState publishes the current joystick health on joystick:state.
+// The sibling of emitHotkeyState, and wired the same way the UI consumes it.
+//
+// Called from the manager's poll goroutine, only when something actually
+// changed -- see joystick.Manager.OnStateChanged.
+func (a *App) emitJoystickState() {
+	sb := a.settings
+	if sb == nil {
+		return
+	}
+	dto := a.GetJoystickState()
+	devices := make([]events.JoystickDevicePayload, 0, len(dto.Devices))
+	for _, d := range dto.Devices {
+		devices = append(devices, events.JoystickDevicePayload{ID: d.ID, Name: d.Name})
+	}
+	sb.em.JoystickState(dto.Supported, dto.Error, devices)
 }
 
 // GetJoystickState reports the joystick subsystem's health for the UI.

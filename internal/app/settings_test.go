@@ -1648,3 +1648,59 @@ func TestJoystickCaptureReportsTheSteal(t *testing.T) {
 		t.Error("stolen trigger has no label; the banner renders it verbatim")
 	}
 }
+
+// TestJoystickStateIsPushedWhenDevicesChange is the app half of the I3 guard.
+//
+// GetJoystickState was pull-only: useSettingsSync called it once on mount and
+// nothing ever re-polled, so a stick plugged in after the Settings screen
+// mounted kept its chips rendered muted. SetJoystickBackend now registers a
+// state observer before Start(), so the loop's own enumeration reaches the
+// UI.
+func TestJoystickStateIsPushedWhenDevicesChange(t *testing.T) {
+	a, em, _ := newTestApp(t)
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	jm.RediscoverInterval = 5 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	waitFor(t, 2*time.Second, "joystick:state was never emitted for the first enumeration",
+		func() bool { return em.count(events.EventJoystickState) >= 1 })
+
+	p, ok := em.lastJoystickState()
+	if !ok {
+		t.Fatal("joystick:state payload has the wrong type")
+	}
+	if !p.Supported {
+		t.Error("joystick:state reports unsupported for a working fake source")
+	}
+	if len(p.Devices) != 1 || p.Devices[0].ID != "stick-c3" {
+		t.Errorf("joystick:state devices = %+v, want the one attached stick", p.Devices)
+	}
+
+	// A steady state must not keep emitting: rediscover runs every 5ms here
+	// and tick every 2ms, so a per-tick emit would be obvious.
+	before := em.count(events.EventJoystickState)
+	time.Sleep(60 * time.Millisecond)
+	if after := em.count(events.EventJoystickState); after != before {
+		t.Errorf("joystick:state emitted %d more times with nothing changing; "+
+			"it must fire on change, not on every poll", after-before)
+	}
+}
+
+// lastJoystickState returns the payload of the most recent joystick:state
+// event, and reports whether there was one of the right type.
+func (r *recordingEmitter) lastJoystickState() (events.JoystickStatePayload, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.events) - 1; i >= 0; i-- {
+		if r.events[i] != events.EventJoystickState {
+			continue
+		}
+		p, ok := r.payloads[i].(events.JoystickStatePayload)
+		return p, ok
+	}
+	return events.JoystickStatePayload{}, false
+}

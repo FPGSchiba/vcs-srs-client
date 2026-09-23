@@ -24,6 +24,7 @@ type fakeSource struct {
 	devices []Device
 	held    map[trigger.JoyButton]struct{}
 	pollErr error
+	devErr  error
 	closed  int
 
 	// pollDelay, inFlight and maxInFlight instrument concurrent-access
@@ -72,7 +73,25 @@ func (f *fakeSource) unplug() {
 func (f *fakeSource) Devices() ([]Device, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.devErr != nil {
+		return nil, f.devErr
+	}
 	return append([]Device(nil), f.devices...), nil
+}
+
+// setDevErr makes enumeration fail (or stop failing), so a test can pin that
+// a transient failure is actually forgotten on the next success.
+func (f *fakeSource) setDevErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.devErr = err
+}
+
+// setPollErr makes polling fail (or stop failing).
+func (f *fakeSource) setPollErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pollErr = err
 }
 
 func (f *fakeSource) Poll() (State, error) {
@@ -484,4 +503,96 @@ func TestPressKindDoesNotReFireAcrossASuspendWhileHeld(t *testing.T) {
 	m.Resume()
 	m.tick()
 	eq(t, rec.events(), []string{"down:global.mute_toggle"})
+}
+
+// TestTransientErrorsAreForgottenOnTheNextSuccess is half of the I3 guard.
+//
+// rediscover() and tick() set lastErr on failure and never reset it on a
+// later success, so one transient enumeration or poll error pinned
+// "Joystick unavailable -- ..." in the UI for the life of the process even
+// though the device was working again.
+func TestTransientErrorsAreForgottenOnTheNextSuccess(t *testing.T) {
+	m, src, _ := testManager(t)
+
+	src.setDevErr(errors.New("transient enumeration failure"))
+	m.rediscover()
+	if m.LastErr() == nil {
+		t.Fatal("LastErr = nil after a failing rediscover")
+	}
+	src.setDevErr(nil)
+	m.rediscover()
+	if err := m.LastErr(); err != nil {
+		t.Errorf("LastErr = %v after a SUCCESSFUL rediscover; want nil -- "+
+			"a transient failure must not pin the banner for the life of the process", err)
+	}
+
+	src.setPollErr(errors.New("transient read failure"))
+	m.tick()
+	if m.LastErr() == nil {
+		t.Fatal("LastErr = nil after a failing poll")
+	}
+	src.setPollErr(nil)
+	m.tick()
+	if err := m.LastErr(); err != nil {
+		t.Errorf("LastErr = %v after a SUCCESSFUL poll; want nil", err)
+	}
+}
+
+// TestEnumerationErrorSurvivesASuccessfulPoll pins the reason the two Source
+// calls keep SEPARATE error slots. On Linux an 'input'-group denial fails
+// enumeration every 3s while polling the already-open handles keeps
+// succeeding at 100Hz. With one shared slot the reported error would flap
+// between set and cleared -- and, with joystick:state pushed on every change,
+// strobe the UI banner.
+func TestEnumerationErrorSurvivesASuccessfulPoll(t *testing.T) {
+	m, src, _ := testManager(t)
+
+	denied := errors.New("joystick: cannot read /dev/input")
+	src.setDevErr(denied)
+	m.rediscover()
+
+	var states int
+	m.OnStateChanged(func() { states++ })
+	for i := 0; i < 5; i++ {
+		m.tick() // succeeds
+	}
+	if err := m.LastErr(); err == nil || err.Error() != denied.Error() {
+		t.Errorf("LastErr = %v after successful polls; want the standing enumeration error %v -- "+
+			"a poll cannot prove enumeration works", err, denied)
+	}
+	if states != 0 {
+		t.Errorf("state changed %d times across five successful polls under a standing "+
+			"enumeration error; want 0 -- a flapping error strobes the UI banner", states)
+	}
+}
+
+// TestStateObserverFiresOnChangeOnly is the other half of the I3 guard: the
+// joystick DTO was designed to be pushed and was only ever pulled, once, on
+// mount. A stick plugged in after the Settings screen mounted stayed
+// invisible. The push must be on CHANGE, though -- rediscover runs every 3s
+// and tick at 100Hz, and emitting on every one of those would flood the
+// event bus.
+func TestStateObserverFiresOnChangeOnly(t *testing.T) {
+	m, src, _ := testManager(t)
+
+	var states int
+	m.OnStateChanged(func() { states++ })
+
+	m.rediscover() // nil -> one device: a change
+	if states != 1 {
+		t.Fatalf("state changes = %d after the first enumeration, want 1", states)
+	}
+	m.rediscover() // same device set
+	m.tick()
+	m.tick()
+	if states != 1 {
+		t.Errorf("state changes = %d with nothing changing, want 1 -- "+
+			"the observer must fire on change, not on every tick", states)
+	}
+
+	src.unplug() // the device set genuinely changed
+	m.rediscover()
+	if states != 2 {
+		t.Errorf("state changes = %d after the device vanished, want 2", states)
+	}
 }
