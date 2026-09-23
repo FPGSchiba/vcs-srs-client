@@ -51,6 +51,27 @@ describe("TriggerChip", () => {
     expect(screen.getByTitle(/VPC MongoosT-50CM3/)).toBeInTheDocument();
   });
 
+  it("names the device VISIBLY once it is disconnected", () => {
+    // Spec section 10: an absent device's trigger "renders muted, naming the
+    // device", and section 3 persists [keybind_devices] so the name survives
+    // the unplug. A `title` alone does not satisfy that -- it needs a hover
+    // the user has no reason to attempt, and it does not exist on touch. Two
+    // sticks gave two identical muted "Btn 12" chips with nothing to tell
+    // them apart.
+    render(
+      <TriggerChip trigger={{ ...joyTrigger, connected: false }} onRemove={vi.fn()} />,
+    );
+    expect(screen.getByText("VPC MongoosT-50CM3")).toBeInTheDocument();
+  });
+
+  it("does not spell out the device on a connected chip", () => {
+    // A connected stick is answerable by looking at the desk, and a keybind
+    // row has to fit several triggers side by side.
+    render(<TriggerChip trigger={joyTrigger} onRemove={vi.fn()} />);
+    expect(screen.queryByText("VPC MongoosT-50CM3")).not.toBeInTheDocument();
+    expect(screen.getByTitle(/VPC MongoosT-50CM3/)).toBeInTheDocument();
+  });
+
   it("calls onRemove when the remove affordance is clicked", () => {
     const onRemove = vi.fn();
     render(<TriggerChip trigger={joyTrigger} onRemove={onRemove} />);
@@ -86,6 +107,12 @@ describe("TriggerChip connectivity against the live device list", () => {
     // `connected: true` is the STALE baked-in value -- the live list must win.
     render(<TriggerChip trigger={joyTrigger} onRemove={vi.fn()} />);
     expect(screen.getByTitle(/not connected/i).className).toContain("disconnected");
+  });
+
+  it("names the device visibly when the live list says it is gone", () => {
+    hydrate([{ id: "other-stick", name: "Other" }]);
+    render(<TriggerChip trigger={joyTrigger} onRemove={vi.fn()} />);
+    expect(screen.getByText("VPC MongoosT-50CM3")).toBeInTheDocument();
   });
 
   it("un-mutes the same chip once the device appears in the list (hot-plug)", () => {

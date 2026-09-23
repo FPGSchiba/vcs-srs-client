@@ -22,8 +22,21 @@ interface TriggerChipProps {
  * the binding is still valid and starts working again the moment the stick is
  * plugged back in, so hiding it would misrepresent the saved configuration.
  * The `disconnected` class lands on both the outer chip (which carries the
- * title -- the only place the device name is spelled out) and the inner
- * `.kbd`, which is where the muted styling itself lives (`.kbd.disconnected`).
+ * title) and the inner `.kbd`, which is where the muted styling itself lives
+ * (`.kbd.disconnected`).
+ *
+ * A DISCONNECTED CHIP NAMES ITS DEVICE VISIBLY. Spec section 10 says an absent
+ * device's trigger "renders muted, naming the device", and spec section 3
+ * persists `[keybind_devices]` specifically so the name survives the stick
+ * being unplugged. Putting the name in a `title` alone does not satisfy that:
+ * a tooltip needs a hover the user has no reason to attempt, and it is absent
+ * entirely on touch. With two sticks attached, two absent bindings rendered as
+ * two identical muted "Btn 12" chips with no way to tell which stick each
+ * belonged to -- which is the whole reason the name is persisted.
+ *
+ * The name is shown ONLY while disconnected. A connected chip's device is
+ * answerable by looking at the desk, and spelling it out on every chip would
+ * triple the width of a keybind row that has to fit several triggers.
  *
  * CONNECTIVITY COMES FROM THE LIVE DEVICE LIST, NOT FROM `trigger.connected`.
  * The latter is computed once, inside Go's GetKeybinds(), and every
@@ -66,7 +79,12 @@ export function TriggerChip({ trigger, onRemove }: TriggerChipProps) {
         </Fragment>
       ))
     ) : (
-      <span className={`kbd${disconnected ? " disconnected" : ""}`}>{trigger.label}</span>
+      <>
+        <span className={`kbd${disconnected ? " disconnected" : ""}`}>{trigger.label}</span>
+        {disconnected && trigger.device_name && (
+          <span className="trigger-device">{trigger.device_name}</span>
+        )}
+      </>
     );
 
   return (

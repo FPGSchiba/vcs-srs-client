@@ -1211,6 +1211,22 @@ input:focus, select:focus, textarea:focus {
 .trigger-chip .plus,
 .trigger-row .plus { color: var(--tx-4); font-family: var(--ff-mono); font-size: 9px; }
 .kbd.disconnected { opacity: 0.5; color: var(--tx-4); }
+/* The device name shown on a DISCONNECTED joystick chip (spec section 10:
+   "renders muted, naming the device"). Two identical sticks otherwise gave two
+   identical muted "Btn 12" chips with the name reachable only by hover. Every
+   value here is borrowed from the existing dim-mono-caption rule the .um-meta
+   / .user-ffid chips already use -- no new colour literals, no new tokens. */
+.trigger-device {
+  font-family: var(--ff-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--tx-4);
+  opacity: 0.8;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .trigger-remove {
   display: inline-flex;
   align-items: center;
