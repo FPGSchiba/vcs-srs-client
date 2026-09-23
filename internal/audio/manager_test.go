@@ -30,6 +30,15 @@ func TestManagerStartOpensBothDevices(t *testing.T) {
 	if st := m.State(); !st.Running {
 		t.Fatalf("State().Running = false after Start: %+v", st)
 	}
+	// Running alone doesn't prove Start actually opened anything -- it's
+	// set unconditionally. Assert the backend genuinely received both open
+	// calls, for the default devices resolveDevice should have chosen.
+	if calls := b.CaptureOpens(); len(calls) != 1 || calls[0] != "mic-1" {
+		t.Fatalf("backend.OpenCapture calls = %v, want exactly one call for %q", calls, "mic-1")
+	}
+	if calls := b.PlaybackOpens(); len(calls) != 1 || calls[0] != "out-1" {
+		t.Fatalf("backend.OpenPlayback calls = %v, want exactly one call for %q", calls, "out-1")
+	}
 }
 
 func TestManagerCapturedAudioReachesTheSinkOnlyWhenGateIsOpen(t *testing.T) {
@@ -108,8 +117,25 @@ func TestManagerFallsBackToDefaultWhenSavedDeviceIsGone(t *testing.T) {
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start with an absent saved device must fall back, got: %v", err)
 	}
-	if st := m.State(); !st.Running {
+	st := m.State()
+	if !st.Running {
 		t.Fatalf("not running after fallback: %+v", st)
+	}
+	// Running alone is also true if the fallback never actually opened
+	// anything (the resulting open failure would just land in InputError
+	// while Running stayed true). Prove the fallback opened the default
+	// device for real, and that the substitution was recorded in State.
+	if st.InputError != "" {
+		t.Fatalf("InputError = %q, want empty: falling back to the default device should open successfully: %+v", st.InputError, st)
+	}
+	if st.InputDevice != "mic-1" {
+		t.Fatalf("InputDevice = %q, want the resolved default %q: %+v", st.InputDevice, "mic-1", st)
+	}
+	if !st.InputSubstituted {
+		t.Fatalf("InputSubstituted = false, want true: a saved device that no longer enumerates must record the substitution: %+v", st)
+	}
+	if calls := b.CaptureOpens(); len(calls) != 1 || calls[0] != "mic-1" {
+		t.Fatalf("backend.OpenCapture calls = %v, want exactly one call for the resolved default %q", calls, "mic-1")
 	}
 }
 

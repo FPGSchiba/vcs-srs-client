@@ -40,10 +40,18 @@ type Config struct {
 
 // State is a point-in-time health snapshot, mirrored to the frontend via
 // the audio:state event (design spec §13).
+//
+// InputDevice/OutputDevice report the device id actually in use for each
+// direction; InputSubstituted/OutputSubstituted report whether that differs
+// from what Config asked for -- i.e. resolveDevice fell back to the default
+// because the saved id no longer enumerates (spec §13's "record the
+// substitution" requirement).
 type State struct {
-	Running                 bool
-	InputError, OutputError string
-	Overruns, Underruns     uint64
+	Running                             bool
+	InputError, OutputError             string
+	Overruns, Underruns                 uint64
+	InputDevice, OutputDevice           string
+	InputSubstituted, OutputSubstituted bool
 }
 
 // VU is the peak level observed on each bus since the last report, at
@@ -61,6 +69,12 @@ type Sink interface {
 }
 
 // ManagerOptions configures a Manager's callbacks and polling cadence.
+//
+// OnState may be invoked concurrently from more than one goroutine -- e.g.
+// Start's tail call and a later pollLoop-driven emitState -- since nothing
+// serializes Manager's own callers against its poll goroutine. Implement it
+// to be safe under concurrent invocation (a mutex or a channel send are
+// both fine); it must not assume a single caller.
 type ManagerOptions struct {
 	Log          *slog.Logger
 	OnVU         func(VU)
@@ -77,7 +91,15 @@ type ManagerOptions struct {
 // Field ownership is split three ways, and that split is what keeps the
 // realtime path lock-free:
 //
-//   - captureRing / playbackRing: lock-free by construction (ring.go).
+//   - captureRing / playbackRing: the Ring's own Read/Write/Dropped/Drain
+//     operations are lock-free by construction (ring.go). The POINTER
+//     FIELDS on Manager are a different matter: Start publishes them (along
+//     with stopDSP/dspDone/stopPoll/pollDone) inside the same mu critical
+//     section that sets running = true, so a concurrent State() call --
+//     which reads them under mu -- has a proper happens-before edge against
+//     Start's write. Holding mu only on State's side would NOT be enough by
+//     itself; it is the write side being under mu too that closes the race
+//     (see Start's doc).
 //   - cfg / ptt / muted / sinks: written by any control-plane goroutine,
 //     read by the DSP (and, for cfg, the poll) goroutine via atomic loads
 //     of an immutable value or an immutable-slice pointer. Nothing here is
@@ -103,13 +125,19 @@ type Manager struct {
 
 	mu                            sync.Mutex
 	running                       bool
+	starting                      bool // claimed inside the same critical section as the running check, so a second concurrent Start() returns immediately instead of racing the first (Fix 2).
 	captureStream, playbackStream Stream
 	inputErr, outputErr           string
 	inputID, outputID             string
+	inputSubstituted              bool // resolveDevice fell back to the default because Config's saved input id no longer enumerates.
+	outputSubstituted             bool // same, for output.
 	lastInputs, lastOutputs       []DeviceInfo
 	inputRetryAt, outputRetryAt   time.Time
 	inputBackoff, outputBackoff   time.Duration
 
+	// stopDSP/stopPoll/dspDone/pollDone are written ONLY inside the same mu
+	// critical section that sets running = true in Start, and read only
+	// under mu in Stop -- see Start's doc for why this matters (Fix 1).
 	stopDSP, stopPoll chan struct{}
 	dspDone, pollDone chan struct{}
 }
@@ -188,9 +216,13 @@ func (m *Manager) PlayEffect(id string) { m.sfx.Play(id) }
 func (m *Manager) State() State {
 	m.mu.Lock()
 	st := State{
-		Running:     m.running,
-		InputError:  m.inputErr,
-		OutputError: m.outputErr,
+		Running:           m.running,
+		InputError:        m.inputErr,
+		OutputError:       m.outputErr,
+		InputDevice:       m.inputID,
+		OutputDevice:      m.outputID,
+		InputSubstituted:  m.inputSubstituted,
+		OutputSubstituted: m.outputSubstituted,
 	}
 	capRing, playRing := m.captureRing, m.playbackRing
 	m.mu.Unlock()
@@ -260,13 +292,29 @@ func sameDevices(a, b []DeviceInfo) bool {
 // back to the default) and never fails on a device that refuses to open
 // (the error is recorded in State and the other direction still runs) --
 // see the rules on manager.go's Start doc and task-10-brief.md rules 5-6.
-// It is idempotent while already running.
+// It is idempotent while already running, and safe against concurrent
+// invocation: a second caller that arrives while the first is still setting
+// up observes m.starting and returns immediately rather than racing it
+// (Fix 2).
+//
+// Concurrency note (Fix 1): every field a concurrent State() or Stop() call
+// can observe -- captureRing, playbackRing, captureStream, playbackStream,
+// inputID/outputID (+substituted), the error strings, and the four
+// lifecycle channels -- is written in ONE mu-guarded critical section, the
+// same one that flips running to true. The Go memory model gives no
+// happens-before edge from an unguarded write to a guarded read: a mutex
+// held only on the reader's side (as State() does) does not make a writer's
+// unsynchronized store visible, and does not order it against the reader.
+// Publishing the whole set together under mu, before any other goroutine
+// can legally observe running == true, is what makes them visible as a
+// single atomic unit rather than individually-torn fields.
 func (m *Manager) Start() error {
 	m.mu.Lock()
-	if m.running {
+	if m.running || m.starting {
 		m.mu.Unlock()
 		return nil
 	}
+	m.starting = true
 	m.mu.Unlock()
 
 	inputs, outputs, err := m.backend.Enumerate()
@@ -278,47 +326,29 @@ func (m *Manager) Start() error {
 		inputs, outputs = nil, nil
 	}
 
-	m.captureRing = NewRing(ringCapacityFrames)
-	m.playbackRing = NewRing(ringCapacityFrames)
+	captureRing := NewRing(ringCapacityFrames)
+	playbackRing := NewRing(ringCapacityFrames)
 
 	cfg := m.currentConfig()
 	inID := resolveDevice(cfg.InputDevice, inputs)
 	outID := resolveDevice(cfg.OutputDevice, outputs)
+	inputSubstituted := cfg.InputDevice != "" && cfg.InputDevice != inID
+	outputSubstituted := cfg.OutputDevice != "" && cfg.OutputDevice != outID
 
 	// The two OS callbacks stay trivial: no cgo, no locks, no allocation,
-	// no logging. All they do is move data through the ring.
-	captureRing := m.captureRing
+	// no logging. All they do is move data through the ring. They close
+	// over the LOCAL captureRing/playbackRing (not the not-yet-published
+	// m.captureRing/m.playbackRing), so they need no synchronisation of
+	// their own either.
 	capStream, capErr := m.backend.OpenCapture(inID, func(frame []float32) {
 		captureRing.Write(frame)
 	})
-	playbackRing := m.playbackRing
 	playStream, playErr := m.backend.OpenPlayback(outID, func(dst []float32) {
 		n := playbackRing.Read(dst)
 		for i := n; i < len(dst); i++ {
 			dst[i] = 0
 		}
 	})
-
-	m.mu.Lock()
-	m.lastInputs, m.lastOutputs = inputs, outputs
-	m.captureStream, m.playbackStream = capStream, playStream
-	m.inputID, m.outputID = inID, outID
-	m.inputBackoff, m.outputBackoff = 0, 0
-	m.inputRetryAt, m.outputRetryAt = time.Time{}, time.Time{}
-	if capErr != nil {
-		m.inputErr = capErr.Error()
-		m.log.Warn("audio: input device failed to open", "device", inID, "err", capErr)
-	} else {
-		m.inputErr = ""
-	}
-	if playErr != nil {
-		m.outputErr = playErr.Error()
-		m.log.Warn("audio: output device failed to open", "device", outID, "err", playErr)
-	} else {
-		m.outputErr = ""
-	}
-	m.running = true
-	m.mu.Unlock()
 
 	denoiser, err := NewDenoiser()
 	if err != nil {
@@ -336,12 +366,38 @@ func (m *Manager) Start() error {
 		denoiser.Process(make([]float32, FrameSamples))
 	}
 
-	m.stopDSP = make(chan struct{})
-	m.dspDone = make(chan struct{})
-	go m.dspLoop(denoiser)
+	stopDSP := make(chan struct{})
+	dspDone := make(chan struct{})
+	stopPoll := make(chan struct{})
+	pollDone := make(chan struct{})
 
-	m.stopPoll = make(chan struct{})
-	m.pollDone = make(chan struct{})
+	m.mu.Lock()
+	m.captureRing, m.playbackRing = captureRing, playbackRing
+	m.lastInputs, m.lastOutputs = inputs, outputs
+	m.captureStream, m.playbackStream = capStream, playStream
+	m.inputID, m.outputID = inID, outID
+	m.inputSubstituted, m.outputSubstituted = inputSubstituted, outputSubstituted
+	m.inputBackoff, m.outputBackoff = 0, 0
+	m.inputRetryAt, m.outputRetryAt = time.Time{}, time.Time{}
+	if capErr != nil {
+		m.inputErr = capErr.Error()
+		m.log.Warn("audio: input device failed to open", "device", inID, "err", capErr)
+	} else {
+		m.inputErr = ""
+	}
+	if playErr != nil {
+		m.outputErr = playErr.Error()
+		m.log.Warn("audio: output device failed to open", "device", outID, "err", playErr)
+	} else {
+		m.outputErr = ""
+	}
+	m.stopDSP, m.dspDone = stopDSP, dspDone
+	m.stopPoll, m.pollDone = stopPoll, pollDone
+	m.running = true
+	m.starting = false
+	m.mu.Unlock()
+
+	go m.dspLoop(denoiser)
 	go m.pollLoop()
 
 	m.emitState()
@@ -368,11 +424,11 @@ func (m *Manager) Stop() {
 
 	if stopDSP != nil {
 		close(stopDSP)
-		<-dspDone
+		m.joinOrAbandon("dsp", dspDone)
 	}
 	if stopPoll != nil {
 		close(stopPoll)
-		<-pollDone
+		m.joinOrAbandon("poll", pollDone)
 	}
 
 	m.mu.Lock()
@@ -389,6 +445,27 @@ func (m *Manager) Stop() {
 	m.backend.Close()
 
 	m.emitState()
+}
+
+// stopJoinTimeout bounds how long Stop() waits for the DSP/poll goroutines
+// to exit before giving up on them. A wedged Backend.Open call in flight
+// inside a bounded-backoff reopen (poll goroutine) or a stalled Backend call
+// (either goroutine) could otherwise hang shutdown forever; an app that logs
+// an abandoned goroutine and exits is better than one that never quits.
+const stopJoinTimeout = 5 * time.Second
+
+// joinOrAbandon waits for done to close, up to stopJoinTimeout, logging and
+// returning instead of blocking forever if it never does. The goroutine
+// itself is not killed -- Go has no mechanism for that -- so a timeout here
+// means Stop proceeds to close the backend and streams while that goroutine
+// may still be running; this is judged the lesser risk versus an
+// unresponsive app (see Fix 7 in task-10 review).
+func (m *Manager) joinOrAbandon(name string, done <-chan struct{}) {
+	select {
+	case <-done:
+	case <-time.After(stopJoinTimeout):
+		m.log.Warn("audio: goroutine did not exit before Stop's timeout; abandoning it", "goroutine", name, "timeout", stopJoinTimeout)
+	}
 }
 
 // peak reports the largest absolute sample value in frame, for VU metering.
@@ -422,8 +499,14 @@ func (m *Manager) dspLoop(denoiser *Denoiser) {
 	var lastCfg *Config
 
 	// All scratch buffers allocated exactly once, here -- nothing in this
-	// loop (or in either OS callback) allocates again.
+	// loop (or in either OS callback) allocates again. outFrame is its own
+	// buffer, distinct from inFrame: Phase 5 adds a network encoder Sink
+	// that may queue frames rather than consume them synchronously, and
+	// aliasing outFrame onto inFrame (handed to every Sink.WriteFrame just
+	// above) would let the mixer overwrite a frame a queuing sink hasn't
+	// read yet. One extra 480-float32 buffer is the whole fix (Fix 6).
 	inFrame := make([]float32, FrameSamples)
+	outFrame := make([]float32, FrameSamples)
 	monitorBuf := make([]float32, FrameSamples)
 	sfxBuf := make([]float32, FrameSamples)
 	notifBuf := make([]float32, FrameSamples) // no notification engine yet (Phase 4 scope); always silent.
@@ -515,7 +598,6 @@ func (m *Manager) dspLoop(denoiser *Denoiser) {
 		clear(sfxBuf)
 		m.sfx.MixInto(sfxBuf)
 
-		outFrame := inFrame // reuse: capture data has already been consumed above.
 		mixer.Mix(outFrame, monitorBuf, sfxBuf, notifBuf)
 		m.playbackRing.Write(outFrame)
 
@@ -601,6 +683,7 @@ func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.T
 	}
 	m.captureStream = stream
 	m.inputID = id
+	m.inputSubstituted = cfg.InputDevice != "" && cfg.InputDevice != id
 	m.inputErr = ""
 	m.inputBackoff = 0
 }
@@ -632,6 +715,7 @@ func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time
 	}
 	m.playbackStream = stream
 	m.outputID = id
+	m.outputSubstituted = cfg.OutputDevice != "" && cfg.OutputDevice != id
 	m.outputErr = ""
 	m.outputBackoff = 0
 }

@@ -20,6 +20,13 @@ type FakeBackend struct {
 	recorded [][]float32
 	failNext error
 	closed   bool
+
+	// captureOpens/playbackOpens record every id passed to OpenCapture /
+	// OpenPlayback, in call order, whether or not the call succeeded -- so
+	// a test can assert the backend genuinely received an open call
+	// (rather than merely that Start() reported Running).
+	captureOpens  []string
+	playbackOpens []string
 }
 
 func NewFakeBackend() *FakeBackend { return &FakeBackend{} }
@@ -58,6 +65,7 @@ func (b *FakeBackend) Enumerate() ([]DeviceInfo, []DeviceInfo, error) {
 func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.captureOpens = append(b.captureOpens, id)
 	if err := b.takeFailure(); err != nil {
 		return nil, err
 	}
@@ -71,6 +79,7 @@ func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, e
 func (b *FakeBackend) OpenPlayback(id string, fill func([]float32)) (Stream, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.playbackOpens = append(b.playbackOpens, id)
 	if err := b.takeFailure(); err != nil {
 		return nil, err
 	}
@@ -79,6 +88,22 @@ func (b *FakeBackend) OpenPlayback(id string, fill func([]float32)) (Stream, err
 	}
 	b.fill = fill
 	return &fakeStream{b: b}, nil
+}
+
+// CaptureOpens returns every device id passed to OpenCapture, in call
+// order, regardless of whether the call succeeded.
+func (b *FakeBackend) CaptureOpens() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.captureOpens...)
+}
+
+// PlaybackOpens returns every device id passed to OpenPlayback, in call
+// order, regardless of whether the call succeeded.
+func (b *FakeBackend) PlaybackOpens() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.playbackOpens...)
 }
 
 // takeFailure consumes the one-shot open failure. Caller holds b.mu.
