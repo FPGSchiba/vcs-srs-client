@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,7 @@ const inputDevDir = "/dev/input"
 // {Supported:true, Error:"...input group..."} and the banner fires, while
 // ErrUnsupported (macOS, source_other.go) still reads as
 // {Supported:false, Error:""}. That split is spec sections 8 and 11.
-func NewOSSource() (Source, error) {
+func NewOSSource(*slog.Logger) (Source, error) {
 	return &linuxSource{devices: map[trigger.DeviceID]*linuxDevice{}}, nil
 }
 

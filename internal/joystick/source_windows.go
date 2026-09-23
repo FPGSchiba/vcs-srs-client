@@ -4,6 +4,7 @@ package joystick
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -29,9 +30,25 @@ import (
 // default. If you are changing this line, you are introducing a defect.
 type winSource struct {
 	mu      sync.Mutex
+	log     *slog.Logger
 	di      *di8.DirectInput
 	helper  *helperWindow
 	devices map[trigger.DeviceID]*winDevice
+
+	// openFailed records, per device, WHICH DirectInput call last failed to
+	// open it. Opening a device can fail for a perfectly ordinary reason --
+	// something else already holds it -- and Devices() is re-run every
+	// RediscoverInterval (3s) forever, so logging unconditionally would spam
+	// the file at 20 lines a minute for as long as the app runs. Keying on
+	// the failing call means one line per device per TRANSITION: the first
+	// failure, and again only if the failure MOVES to a different call or
+	// recurs after a success.
+	//
+	// This is the most likely real-hardware failure mode, and without a log
+	// line "never enumerated" and "enumerated but SetCooperativeLevel
+	// failed" are indistinguishable from the outside -- which is exactly the
+	// question hardware verification has to answer.
+	openFailed map[trigger.DeviceID]string
 }
 
 type winDevice struct {
@@ -40,7 +57,10 @@ type winDevice struct {
 }
 
 // NewOSSource builds the platform joystick source.
-func NewOSSource() (Source, error) {
+func NewOSSource(log *slog.Logger) (Source, error) {
+	if log == nil {
+		log = slog.Default()
+	}
 	helper, err := newHelperWindow()
 	if err != nil {
 		return nil, err
@@ -50,7 +70,13 @@ func NewOSSource() (Source, error) {
 		helper.Close()
 		return nil, fmt.Errorf("joystick: create DirectInput: %w", err)
 	}
-	s := &winSource{di: dinput, helper: helper, devices: map[trigger.DeviceID]*winDevice{}}
+	s := &winSource{
+		log:        log,
+		di:         dinput,
+		helper:     helper,
+		devices:    map[trigger.DeviceID]*winDevice{},
+		openFailed: map[trigger.DeviceID]string{},
+	}
 	if _, err := s.Devices(); err != nil {
 		s.Close()
 		return nil, err
@@ -104,24 +130,32 @@ func (s *winSource) Devices() ([]Device, error) {
 			out = append(out, existing.info)
 			return di8.ENUM_CONTINUE
 		}
+		name := inst.GetProductName()
 		dev, err := s.di.CreateDevice(inst.GuidInstance)
 		if err != nil {
+			s.noteOpenFailure(id, name, "CreateDevice", err)
 			return di8.ENUM_CONTINUE // skip this device, keep enumerating
 		}
 		if err := dev.SetDataFormat(&di8.Joystick2); err != nil {
+			s.noteOpenFailure(id, name, "SetDataFormat", err)
 			dev.Release()
 			return di8.ENUM_CONTINUE
 		}
 		// THE line. See the type comment.
 		if err := dev.SetCooperativeLevel(di8.HWND(s.helper.hwnd), di8.SCL_NONEXCLUSIVE|di8.SCL_BACKGROUND); err != nil {
+			s.noteOpenFailure(id, name, "SetCooperativeLevel", err)
 			dev.Release()
 			return di8.ENUM_CONTINUE
 		}
 		if err := dev.Acquire(); err != nil {
+			s.noteOpenFailure(id, name, "Acquire", err)
 			dev.Release()
 			return di8.ENUM_CONTINUE
 		}
-		info := Device{ID: id, Name: inst.GetProductName()}
+		// Opened cleanly: forget any past failure so a LATER one is logged
+		// again rather than suppressed as a repeat.
+		delete(s.openFailed, id)
+		info := Device{ID: id, Name: name}
 		s.devices[id] = &winDevice{dev: dev, info: info}
 		out = append(out, info)
 		return di8.ENUM_CONTINUE
@@ -138,7 +172,33 @@ func (s *winSource) Devices() ([]Device, error) {
 			delete(s.devices, id)
 		}
 	}
+	// A device that is unplugged while failing must forget its failure too,
+	// so plugging it back in logs the next failure instead of silently
+	// treating it as the same one.
+	for id := range s.openFailed {
+		if !seen[id] {
+			delete(s.openFailed, id)
+		}
+	}
 	return out, nil
+}
+
+// noteOpenFailure logs one per-device open failure, at most once per
+// transition. Caller holds s.mu (Devices holds it across the whole
+// enumeration, and the EnumDevices callback runs synchronously inside it).
+//
+// Warn, not Error: a device held exclusively by something else is a normal
+// state of the world, and the rest of the joystick subsystem keeps working.
+// It is still worth a line, because from outside this function a device that
+// failed SetCooperativeLevel and a device that was never enumerated at all
+// look identical.
+func (s *winSource) noteOpenFailure(id trigger.DeviceID, name, call string, err error) {
+	if s.openFailed[id] == call {
+		return // already reported this exact failure; do not spam every 3s
+	}
+	s.openFailed[id] = call
+	s.log.Warn("joystick device could not be opened; it will be retried on the next rediscover",
+		"device", string(id), "name", name, "call", call, "err", err)
 }
 
 func (s *winSource) Poll() (State, error) {

@@ -2,6 +2,8 @@
 
 package joystick
 
+import "log/slog"
+
 // macOS has no backend, by decision rather than omission.
 //
 // Star Citizen has no macOS build and none is planned, so there is no game to
@@ -14,7 +16,9 @@ package joystick
 // This reports UNSUPPORTED, never DENIED. The distinction matters to the UI:
 // denied earns a grant affordance, unsupported must not, because there is
 // nothing the user can do about it.
-func NewOSSource() (Source, error) { return unsupportedSrc{}, nil }
+// The logger is accepted and ignored: the signature is shared across every
+// platform file so main.go has one call, and there is nothing here to report.
+func NewOSSource(*slog.Logger) (Source, error) { return unsupportedSrc{}, nil }
 
 type unsupportedSrc struct{}
 

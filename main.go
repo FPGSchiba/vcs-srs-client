@@ -101,7 +101,7 @@ func main() {
 	// machine with no joystick, no permission to read one, or no backend at
 	// all (macOS). The manager reports "unsupported" and the UI hides the
 	// affordance.
-	if joySrc, err := joystick.NewOSSource(); err != nil {
+	if joySrc, err := joystick.NewOSSource(appLog); err != nil {
 		appLog.Warn("joystick input unavailable; keyboard binds are unaffected", "err", err)
 	} else {
 		jm := joystick.New(joySrc, gui, appLog)
