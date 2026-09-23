@@ -67,10 +67,17 @@ describe("SettingsScreen", () => {
     expect(screen.queryByText(/Arrives in Phase/i)).not.toBeInTheDocument();
   });
 
-  it("shows the deferred notice for a not-yet-built section", () => {
+  it("opens Radio Effects on the live section, not the deferred stub", () => {
     render(<SettingsScreen />);
     fireEvent.click(screen.getByText("Radio Effects"));
-    expect(screen.getByText(/Arrives in Phase 4/i)).toBeInTheDocument();
+    expect(screen.getByText("TX Start")).toBeInTheDocument();
+    expect(screen.queryByText(/Arrives in Phase/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the deferred notice for a not-yet-built section", () => {
+    render(<SettingsScreen />);
+    fireEvent.click(screen.getByText("Notifications"));
+    expect(screen.getByText(/Arrives in Phase 7/i)).toBeInTheDocument();
   });
 
   it("names the right phase per deferred section", () => {
