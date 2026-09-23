@@ -1194,7 +1194,6 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
   gap: 4px;
 }
-.kbd-row .plus { color: var(--tx-4); font-family: var(--ff-mono); font-size: 9px; }
 
 /* ========== Trigger chip (multi-trigger keybind rows) ========== */
 .trigger-chip {
@@ -1203,6 +1202,14 @@ input:focus, select:focus, textarea:focus {
   gap: 4px;
 }
 .trigger-chip .kbd { cursor: default; }
+/* Same rule as `.kbd-row .plus`, extended to the chip/row markup TriggerChip
+   actually renders into. Without it every modifier chord -- Ctrl+E, Ctrl+O,
+   Alt+1..4, six of the twelve shipped defaults -- drew its `+` in default
+   body text instead of the dim mono separator. Values are the existing
+   rule's, not new ones. */
+.kbd-row .plus,
+.trigger-chip .plus,
+.trigger-row .plus { color: var(--tx-4); font-family: var(--ff-mono); font-size: 9px; }
 .kbd.disconnected { opacity: 0.5; color: var(--tx-4); }
 .trigger-remove {
   display: inline-flex;
