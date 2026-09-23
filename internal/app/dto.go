@@ -169,6 +169,25 @@ type AudioDevicesDTO struct {
 // AudioStateDTO reports the audio subsystem's health, mirroring
 // HotkeyStateDTO and JoystickStateDTO so Phase 7's notification channel can
 // absorb all three the same way.
+//
+// InputError/OutputError are shared by two very different failure modes,
+// and Running is what tells them apart -- consumers MUST check Running
+// before rendering either error:
+//
+//   - Running == false: there is no audio engine at all. This is main.go's
+//     whole-backend construction failure path (audio.NewMalgoBackend
+//     returned an error, e.g. no sound card, a denied OS permission, a
+//     broken driver) -- there was never a Manager to report per-direction
+//     health, so both InputError and OutputError carry the SAME
+//     backend-level error message. A UI that shows InputError here as "your
+//     microphone failed" is wrong: the honest message is "no audio backend
+//     is available on this machine" (nothing works, not just the mic).
+//   - Running == true: a real Manager is up and polling. InputError and
+//     OutputError are now independent per-direction results -- either can
+//     be set on its own (one direction opened fine, the other didn't) or
+//     both, and any message here is specific to that one direction (e.g.
+//     "device busy", a saved device that vanished and had no fallback).
+//     THIS is the "your microphone failed to open" case.
 type AudioStateDTO struct {
 	Running     bool   `json:"running"`
 	InputError  string `json:"input_error"`
