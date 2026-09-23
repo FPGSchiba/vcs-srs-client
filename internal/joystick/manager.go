@@ -290,11 +290,30 @@ func (m *Manager) rediscover() {
 // on the ticker.
 func (m *Manager) tick() {
 	m.mu.Lock()
-	if m.suspended || m.closed || !m.supported {
+	if m.closed || !m.supported {
 		m.mu.Unlock()
 		return
 	}
+	suspended := m.suspended
+	capturing := m.capture != nil
 	m.mu.Unlock()
+
+	// A SUSPENDED manager still polls while a capture is armed, and only
+	// then. Suspension exists to stop DISPATCH -- no action may fire while
+	// the user is binding a button -- but the app layer suspends and arms a
+	// capture together (App.BeginCapture calls jm.Suspend() then
+	// jm.BeginCapture()), so returning here on m.suspended alone silenced
+	// the poll loop for the entire capture: Source.Poll() was never called,
+	// feedCapture never ran, and the completion callback never fired. The
+	// whole joystick-binding feature was unreachable from the UI.
+	//
+	// Dispatch stays suppressed regardless: the capture branch below returns
+	// before m.active is ever touched, and the non-capture path re-checks
+	// m.suspended under notifyMu before it reads or writes m.active. This
+	// widening therefore only ever reaches the capture branch.
+	if suspended && !capturing {
+		return
+	}
 
 	state, err := m.src.Poll()
 

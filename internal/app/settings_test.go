@@ -46,8 +46,9 @@ func (f *fakeJoySource) Close() {}
 type controllableJoySource struct {
 	device joystick.Device
 
-	mu   sync.Mutex
-	held map[trigger.JoyButton]struct{}
+	mu    sync.Mutex
+	held  map[trigger.JoyButton]struct{}
+	polls int
 }
 
 func newControllableJoySource(deviceID trigger.DeviceID) *controllableJoySource {
@@ -64,6 +65,7 @@ func (s *controllableJoySource) Devices() ([]joystick.Device, error) {
 func (s *controllableJoySource) Poll() (joystick.State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.polls++
 	held := make(map[trigger.JoyButton]struct{}, len(s.held))
 	for b := range s.held {
 		held[b] = struct{}{}
@@ -72,6 +74,16 @@ func (s *controllableJoySource) Poll() (joystick.State, error) {
 }
 
 func (s *controllableJoySource) Close() {}
+
+// pollCount reports how many times the manager has sampled this source. It is
+// how a test waits for the poll LOOP itself rather than for one of its
+// downstream effects -- which matters when the bug under test is that the
+// loop stops sampling at all.
+func (s *controllableJoySource) pollCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.polls
+}
 
 // setHeld sets whether b is held, as the NEXT Poll will report it.
 func (s *controllableJoySource) setHeld(b trigger.JoyButton, held bool) {
@@ -1412,4 +1424,71 @@ func TestJoystickStateDistinguishesDeniedFromUnsupported(t *testing.T) {
 				"the user can act on", got.Error)
 		}
 	})
+}
+
+// joyTriggerCount reports how many KindJoy triggers actionID currently has in
+// the keybind store.
+func joyTriggerCount(a *App, actionID string) int {
+	list, ok := a.settings.kb.Get(keybinds.ActionID(actionID))
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, tr := range list {
+		if tr.Kind == trigger.KindJoy {
+			n++
+		}
+	}
+	return n
+}
+
+// TestJoystickCaptureBindsEndToEnd is the C1 guard, and it is deliberately an
+// APP-level test rather than a joystick-package one: both halves were
+// individually correct and the feature was still unreachable, because nothing
+// drove the real sequence App.BeginCapture -> Manager.tick -> feedCapture ->
+// onJoystickCaptured across the seam between them.
+//
+// App.BeginCapture calls jm.Suspend() and then jm.BeginCapture(). tick() used
+// to return on m.suspended BEFORE it ever called Source.Poll(), so with a
+// capture armed the poll loop went silent: feedCapture never ran, the
+// completion callback never fired, and pressing a HOTAS button in
+// Settings -> Keybinds bound nothing and logged nothing. Only config.toml
+// editing could produce a joystick binding at all.
+//
+// The first wait is what pins the actual defect: it asserts the source is
+// still being SAMPLED while a capture is armed. The binding assertion after it
+// is the user-visible consequence.
+func TestJoystickCaptureBindsEndToEnd(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	if token := a.BeginCapture("global.ptt"); token == 0 {
+		t.Fatal("BeginCapture returned no token")
+	}
+
+	// One full poll after arming establishes the capture baseline (capture
+	// never touches Source itself -- see joystick.BeginCapture), so the press
+	// below cannot be mistaken for a button that was already down.
+	base := src.pollCount()
+	waitFor(t, 2*time.Second,
+		"the poll loop stopped sampling the source while a capture was armed: "+
+			"tick() returns on m.suspended before Source.Poll(), so feedCapture can never run "+
+			"and a joystick binding can never be captured from the UI at all",
+		func() bool { return src.pollCount() > base+1 })
+
+	btn := trigger.JoyButton{Device: "stick-c3", Button: 4}
+	src.setHeld(btn, true)
+	held := src.pollCount()
+	waitFor(t, 2*time.Second, "the poll loop stopped sampling while the button was held",
+		func() bool { return src.pollCount() > held+1 })
+	src.setHeld(btn, false)
+
+	waitFor(t, 2*time.Second,
+		"global.ptt gained no joystick trigger after a full press/release during capture",
+		func() bool { return joyTriggerCount(a, "global.ptt") == 1 })
 }
