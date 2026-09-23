@@ -70,6 +70,31 @@ func DecodeWAV(b []byte) ([]float32, error) {
 	if channels < 1 {
 		return nil, errors.New("wav: zero channels")
 	}
+	// A uint16 channel count can go as high as 65535; the divide-by-zero
+	// guard above only rules out zero. Cap it generously -- 64 covers every
+	// real multichannel format (7.1.4 Atmos beds included) with headroom to
+	// spare, while still rejecting a channel count that exists only to pair
+	// with a large data chunk and blow up the downmix loop below.
+	const maxChannels = 64
+	if channels > maxChannels {
+		return nil, fmt.Errorf("wav: %d channels exceeds the %d-channel limit", channels, maxChannels)
+	}
+	// Reject an implausible declared sample rate before it ever reaches
+	// resampleLinear: a tiny rate makes resampleLinear's to/from ratio
+	// enormous, turning a modest data chunk into a multi-gigabyte
+	// allocation -- a fatal OOM rather than a recoverable panic. 8000 Hz
+	// (telephony) is the lowest rate in common use and 768000 Hz is well
+	// above any real-world audio interface, so the bounds below give both
+	// sides margin -- the point is to reject absurdity, not to police format
+	// choices, so 1000..768000 comfortably admits anything a legitimate file
+	// would declare.
+	const (
+		minSampleRate = 1000
+		maxSampleRate = 768000
+	)
+	if sampleRate < minSampleRate || sampleRate > maxSampleRate {
+		return nil, fmt.Errorf("wav: sample rate %d Hz outside the plausible %d-%d Hz range", sampleRate, minSampleRate, maxSampleRate)
+	}
 	if data == nil {
 		return nil, errors.New("wav: no data chunk")
 	}
