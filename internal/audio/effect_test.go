@@ -85,9 +85,74 @@ func TestCommsFilterMidMatchesGolden(t *testing.T) {
 	if len(want) != len(frame) {
 		t.Fatalf("golden has %d samples, frame has %d", len(want), len(frame))
 	}
+	// Tolerance is 1e-4, not the naive 1e-6, because of float32 FMA
+	// contraction: the Go spec permits the compiler to fuse a*b+c into a
+	// single rounding step. On arm64 (this golden's origin, and the
+	// macos-latest CI leg) biquad.step compiles to FMADDS/FMSUBS -- 5
+	// roundings per sample. On amd64 (ubuntu-latest and windows-latest)
+	// it compiles to separate MULSS/ADDSS/SUBSS -- 9 roundings. That
+	// extra rounding is correct-by-spec, not a bug, and across the
+	// 480-sample recursion the two code paths diverge by up to ~4e-6 --
+	// over 4x a 1e-6 tolerance, which would make two of three CI legs
+	// flake on every run. 1e-4 (~0.02% of the ±0.54 signal range) stays
+	// comfortably above that cross-architecture noise while still
+	// failing on any real coefficient, cascade-order, or gain change,
+	// which move samples by orders of magnitude more. Do NOT tighten
+	// this back to 1e-6 -- it will reintroduce the amd64 CI flake.
+	const tolerance = 1e-4
 	for i := range frame {
-		if math.Abs(float64(frame[i]-want[i])) > 1e-6 {
+		if math.Abs(float64(frame[i]-want[i])) > tolerance {
 			t.Fatalf("sample %d = %v, golden %v", i, frame[i], want[i])
+		}
+	}
+}
+
+// TestFilterStatePersistsAcrossProcessCalls guards against a regression
+// that resets e.hp/e.lp at the top of every Process call. Every other
+// bandpass test in this file re-processes the SAME buffer in a loop, which
+// masks a per-call reset entirely (each call still "sees" the same input
+// history because the buffer never advances). That hides a real bug: in
+// production, Process is called once per 10 ms frame on a continuously
+// advancing signal, and a state reset there would inject a discontinuity
+// at every single frame boundary -- an audible buzz at 100 Hz.
+//
+// The test builds one continuous multi-frame tone (phase advances sample
+// by sample across the whole span, not restarting each frame) and compares
+// two ways of running it through comms_filter_mid:
+//   - segmented: N sequential Process(frame) calls on one Effect, frame by
+//     frame, exactly as real playback does it.
+//   - contiguous: the identical samples run through a second Effect in one
+//     single Process call.
+//
+// If biquad state carries over correctly, both must match closely (same
+// filter, same signal, same math -- FMA-order differences aside, see the
+// golden test's tolerance comment above). If state resets every call, the
+// segmented version develops a discontinuity at each 480-sample boundary
+// and diverges hard from the contiguous run.
+func TestFilterStatePersistsAcrossProcessCalls(t *testing.T) {
+	const frames = 5
+	const total = frames * FrameSamples
+	const toneHz = 1000.0
+
+	continuous := make([]float32, total)
+	for i := range continuous {
+		continuous[i] = 0.5 * float32(math.Sin(2*math.Pi*toneHz*float64(i)/SampleRate))
+	}
+
+	segmented := append([]float32(nil), continuous...)
+	segEffect := NewEffect("comms_filter_mid", "")
+	for f := 0; f < frames; f++ {
+		segEffect.Process(segmented[f*FrameSamples : (f+1)*FrameSamples])
+	}
+
+	oneShot := append([]float32(nil), continuous...)
+	oneShotEffect := NewEffect("comms_filter_mid", "")
+	oneShotEffect.Process(oneShot)
+
+	const tolerance = 1e-4
+	for i := range oneShot {
+		if diff := math.Abs(float64(segmented[i] - oneShot[i])); diff > tolerance {
+			t.Fatalf("sample %d: segmented = %v, contiguous = %v, diff %v exceeds %v -- filter state did not survive the Process call boundary", i, segmented[i], oneShot[i], diff, tolerance)
 		}
 	}
 }
