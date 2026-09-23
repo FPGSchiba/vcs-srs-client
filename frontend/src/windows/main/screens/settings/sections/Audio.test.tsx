@@ -70,7 +70,23 @@ describe("Audio settings", () => {
 
   it("renders the live VU meter from store state", () => {
     useSettings.setState({ vu: { input: 0.5, output: 0 } });
-    const { container } = render(<Audio />);
-    expect(container.querySelectorAll("[data-vu-seg]").length).toBeGreaterThan(0);
+    const { container, unmount } = render(<Audio />);
+    // Asserting segment count alone would pass even if the meter's `level`
+    // prop were hardcoded to 0 -- VU always renders 16 <span data-vu-seg>
+    // elements regardless of level (see VU.tsx). The lit COUNT is what
+    // actually proves the store's value reached the meter: VU.tsx lights
+    // segment i when level >= (i+1)/segs, so level=0.5 over 16 segments
+    // lights exactly floor(0.5*16) = 8.
+    const lit = () => container.querySelectorAll('[data-vu-seg][data-lit="true"]');
+    expect(lit().length).toBe(8);
+    unmount();
+
+    // A second, different level rules out a coincidental match: if lit
+    // count tracked nothing (e.g. a hardcoded level), both renders would
+    // report the same count regardless of store state.
+    useSettings.setState({ vu: { input: 0.9375, output: 0 } }); // 15/16
+    const { container: container2 } = render(<Audio />);
+    const lit2 = container2.querySelectorAll('[data-vu-seg][data-lit="true"]');
+    expect(lit2.length).toBe(15);
   });
 });
