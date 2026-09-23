@@ -73,33 +73,78 @@ func NewOSSource() (Source, error) {
 // forbidden from doing it. Routing both call sites through one predicate
 // means they cannot drift apart the way they did before.
 //
-// The eligible set is the union of two kernel-defined ranges, not one:
+// The eligible set is the union of the THREE kernel-defined blocks that
+// actually contain joystick and gamepad buttons, and nothing else:
 //
-//   - BTN_JOYSTICK..BTN_GAMEPAD+0x7f (0x120-0x1AF): the standard joystick and
-//     gamepad button block.
+//   - BTN_JOYSTICK..BTN_THUMBR (0x120-0x13e): the standard joystick block
+//     (0x120-0x12f) followed by the gamepad block (BTN_GAMEPAD 0x130 ..
+//     BTN_THUMBR 0x13e). The gamepad block ENDS at BTN_THUMBR -- this used
+//     to read BTN_GAMEPAD+0x7f (0x1AF), which overshot by 113 codes and
+//     swallowed the whole digitiser block: BTN_DIGI 0x140, BTN_TOOL_FINGER
+//     0x145, BTN_TOUCH 0x14a, BTN_TOOL_DOUBLETAP 0x14d, BTN_WHEEL 0x150.
+//     Every mainstream laptop touchpad declares EV_ABS/ABS_X together with
+//     BTN_TOUCH and BTN_TOOL_FINGER, so it passed the device gate, its
+//     BTN_TOUCH became an addressable trigger.Button held whenever a finger
+//     was down, and a user who clicked "+" and then touched the trackpad
+//     bound their trackpad to the action. Do not widen this bound again.
+//   - BTN_DPAD_UP..BTN_DPAD_RIGHT (0x220-0x223): the separate D-pad block
+//     some gamepads report their hat on instead of ABS_HAT0X/Y.
 //   - BTN_TRIGGER_HAPPY1..BTN_TRIGGER_HAPPY40 (0x2c0-0x2e7): the kernel's
 //     overflow block for devices with more buttons than the standard block
 //     has room for -- exactly what a high-button-count HOTAS (e.g. a
-//     Warthog-class throttle) uses. A single-range filter would silently
-//     drop every one of those buttons, trading the keylog bug for a
-//     "half my buttons vanished" bug.
+//     Warthog-class throttle) uses. Dropping it would trade the digitiser
+//     bug for a "half my buttons vanished" bug, which is why the union
+//     exists at all.
 //
-// Everything strictly between the two ranges (0x1AF-0x2c0) is ordinary
-// KEY_* space -- multimedia/consumer keys, KEY_OK, KEY_KBD_LCD_MENU*, and so
-// on -- and stays excluded, which is what keeps the keylog closure intact.
-// Do not "simplify" this back to one range or widen it to admit that gap.
+// Everything outside those three blocks -- the digitiser block, the
+// multimedia/consumer KEY_* space between 0x1AF and 0x2c0, KEY_OK,
+// KEY_KBD_LCD_MENU* and so on -- stays excluded, which is what keeps the
+// keylog closure intact.
 func isJoystickButton(c evdev.EvCode) bool {
-	if c >= evdev.BTN_JOYSTICK && c <= evdev.BTN_GAMEPAD+0x7f {
+	switch {
+	case c >= evdev.BTN_JOYSTICK && c <= evdev.BTN_THUMBR:
 		return true
+	case c >= evdev.BTN_DPAD_UP && c <= evdev.BTN_DPAD_RIGHT:
+		return true
+	case c >= evdev.BTN_TRIGGER_HAPPY1 && c <= evdev.BTN_TRIGGER_HAPPY40:
+		return true
+	default:
+		return false
 	}
-	return c >= evdev.BTN_TRIGGER_HAPPY1 && c <= evdev.BTN_TRIGGER_HAPPY40
+}
+
+// isDigitiserButton reports whether c is one of the codes that mark a device
+// as a touchpad, touchscreen or graphics tablet rather than a joystick.
+//
+// This is how the kernel's own joydev driver tells the two apart, and it is
+// needed IN ADDITION to isJoystickButton's narrowed ranges: narrowing alone
+// only stops a digitiser's codes from becoming bindable buttons, it does not
+// stop a device that declares BOTH a joystick button and touch capability
+// from being opened and listed as a joystick in the first place.
+func isDigitiserButton(c evdev.EvCode) bool {
+	switch c {
+	case evdev.BTN_DIGI, evdev.BTN_TOOL_FINGER, evdev.BTN_TOUCH:
+		return true
+	default:
+		return false
+	}
 }
 
 // looksLikeJoystick reports whether the device declares joystick-shaped
 // capabilities: an absolute X axis plus at least one gamepad/joystick
-// button. See the type comment for why this filter is load-bearing: a
-// keyboard declares EV_KEY capability but no ABS_X, and reports no
-// isJoystickButton code, so it can never pass this check.
+// button, and NO digitiser capability. See the type comment for why this
+// filter is load-bearing: a keyboard declares EV_KEY capability but no
+// ABS_X, and reports no isJoystickButton code, so it can never pass this
+// check.
+//
+// The digitiser rejection is the second half of that, and it is not
+// redundant with the button-range narrowing: a touchpad declares ABS_X and
+// BTN_TOUCH, and a composite node could declare a real joystick button
+// alongside touch capability. Rejecting the whole DEVICE -- rather than just
+// declining to map its touch codes -- is what keeps a laptop trackpad out of
+// the device list the capture UI shows, which is the difference between
+// "joystick capture works on a laptop" and "the first thing the user touches
+// gets bound".
 func looksLikeJoystick(d *evdev.InputDevice) bool {
 	hasAbsX := false
 	for _, c := range d.CapableEvents(evdev.EV_ABS) {
@@ -111,12 +156,19 @@ func looksLikeJoystick(d *evdev.InputDevice) bool {
 	if !hasAbsX {
 		return false
 	}
+	// The whole EV_KEY set is scanned before answering: a digitiser code
+	// anywhere disqualifies the device, so returning true on the first
+	// joystick button would let a composite touch device through.
+	hasJoyButton := false
 	for _, c := range d.CapableEvents(evdev.EV_KEY) {
+		if isDigitiserButton(c) {
+			return false
+		}
 		if isJoystickButton(c) {
-			return true
+			hasJoyButton = true
 		}
 	}
-	return false
+	return hasJoyButton
 }
 
 // listEventPaths enumerates /dev/input/eventN nodes.
@@ -243,18 +295,17 @@ func (s *linuxSource) Devices() ([]Device, error) {
 		// See isJoystickButton's doc for the two-range union and why a
 		// single range is wrong.
 		//
-		// The bounds check is genuinely reachable here, unlike a purely
-		// defensive one: isJoystickButton's eligible set spans the standard
-		// joystick/gamepad block (0x120-0x1AF, ~144 codes) UNION the
-		// BTN_TRIGGER_HAPPY overflow block (0x2c0-0x2e7, 40 codes) -- up to
-		// ~184 possible codes -- which is wider than trigger.MaxButton+1
-		// (128) slots. A device declaring capability across enough of both
-		// ranges (a high-button-count HOTAS is exactly the kernel's reason
-		// for the overflow block existing) would overflow without this
-		// guard. On overflow the first 128 eligible codes, in the order
-		// CapableEvents reports them, keep their indices; anything past that
-		// is dropped rather than misindexed -- the break happens before any
-		// write past next==127.
+		// The bounds check is defence in depth, not a reachable path
+		// today: isJoystickButton's eligible set is 31 codes
+		// (BTN_JOYSTICK..BTN_THUMBR) + 4 (the D-pad block) + 40
+		// (BTN_TRIGGER_HAPPY1..40) = 75, comfortably inside
+		// trigger.MaxButton+1 (128) slots. It WAS genuinely reachable while
+		// the first range ran to 0x1AF; it is kept because every caller
+		// building a trigger.Button must clamp, and this is that clamp. On
+		// overflow the first 128 eligible codes, in the order CapableEvents
+		// reports them, keep their indices; anything past that is dropped
+		// rather than misindexed -- the break happens before any write past
+		// next==127.
 		var next trigger.Button
 		for _, c := range dev.CapableEvents(evdev.EV_KEY) {
 			if !isJoystickButton(c) {
