@@ -91,7 +91,10 @@ Never check these in. Never edit by hand. CI re-generates them on every build (`
 | **Phase 1** | `[x]` complete — merged to `main` (PR #11). Scaffold, windowing, guest auth, control gRPC, Comms popout. |
 | **Phase 2** | `[-]` **deferred** — plugin SSO is blocked on `vcs-vanguard-auth-plugin`, which is blocked on access to the Vanguard user-management backend. |
 | **Phase 3** | `[x]` complete 2026-09-15 — Settings + keybinds, global hotkeys, system tray. Automated suite green; **not yet verified on real hardware** — see `docs/superpowers/plans/2026-09-15-phase-3-manual-verification.md`. |
+| **Phase 3.5** | `[x]` complete 2026-09-23 — Joystick/gamepad keybinds: trigger lists, `internal/joystick` polled manager, DirectInput (Windows) and evdev (Linux) backends, refcounted multi-source PTT, Settings Keybinds multi-chip UI. Automated suite green (`go build`/`go vet`/`go test -race` across 13 packages, clean cross-compile for windows/linux/darwin, frontend `vitest`/`tsc`/build); **not yet verified on real hardware** — the Windows and Linux backends have only been cross-compiled, never executed, so the force-feedback-coexistence test (spec risks J1/J2) and identical-device disambiguation (J5) are unconfirmed. See `docs/superpowers/plans/2026-09-18-joystick-manual-verification.md`. |
 | **Phase 4** | **next** — Audio I/O (malgo lifecycle, device picker, VU metering, SFX engine). |
+
+Joystick input is deliberately **Windows + Linux only**. macOS reports "unsupported": Star Citizen has no macOS build, so there is no coexistence problem to solve there, and wiring `IOHIDManager` would require negotiating a second TCC permission (Input Monitoring) distinct from the Accessibility grant the keyboard hotkey path already asks for — not worth the privacy prompt for a platform the target game doesn't run on.
 
 ### Login: guest-only, by decision
 

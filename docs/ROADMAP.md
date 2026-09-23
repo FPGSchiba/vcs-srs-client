@@ -73,9 +73,11 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ## Phase 3.5 — Joystick / gamepad keybinds
 
-**Status:** `[~]` in progress — started 2026-09-18 on `feat/joystick-gamepad-keybinds`.
+**Status:** `[x]` complete 2026-09-23 — Trigger lists (keyboard chord and/or joystick), the polled `internal/joystick` manager, vendored DirectInput backend on Windows, evdev backend on Linux, macOS unsupported stub, refcounted multi-source PTT, and the Settings Keybinds multi-chip UI all landed on `feat/joystick-gamepad-keybinds`.
 
 Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Audio at the user's request, and churning eight phase numbers to record that would cost more than it explains.
+
+**Verification status:** the full automated suite is green — `go build ./...`, `go vet ./...`, `go test -race ./internal/...` (13 packages), clean cross-compilation for windows/amd64, linux/amd64 and darwin/arm64, and the frontend's `vitest`/`tsc --noEmit`/production build (see Task 15's report). **The phase has NOT been verified on real hardware.** This environment is macOS-only, so the Windows DirectInput and Linux evdev backends have never been executed — only compiled. In particular, whether Star Citizen keeps force feedback on a real FFB stick while VCS reads the same device (spec risk J1/J2, the one finding the original spike could not prove) is still unknown, as is whether `BTN_TRIGGER_HAPPY*` buttons register on a high-button-count Linux HOTAS (risk J5 for identical devices is likewise unverified). A concrete manual checklist covering every hardware-dependent item — force-feedback coexistence in both launch orders first, then background input, tray behaviour, hot-plug, config round-trip, capture safety, Linux group permissions, and the macOS no-op path — is written up and waiting for a human to run: [`2026-09-18-joystick-manual-verification.md`](./superpowers/plans/2026-09-18-joystick-manual-verification.md). Treat Phase 3.5 as code-complete, not field-verified, until that checklist has been executed.
 
 **Design doc:** [`2026-09-18-joystick-gamepad-keybinds-design.md`](./superpowers/specs/2026-09-18-joystick-gamepad-keybinds-design.md)
 **Spike:** [`2026-09-18-gamepad-joystick-bindings-spike.md`](./superpowers/specs/2026-09-18-gamepad-joystick-bindings-spike.md)
@@ -91,7 +93,7 @@ Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Au
 
 **Blocking deps:** none
 
-**Hardware gate:** the phase is not done until verified on Windows with Star Citizen running and a force-feedback stick — SC must keep force feedback while VCS reads the same device.
+**Hardware gate:** field verification is not done until run on Windows with Star Citizen running and a force-feedback stick — SC must keep force feedback while VCS reads the same device. See "Verification status" above and the manual checklist it links.
 
 ---
 
