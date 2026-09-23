@@ -29,6 +29,12 @@ const maxPendingEffects = 32
 type effectSlot struct {
 	Label string `toml:"label"`
 	File  string `toml:"file"`
+	// Order fixes EffectIDs' display order. Unmarshalling manifest.toml
+	// into a Go map does not preserve table order, so without this the
+	// only "stable order" EffectIDs could offer was alphabetical --
+	// which does not match the design prototype's TX/RX/Intercom/
+	// Encryption grouping. See manifest.toml's own doc comment.
+	Order int `toml:"order"`
 }
 
 type voice struct {
@@ -84,7 +90,9 @@ func (s *SFX) loadManifest() error {
 	for id := range s.slots {
 		s.order = append(s.order, id)
 	}
-	sort.Strings(s.order)
+	sort.Slice(s.order, func(i, j int) bool {
+		return s.slots[s.order[i]].Order < s.slots[s.order[j]].Order
+	})
 	return nil
 }
 
@@ -109,7 +117,10 @@ func (s *SFX) loadSamples() {
 	}
 }
 
-// EffectIDs returns the manifest slots in stable order, for the UI.
+// EffectIDs returns the manifest slots in stable order (manifest.toml's
+// `order` field), for the UI -- the backend's single source of truth for
+// both the slot id SET and their display order, so a frontend Radio
+// Effects panel has no reason to keep its own copy of either.
 func (s *SFX) EffectIDs() []string {
 	return append([]string(nil), s.order...)
 }

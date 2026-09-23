@@ -294,6 +294,24 @@ func (m *Manager) PlayEffect(id string) {
 	}
 }
 
+// EffectIDs returns the SFX manifest's slot ids, in the same stable display
+// order SFX.EffectIDs() does -- the backend's single source of truth for
+// the Radio Effects panel's row set, so the frontend has no reason to keep
+// its own copy of the manifest. m.sfx is immutable after NewManager (see
+// Manager's own field-ownership doc), so this needs no lock.
+func (m *Manager) EffectIDs() []string { return m.sfx.EffectIDs() }
+
+// EffectLabel returns one effect slot's display label (or the id itself if
+// unknown), delegating to the same SFX manifest PreviewEffect/PlayEffect
+// already use for the sample lookup.
+func (m *Manager) EffectLabel(id string) string { return m.sfx.Label(id) }
+
+// EffectAvailable reports whether a decoded sample currently backs the
+// given effect slot -- false for every slot until the SFX sample pack
+// lands (internal/audio/assets/README.md), which is the true, unfaked
+// answer today.
+func (m *Manager) EffectAvailable(id string) bool { return m.sfx.Available(id) }
+
 // State returns a snapshot of the manager's health.
 func (m *Manager) State() State {
 	m.mu.Lock()

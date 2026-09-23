@@ -2,31 +2,45 @@
 # `file` is the DEFAULT sample name; a user's config.toml may override it.
 # A slot whose file is absent from this directory plays silence and logs
 # once -- never a crash, never a dialog.
+#
+# `order` is the ONLY thing that fixes display order: unmarshalling this
+# file into a Go map (sfx.go's loadManifest) does not preserve table order,
+# and SFX.EffectIDs() is the single source of truth the frontend's Radio
+# Effects panel sorts by -- see EffectIDs' doc. Keep these numbers
+# contiguous and matching the order the rows should render in; a gap or
+# duplicate is harmless (Go's sort is stable either way) but pointless.
 
 [tx_start]
 label = "TX Start"
 file = "transmit_open.wav"
+order = 1
 
 [tx_end]
 label = "TX End"
 file = "transmit_close.wav"
+order = 2
 
 [rx_start]
 label = "RX Start"
 file = "receive_open.wav"
+order = 3
 
 [rx_end]
 label = "RX End"
 file = "receive_close.wav"
+order = 4
 
 [intercom_start]
 label = "Intercom Start"
 file = "intercom_open.wav"
+order = 5
 
 [intercom_end]
 label = "Intercom End"
 file = "intercom_close.wav"
+order = 6
 
 [encryption_beep]
 label = "Encryption Beep"
 file = "crypto_handshake.wav"
+order = 7

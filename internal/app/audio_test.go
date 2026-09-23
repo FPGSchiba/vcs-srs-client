@@ -220,3 +220,109 @@ func TestPreviewEffectReachesTheManager(t *testing.T) {
 		t.Fatalf("PreviewEffect: %v", err)
 	}
 }
+
+// TestGetSettingsSourcesEffectCatalogFromTheManifest is Fix 3's guard: with
+// a wired Manager, GetSettings().Audio.Effects must carry every manifest
+// slot -- not just ones a user has customised -- with real labels and
+// availability read off the SFX manifest, rather than the id-echoing,
+// always-false placeholders a frontend used to have to fill in itself with
+// a hardcoded second copy of the same data.
+func TestGetSettingsSourcesEffectCatalogFromTheManifest(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+
+	got := a.GetSettings().Audio.Effects
+	wantIDs := m.EffectIDs()
+	if len(got) != len(wantIDs) {
+		t.Fatalf("Effects has %d entries, want %d (one per manifest slot): %+v", len(got), len(wantIDs), got)
+	}
+	for _, id := range wantIDs {
+		e, ok := got[id]
+		if !ok {
+			t.Fatalf("Effects missing manifest slot %q: %+v", id, got)
+		}
+		if e.Label == "" || e.Label == id {
+			t.Errorf("Effects[%q].Label = %q, want the manifest's real display label, not the id itself", id, e.Label)
+		}
+		if wantLabel := m.EffectLabel(id); e.Label != wantLabel {
+			t.Errorf("Effects[%q].Label = %q, want %q (Manager.EffectLabel)", id, e.Label, wantLabel)
+		}
+		// No sample pack is vendored in this repo/test environment, so
+		// every slot is genuinely unavailable -- this is the same fake
+		// backend real production code runs against until the pack lands.
+		if e.Available {
+			t.Errorf("Effects[%q].Available = true, want false (no SFX sample pack in this test env)", id)
+		}
+	}
+}
+
+// TestGetSettingsFallsBackToPlaceholderEffectsWithoutABackend proves the
+// nil-Manager path (audio backend unavailable, or a test that never wires
+// one) still returns a well-formed Effects map -- id as label, Available
+// false -- rather than panicking on a nil Manager.
+func TestGetSettingsFallsBackToPlaceholderEffectsWithoutABackend(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	got := a.GetSettings().Audio.Effects
+	if len(got) != 0 {
+		t.Fatalf("Effects = %+v, want empty: config.Audio.Effects starts nil and there is no Manager to enumerate the manifest", got)
+	}
+}
+
+// TestConfigAudioFromDTODropsUntouchedDefaultEffects proves SetSettings
+// does not turn config.Audio.Effects permanently non-nil just because
+// GetSettings now always returns the full manifest catalog (the fix
+// above): a round-tripped settings save where every slot is still at its
+// untouched default (Enabled:false, File:"") must persist NO effects at
+// all, preserving the "nil until customised" invariant config.Audio.
+// Effects' own doc requires (avoids TOML table noise on every user's
+// config.toml).
+func TestConfigAudioFromDTODropsUntouchedDefaultEffects(t *testing.T) {
+	dto := AudioSettingsDTO{
+		Effects: map[string]AudioEffectDTO{
+			"tx_start": {Enabled: false, File: "", Label: "TX Start", Available: false},
+			"tx_end":   {Enabled: false, File: "", Label: "TX End", Available: false},
+			"rx_start": {Enabled: true, File: "custom.wav", Label: "RX Start", Available: false},
+		},
+	}
+	got := configAudioFromDTO(dto).Effects
+	if len(got) != 1 {
+		t.Fatalf("Effects = %+v, want exactly the one customised slot", got)
+	}
+	if e, ok := got["rx_start"]; !ok || e.Enabled != true || e.File != "custom.wav" {
+		t.Fatalf("Effects[\"rx_start\"] = %+v, ok=%v, want {Enabled:true File:custom.wav}", got["rx_start"], ok)
+	}
+	if _, ok := got["tx_start"]; ok {
+		t.Errorf("Effects retained untouched-default slot %q -- config.Audio.Effects must stay nil/sparse until a user customises a slot", "tx_start")
+	}
+}
+
+// TestGetAudioEffectPresetsReturnsBuiltInDSPPresets proves the preset
+// bindings are available even with no audio backend wired (they are
+// static data, unlike GetAudioDevices/GetAudioState) and match
+// internal/audio's own labeled preset tables -- the backend source of
+// truth a frontend used to duplicate as a hardcoded second copy.
+func TestGetAudioEffectPresetsReturnsBuiltInDSPPresets(t *testing.T) {
+	a, _, _ := newTestApp(t) // no SetAudioBackend call
+
+	got := a.GetAudioEffectPresets()
+	wantVoice := audio.VoicePresetOptions()
+	if len(got.Voice) != len(wantVoice) {
+		t.Fatalf("Voice presets = %+v, want %d entries matching audio.VoicePresetOptions()", got.Voice, len(wantVoice))
+	}
+	for i, p := range wantVoice {
+		if got.Voice[i].Value != p.ID || got.Voice[i].Label != p.Label {
+			t.Errorf("Voice[%d] = %+v, want {%q %q}", i, got.Voice[i], p.ID, p.Label)
+		}
+	}
+	wantClipping := audio.ClippingPresetOptions()
+	if len(got.Clipping) != len(wantClipping) {
+		t.Fatalf("Clipping presets = %+v, want %d entries matching audio.ClippingPresetOptions()", got.Clipping, len(wantClipping))
+	}
+	for i, p := range wantClipping {
+		if got.Clipping[i].Value != p.ID || got.Clipping[i].Label != p.Label {
+			t.Errorf("Clipping[%d] = %+v, want {%q %q}", i, got.Clipping[i], p.ID, p.Label)
+		}
+	}
+}

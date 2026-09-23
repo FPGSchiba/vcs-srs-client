@@ -199,15 +199,21 @@ func (a *App) GetJoystickState() JoystickStateDTO {
 func (a *App) GetSettings() SettingsDTO {
 	sb := a.settings
 	sb.mu.Lock()
-	defer sb.mu.Unlock()
 	g := sb.cfg.General
+	ac := sb.cfg.Audio
+	m := sb.audio
+	sb.mu.Unlock()
+	// audioSettingsDTO calls Manager accessors (EffectIDs/EffectLabel/
+	// EffectAvailable) below -- deliberately AFTER releasing sb.mu, per
+	// audioManager's own doc: never call a Manager method while holding
+	// sb.mu, Manager has its own independent locking.
 	return SettingsDTO{
 		StartMinimized:       g.StartMinimized,
 		MinimizeToTray:       g.MinimizeToTray,
 		ShowTransmitterName:  g.ShowTransmitterName,
 		PlayConnectionSounds: g.PlayConnectionSounds,
 		RadioSwitchAsPTT:     g.RadioSwitchAsPTT,
-		Audio:                audioSettingsDTO(sb.cfg.Audio),
+		Audio:                audioSettingsDTO(ac, m),
 	}
 }
 

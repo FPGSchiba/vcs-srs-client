@@ -31,14 +31,65 @@ var clippingDrives = map[string]float32{
 	"soft_limit":          1.8,
 }
 
-// VoicePresets returns the selectable voice-effect ids, "" meaning off.
-func VoicePresets() []string {
-	return []string{"", "comms_filter_low", "comms_filter_mid", "comms_filter_high"}
+// EffectPreset is one selectable DSP preset for the frontend's Radio
+// Effects dropdowns: a stable id (as persisted in
+// config.Audio.VoiceEffect/ClippingEffect, and passed to NewEffect) paired
+// with its display label. This is the backend's single source of truth
+// for both -- a frontend that hardcodes its own copy of these names is
+// exactly the duplication this type exists to remove.
+type EffectPreset struct {
+	ID    string
+	Label string
 }
 
-// ClippingPresets returns the selectable clipping ids, "" meaning off.
+// voicePresetOptions/clippingPresetOptions pair each preset id with its
+// display label, in UI order. Kept separate from voiceBands/clippingDrives
+// (rather than adding a Label field to bandSpec/the drive map) because the
+// "" ("Off") entry has no bandSpec or drive of its own.
+var voicePresetOptions = []EffectPreset{
+	{"", "Off"},
+	{"comms_filter_low", "Comms Filter (Low)"},
+	{"comms_filter_mid", "Comms Filter (Mid)"},
+	{"comms_filter_high", "Comms Filter (High)"},
+}
+
+var clippingPresetOptions = []EffectPreset{
+	{"", "Off"},
+	{"soft_limit", "Soft Limit"},
+	{"saturated_overdrive", "Saturated Overdrive"},
+}
+
+// VoicePresetOptions returns the selectable voice-effect presets with
+// display labels, in UI order.
+func VoicePresetOptions() []EffectPreset {
+	return append([]EffectPreset(nil), voicePresetOptions...)
+}
+
+// ClippingPresetOptions returns the selectable clipping presets with
+// display labels, in UI order.
+func ClippingPresetOptions() []EffectPreset {
+	return append([]EffectPreset(nil), clippingPresetOptions...)
+}
+
+// VoicePresets returns the selectable voice-effect ids, "" meaning off. The
+// unlabeled counterpart of VoicePresetOptions, kept for callers (and
+// existing tests) that only need the ids.
+func VoicePresets() []string {
+	return presetIDs(voicePresetOptions)
+}
+
+// ClippingPresets returns the selectable clipping ids, "" meaning off. The
+// unlabeled counterpart of ClippingPresetOptions.
 func ClippingPresets() []string {
-	return []string{"", "soft_limit", "saturated_overdrive"}
+	return presetIDs(clippingPresetOptions)
+}
+
+func presetIDs(presets []EffectPreset) []string {
+	ids := make([]string, len(presets))
+	for i, p := range presets {
+		ids[i] = p.ID
+	}
+	return ids
 }
 
 // NewEffect builds the chain. An unrecognised id degrades to passthrough

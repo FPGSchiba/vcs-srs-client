@@ -5,9 +5,18 @@ import "testing"
 func TestSFXReportsManifestSlots(t *testing.T) {
 	s := NewSFX()
 	ids := s.EffectIDs()
+	// Exact order, not just membership: manifest.toml's `order` field is
+	// what makes this the design prototype's TX/RX/Intercom/Encryption
+	// grouping rather than the alphabetical order a bare map iteration
+	// would produce -- see manifest.toml's and EffectIDs' own doc comments.
 	want := []string{"tx_start", "tx_end", "rx_start", "rx_end", "intercom_start", "intercom_end", "encryption_beep"}
 	if len(ids) != len(want) {
 		t.Fatalf("EffectIDs() = %v, want %d slots", ids, len(want))
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("EffectIDs() = %v, want %v in that exact order", ids, want)
+		}
 	}
 }
 

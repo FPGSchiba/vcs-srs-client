@@ -133,16 +133,20 @@ type AudioLevelsDTO struct {
 	Notification float32 `json:"notification"`
 }
 
-// AudioEffectDTO is one Radio Effects slot's persisted state.
+// AudioEffectDTO is one Radio Effects slot's persisted state, merged with
+// its live manifest metadata: Enabled/File round-trip through
+// config.Audio.Effects (SetSettings persists them), while Label/Available
+// are read fresh off audio.Manager's SFX manifest on every GetSettings
+// call (audioSettingsDTO) and are NOT persisted -- config.Audio.Effects has
+// no fields for them, and configAudioFromDTO ignores them on the way back.
 //
-// Label and Available cannot be sourced from internal/audio's *SFX manifest
-// from this package today -- Manager exposes no accessor for it, and this
-// task is scoped to internal/app only. Available is unconditionally false
-// as a result, which happens to also be the true answer right now: the SFX
-// sample pack (internal/audio/assets/README.md) has not landed, so every
-// slot is silent regardless of id. A future task that touches
-// internal/audio should add a Manager accessor and thread the real label
-// and per-slot availability through here instead of this placeholder.
+// Available is false for every slot today: the SFX sample pack
+// (internal/audio/assets/README.md) has not landed, so nothing is
+// available regardless of id -- that is the true, unfaked answer, not a
+// placeholder. When no audio backend is wired at all (main.go's
+// NewMalgoBackend failed, or a test never called SetAudioBackend), Label
+// falls back to the slot id and Available stays false, since there is no
+// Manager to ask.
 type AudioEffectDTO struct {
 	Enabled bool   `json:"enabled"`
 	File    string `json:"file"`
@@ -151,6 +155,26 @@ type AudioEffectDTO struct {
 	// until the sample pack lands. The UI greys the row rather than
 	// presenting a PREVIEW button that does nothing.
 	Available bool `json:"available"`
+}
+
+// AudioEffectPresetDTO is one selectable DSP preset (a Voice Effect or
+// Clipping Effect dropdown option), mirroring audio.EffectPreset. Value is
+// what SetSettings persists into AudioSettingsDTO.VoiceEffect/
+// ClippingEffect; Label is display-only.
+type AudioEffectPresetDTO struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+// AudioEffectPresetsDTO carries both built-in DSP preset lists in one
+// binding call, mirroring AudioDevicesDTO's inputs/outputs pairing for the
+// same reason: the frontend's Radio Effects screen always wants both
+// together. This is static data (internal/audio's voiceBands/
+// clippingDrives), not per-Manager state, so it is available even when no
+// audio backend is wired -- unlike GetAudioDevices/GetAudioState.
+type AudioEffectPresetsDTO struct {
+	Voice    []AudioEffectPresetDTO `json:"voice"`
+	Clipping []AudioEffectPresetDTO `json:"clipping"`
 }
 
 // AudioDeviceDTO is one selectable endpoint.

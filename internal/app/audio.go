@@ -13,6 +13,7 @@ package app
 
 import (
 	"errors"
+	"sort"
 	"strings"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
@@ -125,6 +126,26 @@ func (a *App) PreviewEffect(id string) error {
 	return nil
 }
 
+// GetAudioEffectPresets returns the built-in DSP preset lists (voice
+// bandpass + clipping), for the Radio Effects screen's two preset
+// dropdowns. Static data straight off internal/audio's own tables --
+// available even when no audio backend is wired, unlike GetAudioDevices/
+// GetAudioState.
+func (a *App) GetAudioEffectPresets() AudioEffectPresetsDTO {
+	return AudioEffectPresetsDTO{
+		Voice:    audioEffectPresetDTOs(audio.VoicePresetOptions()),
+		Clipping: audioEffectPresetDTOs(audio.ClippingPresetOptions()),
+	}
+}
+
+func audioEffectPresetDTOs(presets []audio.EffectPreset) []AudioEffectPresetDTO {
+	out := make([]AudioEffectPresetDTO, 0, len(presets))
+	for _, p := range presets {
+		out = append(out, AudioEffectPresetDTO{Value: p.ID, Label: p.Label})
+	}
+	return out
+}
+
 // audioManager reads the wired manager (nil if none), under sb.mu, mirroring
 // how GetJoystickState reads sb.joy. Never call a Manager method while
 // holding sb.mu -- Manager has its own independent locking.
@@ -210,16 +231,41 @@ func isRadioPTTAction(actionID string) bool {
 }
 
 // audioSettingsDTO converts config's raw persisted Audio into the
-// binding-facing DTO. See AudioEffectDTO's doc for why Label/Available are
-// placeholders today.
-func audioSettingsDTO(ac config.Audio) AudioSettingsDTO {
-	effects := make(map[string]AudioEffectDTO, len(ac.Effects))
-	for id, e := range ac.Effects {
+// binding-facing DTO, merging in each effect slot's live Label/Available
+// from m's SFX manifest (see AudioEffectDTO's doc). m may be nil (no audio
+// backend wired) -- the row SET then comes from whatever ac.Effects
+// already has (nothing, until Manager can enumerate the manifest), and
+// every Label falls back to the id with Available false, matching the
+// honest "nothing confirmed" answer used elsewhere in this package.
+func audioSettingsDTO(ac config.Audio, m *audio.Manager) AudioSettingsDTO {
+	var ids []string
+	if m != nil {
+		// The manifest is the canonical id SET and display order (see
+		// SFX.EffectIDs' doc) -- every slot renders, customised or not,
+		// which is exactly what the frontend's Radio Effects panel needs
+		// and could not get from ac.Effects alone (nil until a user
+		// touches a slot, see config.Audio.Effects' doc).
+		ids = m.EffectIDs()
+	} else {
+		ids = make([]string, 0, len(ac.Effects))
+		for id := range ac.Effects {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+	}
+	effects := make(map[string]AudioEffectDTO, len(ids))
+	for _, id := range ids {
+		e := ac.Effects[id] // zero value (Enabled:false, File:"") if never customised
+		label, available := id, false
+		if m != nil {
+			label = m.EffectLabel(id)
+			available = m.EffectAvailable(id)
+		}
 		effects[id] = AudioEffectDTO{
 			Enabled:   e.Enabled,
 			File:      e.File,
-			Label:     id,
-			Available: false,
+			Label:     label,
+			Available: available,
 		}
 	}
 	return AudioSettingsDTO{
@@ -250,13 +296,27 @@ func audioSettingsDTO(ac config.Audio) AudioSettingsDTO {
 }
 
 // configAudioFromDTO is audioSettingsDTO's inverse, used by SetSettings.
+//
+// It only round-trips Enabled/File -- Label/Available have no field on
+// config.AudioEffect (audioSettingsDTO reads them fresh off the Manager on
+// every GetSettings, they are never persisted) -- and it drops any slot
+// that is still at its untouched default (Enabled:false, File:""). Without
+// that filter, audioSettingsDTO now populating every manifest slot on
+// GetSettings (not just customised ones) would round-trip straight back
+// through here on the very next SetSettings -- e.g. the user just toggles
+// AGC, but the full settings struct, effects included, saves with it -- and
+// turn config.Audio.Effects permanently non-nil for every user, defeating
+// the whole reason it starts nil (see that field's doc).
 func configAudioFromDTO(dto AudioSettingsDTO) config.Audio {
 	var effects map[string]config.AudioEffect
-	if len(dto.Effects) > 0 {
-		effects = make(map[string]config.AudioEffect, len(dto.Effects))
-		for id, e := range dto.Effects {
-			effects[id] = config.AudioEffect{Enabled: e.Enabled, File: e.File}
+	for id, e := range dto.Effects {
+		if !e.Enabled && e.File == "" {
+			continue
 		}
+		if effects == nil {
+			effects = make(map[string]config.AudioEffect, len(dto.Effects))
+		}
+		effects[id] = config.AudioEffect{Enabled: e.Enabled, File: e.File}
 	}
 	return config.Audio{
 		InputDevice:       dto.InputDevice,
