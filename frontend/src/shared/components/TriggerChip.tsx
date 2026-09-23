@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { useSettings } from "../store/settings";
 import type { Trigger } from "../store/settings";
 
 interface TriggerChipProps {
@@ -20,13 +21,36 @@ interface TriggerChipProps {
  * A trigger whose device is absent renders MUTED rather than disappearing:
  * the binding is still valid and starts working again the moment the stick is
  * plugged back in, so hiding it would misrepresent the saved configuration.
- * The `disconnected` class lands on both the outer chip (so the title -- the
- * only place the device name is spelled out -- and the muted styling sit on
- * the same element) and the inner `.kbd` (so the token drives the label's own
- * dimmed color).
+ * The `disconnected` class lands on both the outer chip (which carries the
+ * title -- the only place the device name is spelled out) and the inner
+ * `.kbd`, which is where the muted styling itself lives (`.kbd.disconnected`).
+ *
+ * CONNECTIVITY COMES FROM THE LIVE DEVICE LIST, NOT FROM `trigger.connected`.
+ * The latter is computed once, inside Go's GetKeybinds(), and every
+ * keybinds:changed emitter is a keybind MUTATION -- none of them fires on a
+ * hot-plug. Trusting it meant a chip bound to an absent stick stayed muted and
+ * tooltipped "not connected" for the rest of the session after the stick was
+ * plugged back in, while the binding was live and firing; and a chip claimed
+ * connected forever after an unplug. `joystick:state` is the event that does
+ * move, so the chip reads the device list it carries.
+ *
+ * `joystick.supported` is the discriminator between "the list is empty
+ * because nothing is attached" and "the list is empty because nothing has
+ * answered yet". It is false in exactly two cases -- before the first
+ * getJoystickState()/joystick:state lands, and on a platform with no backend
+ * at all (macOS) -- and in both there IS no live list to consult, so the
+ * backend's render-time `trigger.connected` stands. Getting this backwards
+ * would mute every joystick chip on first paint. Once `supported` is true the
+ * list is authoritative, including when it is empty.
  */
 export function TriggerChip({ trigger, onRemove }: TriggerChipProps) {
-  const disconnected = trigger.kind === "joy" && !trigger.connected;
+  const joystick = useSettings((s) => s.joystick);
+
+  const disconnected =
+    trigger.kind === "joy" &&
+    (joystick.supported
+      ? !joystick.devices.some((d) => d.id === trigger.device)
+      : !trigger.connected);
 
   const title =
     trigger.kind === "joy"

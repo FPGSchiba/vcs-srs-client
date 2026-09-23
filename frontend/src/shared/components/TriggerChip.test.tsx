@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { TriggerChip } from "./TriggerChip";
+import { useSettings } from "../store/settings";
 import type { Trigger } from "../store/settings";
 
 const keyTrigger: Trigger = {
@@ -63,5 +64,71 @@ describe("TriggerChip", () => {
     render(<TriggerChip trigger={joyTrigger} onRemove={onRemove} />);
     fireEvent.click(screen.getByText("Btn 12"));
     expect(onRemove).not.toHaveBeenCalled();
+  });
+});
+
+describe("TriggerChip connectivity against the live device list", () => {
+  // `trigger.connected` is computed once, inside GetKeybinds(), and every
+  // keybinds:changed emitter is a keybind MUTATION -- none of them fires on a
+  // hot-plug. So a chip bound to an absent stick stayed muted for the rest of
+  // the session after the stick was plugged back in, while the binding was
+  // live and firing, and the reverse on unplug. The live device list from
+  // joystick:state is the only thing that moves, so the chip reads that.
+  const hydrate = (devices: { id: string; name: string }[]) =>
+    useSettings.setState({ joystick: { supported: true, error: "", devices } });
+
+  beforeEach(() => {
+    useSettings.setState({ joystick: { supported: false, error: "", devices: [] } });
+  });
+
+  it("mutes a chip whose device is absent from the live list", () => {
+    hydrate([{ id: "other-stick", name: "Other" }]);
+    // `connected: true` is the STALE baked-in value -- the live list must win.
+    render(<TriggerChip trigger={joyTrigger} onRemove={vi.fn()} />);
+    expect(screen.getByTitle(/not connected/i).className).toContain("disconnected");
+  });
+
+  it("un-mutes the same chip once the device appears in the list (hot-plug)", () => {
+    hydrate([]);
+    const { rerender } = render(
+      <TriggerChip trigger={{ ...joyTrigger, connected: false }} onRemove={vi.fn()} />,
+    );
+    expect(screen.getByTitle(/not connected/i)).toBeInTheDocument();
+
+    hydrate([{ id: "stick-c3", name: "VPC MongoosT-50CM3" }]);
+    rerender(<TriggerChip trigger={{ ...joyTrigger, connected: false }} onRemove={vi.fn()} />);
+
+    expect(screen.queryByTitle(/not connected/i)).not.toBeInTheDocument();
+    expect(screen.getByTitle("VPC MongoosT-50CM3").className).not.toContain("disconnected");
+  });
+
+  it("mutes the same chip again when the device leaves the list (unplug)", () => {
+    hydrate([{ id: "stick-c3", name: "VPC MongoosT-50CM3" }]);
+    const { rerender } = render(<TriggerChip trigger={joyTrigger} onRemove={vi.fn()} />);
+    expect(screen.queryByTitle(/not connected/i)).not.toBeInTheDocument();
+
+    hydrate([]);
+    rerender(<TriggerChip trigger={joyTrigger} onRemove={vi.fn()} />);
+
+    expect(screen.getByTitle(/not connected/i).className).toContain("disconnected");
+  });
+
+  it("falls back to trigger.connected while the device list is unhydrated", () => {
+    // supported:false is both the pre-hydration default AND macOS's real
+    // answer. Either way there is no live device list to consult, so the
+    // backend's render-time value stands -- otherwise every joystick chip
+    // would flash muted on first paint.
+    render(<TriggerChip trigger={joyTrigger} onRemove={vi.fn()} />);
+    expect(screen.queryByTitle(/not connected/i)).not.toBeInTheDocument();
+
+    render(<TriggerChip trigger={{ ...joyTrigger, connected: false }} onRemove={vi.fn()} />);
+    expect(screen.getByTitle(/not connected/i)).toBeInTheDocument();
+  });
+
+  it("never mutes a keyboard trigger, whatever the device list says", () => {
+    hydrate([]);
+    render(<TriggerChip trigger={keyTrigger} onRemove={vi.fn()} />);
+    expect(screen.queryByTitle(/not connected/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Ctrl")).toBeInTheDocument();
   });
 });
