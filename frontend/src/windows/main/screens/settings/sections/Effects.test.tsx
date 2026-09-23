@@ -79,8 +79,17 @@ describe("Radio Effects settings", () => {
 
   it("renders a row per manifest slot plus the two preset rows", () => {
     render(<Effects />);
-    expect(screen.getByText("TX Start")).toBeInTheDocument();
-    expect(screen.getByText("Encryption Beep")).toBeInTheDocument();
+    // Assert all seven manifest slots, not just the first/last -- the
+    // component renders generically over effect_order.map, so a mutation
+    // special-casing just the endpoints would otherwise slip through.
+    const wantLabels = [
+      "TX Start", "TX End", "RX Start", "RX End",
+      "Intercom Start", "Intercom End", "Encryption Beep",
+    ];
+    for (const label of wantLabels) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    expect(screen.getAllByRole("button", { name: /^preview /i })).toHaveLength(wantLabels.length);
     expect(screen.getByLabelText(/voice effect/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/clipping effect/i)).toBeInTheDocument();
   });

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
+	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 )
 
@@ -277,6 +278,64 @@ func TestGetSettingsFallsBackToPlaceholderEffectsWithoutABackend(t *testing.T) {
 	got := a.GetSettings().Audio.Effects
 	if len(got) != 0 {
 		t.Fatalf("Effects = %+v, want empty: config.Audio.Effects starts nil and there is no Manager to enumerate the manifest", got)
+	}
+}
+
+// TestGetSettingsPreservesPersistedEffectsWithoutABackend is the non-empty
+// sibling of TestGetSettingsFallsBackToPlaceholderEffectsWithoutABackend: a
+// user who previously customised effect slots, then launches on a machine
+// where the audio backend failed to construct (no sound card, denied
+// permission, driver problem), must still see their persisted Enabled/File
+// values -- not a wiped-out placeholder -- and must see them in a
+// deterministic (sorted) order, since audioSettingsDTO's nil-Manager branch
+// builds the id SET straight off a Go map.
+func TestGetSettingsPreservesPersistedEffectsWithoutABackend(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	a.settings.mu.Lock()
+	a.settings.cfg.Audio.Effects = map[string]config.AudioEffect{
+		"zzz_last":  {Enabled: true, File: "z.wav"},
+		"aaa_first": {Enabled: false, File: ""},
+		"mmm_mid":   {Enabled: true, File: "m.wav"},
+	}
+	a.settings.mu.Unlock()
+
+	dto := a.GetSettings().Audio
+
+	wantOrder := []string{"aaa_first", "mmm_mid", "zzz_last"}
+	if len(dto.EffectOrder) != len(wantOrder) {
+		t.Fatalf("EffectOrder = %v, want %v", dto.EffectOrder, wantOrder)
+	}
+	for i, id := range wantOrder {
+		if dto.EffectOrder[i] != id {
+			t.Fatalf("EffectOrder = %v, want %v in that exact sorted order", dto.EffectOrder, wantOrder)
+		}
+	}
+
+	wantEffects := map[string]config.AudioEffect{
+		"zzz_last":  {Enabled: true, File: "z.wav"},
+		"aaa_first": {Enabled: false, File: ""},
+		"mmm_mid":   {Enabled: true, File: "m.wav"},
+	}
+	for id, want := range wantEffects {
+		e, ok := dto.Effects[id]
+		if !ok {
+			t.Fatalf("Effects missing persisted slot %q: %+v", id, dto.Effects)
+		}
+		if e.Enabled != want.Enabled {
+			t.Errorf("Effects[%q].Enabled = %v, want %v (persisted value must survive the no-Manager fallback)", id, e.Enabled, want.Enabled)
+		}
+		if e.File != want.File {
+			t.Errorf("Effects[%q].File = %q, want %q (persisted value must survive the no-Manager fallback)", id, e.File, want.File)
+		}
+		// No Manager wired -- the honest "nothing confirmed" answer applies
+		// to every slot, persisted or not.
+		if e.Available {
+			t.Errorf("Effects[%q].Available = true, want false (no Manager wired)", id)
+		}
+		if e.Label != id {
+			t.Errorf("Effects[%q].Label = %q, want %q (falls back to the id itself with no Manager to supply a display label)", id, e.Label, id)
+		}
 	}
 }
 
