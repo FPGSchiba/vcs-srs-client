@@ -273,3 +273,43 @@ func TestLoadDoesNotWarnForAJoystickTriggerAlongsideAChord(t *testing.T) {
 		t.Fatalf("Get = %+v, want all three triggers", got)
 	}
 }
+
+// TestLoadWarnsAboutAnUnparseableTrigger pins the other destructive drop in
+// Load, for the same reason as the dropped-chord warning above.
+//
+// A hand-edited `"global.ptt" = ["joy:stick-c3:btn3", "joy:stick-c3:btn!2"]`
+// with a typo in the second entry loads as the first alone, and the very next
+// Save rewrites that line without the typo'd entry -- the user's binding gone
+// from config.toml for good, with no trace anywhere of what was rejected or
+// why. The two paths destroy config by exactly the same mechanism, so they
+// must be equally diagnosable.
+func TestLoadWarnsAboutAnUnparseableTrigger(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"joy:stick-c3:btn3", "joy:stick-c3:btn!2"},
+	})
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("Load dropped an unparseable trigger silently; the next Save rewrites " +
+			"the user's file without it and nothing anywhere records why")
+	}
+	if !strings.Contains(out, "global.ptt") {
+		t.Errorf("warning does not name the action: %q", out)
+	}
+	if !strings.Contains(out, "joy:stick-c3:btn!2") {
+		t.Errorf("warning does not name the rejected entry: %q", out)
+	}
+	// The surviving entry must not be reported as dropped.
+	if strings.Contains(out, "dropped=joy:stick-c3:btn3 ") {
+		t.Errorf("warning blames the surviving entry: %q", out)
+	}
+	if got, _ := s.Get("global.ptt"); len(got) != 1 {
+		t.Fatalf("Get = %+v, want the one parseable trigger kept", got)
+	}
+}

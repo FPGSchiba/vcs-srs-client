@@ -63,7 +63,9 @@ func isPerRadioID(id string) bool {
 // Load replaces the store contents from a raw map (as read from config.toml).
 // Entries that will not parse are dropped INDIVIDUALLY, keeping the rest of
 // that action's list; entries whose action ID is unrecognised are preserved
-// verbatim for the next Snapshot.
+// verbatim for the next Snapshot. An unparseable entry gets a Warn naming the
+// action and the rejected string -- like the dropped-chord Warn below, the
+// drop is destructive on the next Save, so it must be diagnosable.
 //
 // An action holds AT MOST ONE keyboard trigger (see Add's doc comment for
 // why). Load is the boundary where a hand-edited or version-skewed
@@ -97,7 +99,14 @@ func (s *Store) Load(raw map[string][]string) {
 		for _, str := range list {
 			t, err := trigger.Parse(str)
 			if err != nil {
-				continue // malformed trigger: drop this entry, keep the rest
+				// Malformed trigger: drop this entry, keep the rest.
+				// Logged for the same reason as the dropped-chord Warn
+				// below -- the next Save erases the entry from the user's
+				// config.toml, so the destruction has to be diagnosable.
+				slog.Default().Warn("keybind config has an entry that could not be parsed; "+
+					"it is ignored and dropped from the file on the next save",
+					"action", id, "dropped", str, "err", err)
+				continue
 			}
 			if t.Kind == trigger.KindKey {
 				if keptKey != "" {
