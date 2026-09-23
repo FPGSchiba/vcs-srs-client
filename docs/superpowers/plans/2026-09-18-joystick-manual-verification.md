@@ -66,12 +66,52 @@ evidence the cooperative level is not what it should be.
 
 ## 6. Hot-plug and unplug
 
+The rows below are split deliberately. The SLOW path (unplug, watch the chip
+go muted, plug back in) is the one that always worked, and a checklist that
+only asks for it steers the verifier straight past the bug I1 described: a
+device that re-enumerates INSIDE one 3s rediscover window used to have its
+dead handle reused permanently, with the UI still reporting it connected and
+every binding on it silently dead until the app was restarted. Both fast rows
+have to be run, and neither is optional because "the slow one passed".
+
+### Slow re-enumeration (longer than one rediscover)
+
 - [ ] With VCS running, unplug the stick mid-PTT. Confirm transmission stops
       and nothing latches open.
 - [ ] Plug it back in. Confirm the binding works again within ~3 seconds,
       with no restart.
 - [ ] Confirm the chip showed as muted/"not connected" while unplugged and
       did not disappear.
+
+### Fast re-enumeration (inside one rediscover) — the I1 path
+
+- [ ] Unplug the stick and plug it back in **within two seconds**, without
+      waiting for the chip to go muted. Press the bound button. Confirm it
+      **still fires**.
+- [ ] Repeat with the app left running for a minute afterwards, pressing the
+      button every so often. Confirm it never goes quietly dead.
+- [ ] On Linux, confirm the log contains a `joystick device re-enumerated;
+      reopening it` line naming the device, with a DIFFERENT `now=` path from
+      `was=` if the kernel moved the node. Its absence on a replug that the
+      binding survived is fine (same node, live handle); its absence on a
+      replug the binding did NOT survive is the bug back.
+
+### Suspend and resume — the same path, without touching the cable
+
+- [ ] With the stick attached and VCS running, suspend the machine (lid
+      close / sleep), wait a few seconds, resume.
+- [ ] Press the bound button. Confirm it **still fires**, with no restart.
+      The kernel tears down and re-adds USB well inside the 3s ticker, so
+      this is the fast re-enumeration above arriving without a human pulling
+      anything.
+- [ ] Confirm the chip is rendered connected only while the binding actually
+      works. A connected chip over a dead binding is the exact symptom to
+      report.
+- [ ] On Windows, if the binding is dead after a resume, check the log for
+      `joystick device has not responded for the recreate threshold` — it
+      should appear within ~1s of the failure and be followed by the device
+      working again after the next rediscover. Silence there means the drop
+      never fired.
 
 ## 7. Identical devices (only if two of the same model are available)
 

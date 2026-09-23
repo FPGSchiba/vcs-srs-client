@@ -30,12 +30,26 @@ import (
 // keylog.
 type linuxSource struct {
 	mu      sync.Mutex
+	log     *slog.Logger
 	devices map[trigger.DeviceID]*linuxDevice
+	// pollFail rate-limits the per-device Poll failure log. Without it the
+	// only signal that a device had stopped answering was the ABSENCE of
+	// presses, which is indistinguishable from "the user is not pressing
+	// anything". See pollhealth.go.
+	pollFail *pollFailures
 }
 
 type linuxDevice struct {
 	dev  *evdev.InputDevice
 	info Device
+	// path is the /dev/input/eventN node this handle was opened on.
+	//
+	// It is NOT part of the DeviceID, deliberately: the ID is derived from
+	// the /dev/input/by-id name (or the product name) precisely so that it
+	// survives a replug and the user's bindings with it. But that same
+	// path-independence is what let a STALE HANDLE survive a replug too --
+	// see Devices() for the reuse rule this field exists to enforce.
+	path string
 	// hatAxes maps an ABS_HAT* axis code to its hat index (0..HatCount-1).
 	hatAxes map[evdev.EvCode]int
 	// buttons maps an EV_KEY code to our button index, in the order the
@@ -64,8 +78,15 @@ const inputDevDir = "/dev/input"
 // {Supported:true, Error:"...input group..."} and the banner fires, while
 // ErrUnsupported (macOS, source_other.go) still reads as
 // {Supported:false, Error:""}. That split is spec sections 8 and 11.
-func NewOSSource(*slog.Logger) (Source, error) {
-	return &linuxSource{devices: map[trigger.DeviceID]*linuxDevice{}}, nil
+func NewOSSource(log *slog.Logger) (Source, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &linuxSource{
+		log:      log,
+		devices:  map[trigger.DeviceID]*linuxDevice{},
+		pollFail: newPollFailures(),
+	}, nil
 }
 
 // isJoystickButton reports whether c is one of the EV_KEY codes the Linux
@@ -294,13 +315,40 @@ func (s *linuxSource) Devices() ([]Device, error) {
 		seen[id] = true
 
 		if existing, ok := s.devices[id]; ok {
-			dev.Close()
-			out = append(out, existing.info)
-			continue
+			if reuseCachedHandle(existing.path, p, handleAlive(existing.dev)) {
+				dev.Close()
+				out = append(out, existing.info)
+				continue
+			}
+			// The cached handle is stale: the device re-enumerated inside
+			// one rediscover window. Close it and fall through to rebuild
+			// from the handle we just opened.
+			//
+			// This is the I1 fix, and the failure it closes is not exotic --
+			// a laptop suspend/resume tears down and re-adds USB well inside
+			// the 3s ticker, as does a cable reseat or a hub glitch. The old
+			// code took the cache hit unconditionally, closed the FRESH
+			// handle and kept the dead one; because stableID is
+			// path-independent by design the id was identical, so seen[id]
+			// stayed true on every subsequent pass and the staleness sweep
+			// below never dropped it. Poll() then got ENODEV from every
+			// ioctl and swallowed it, so pollErr and discoverErr stayed nil,
+			// Devices() kept reporting the stick attached, TriggerChip kept
+			// rendering its chips CONNECTED, and every binding on it was
+			// silently dead until the app was restarted. That directly
+			// contradicts the self-healing property spec section 7 claims
+			// for the polling design.
+			s.log.Info("joystick device re-enumerated; reopening it",
+				"device", string(id), "name", existing.info.Name,
+				"was", existing.path, "now", p)
+			existing.dev.Close()
+			delete(s.devices, id)
+			s.pollFail.forget(id)
 		}
 
 		ld := &linuxDevice{
 			dev:     dev,
+			path:    p,
 			hatAxes: map[evdev.EvCode]int{},
 			buttons: map[evdev.EvCode]trigger.Button{},
 		}
@@ -363,6 +411,7 @@ func (s *linuxSource) Devices() ([]Device, error) {
 		if !seen[id] {
 			d.dev.Close()
 			delete(s.devices, id)
+			s.pollFail.forget(id)
 		}
 	}
 
@@ -370,6 +419,28 @@ func (s *linuxSource) Devices() ([]Device, error) {
 		return nil, permErr
 	}
 	return out, nil
+}
+
+// handleAlive reports whether a cached evdev handle still refers to a live
+// device.
+//
+// EVIOCGNAME is the cheapest ioctl that touches the device: go-evdev's Name()
+// issues it, and on a file descriptor whose device the kernel has already
+// unbound it fails with ENODEV rather than returning stale data. One ioctl
+// per open device per 3s rediscover is negligible next to the 100 polls a
+// second the same handles already serve.
+//
+// This is the SECOND half of the reuse rule, and it is not redundant with the
+// path comparison in Devices(). The path check catches the common
+// re-enumeration, where the node moves (event5 -> event14) because lower
+// numbers are still in use; it cannot catch a re-enumeration that lands back
+// on the SAME node number, which is exactly what happens on a suspend/resume
+// of a machine with one stick attached and nothing else competing for the
+// number. Only an ioctl against the retained fd distinguishes that case.
+// Together the two cover every re-enumeration; either alone leaves a hole.
+func handleAlive(d *evdev.InputDevice) bool {
+	_, err := d.Name()
+	return err == nil
 }
 
 // permissionError names the remedy. /dev/input/event* is typically
@@ -390,6 +461,7 @@ func (s *linuxSource) Poll() (State, error) {
 	for id, d := range s.devices {
 		keys, err := d.dev.State(evdev.EV_KEY)
 		if err != nil {
+			s.notePollFailure(id, d, "State", err)
 			continue
 		}
 		for code, pressed := range keys {
@@ -404,6 +476,7 @@ func (s *linuxSource) Poll() (State, error) {
 		}
 
 		if len(d.hatAxes) == 0 {
+			s.pollFail.ok(id)
 			continue
 		}
 		// AbsInfos reads every absolute axis the device supports in one
@@ -412,6 +485,7 @@ func (s *linuxSource) Poll() (State, error) {
 		// than once per hat.
 		absInfos, err := d.dev.AbsInfos()
 		if err != nil {
+			s.notePollFailure(id, d, "AbsInfos", err)
 			continue
 		}
 		// The X and Y axes of one hat MUST be read together, not mapped
@@ -445,8 +519,34 @@ func (s *linuxSource) Poll() (State, error) {
 				st.Held[trigger.JoyButton{Device: id, Button: trigger.HatButton(hat, dir)}] = struct{}{}
 			}
 		}
+		s.pollFail.ok(id)
 	}
 	return st, nil
+}
+
+// notePollFailure logs one per-device poll failure, at most once per
+// transition. Caller holds s.mu (Poll holds it across the whole sample).
+//
+// Warn, not Error: the rest of the joystick subsystem keeps working, and the
+// next rediscover revalidates this handle and reopens the device (see
+// handleAlive). The line exists because without it the ONLY symptom of a
+// device that has stopped answering is the absence of presses, which is
+// indistinguishable from a user who is not pressing anything -- the silence,
+// not the staleness, is what made I1 undiagnosable.
+//
+// Naming the device and the node here is the same disclosure Poll's own
+// caller already makes when it logs which button fired an action: this
+// backend can only ever see joystick hardware (see isJoystickButton), which
+// is what permits it. No key identity can reach this line.
+func (s *linuxSource) notePollFailure(id trigger.DeviceID, d *linuxDevice, call string, err error) {
+	logIt, n := s.pollFail.note(id, call)
+	if !logIt {
+		return // already reported; do not write 100 lines a second
+	}
+	s.log.Warn("joystick device stopped responding; it will be revalidated and "+
+		"reopened on the next rediscover",
+		"device", string(id), "name", d.info.Name, "path", d.path,
+		"call", call, "consecutive", n, "err", err)
 }
 
 // isHatXAxis reports whether an ABS_HAT* code is the X half of its hat pair.
@@ -466,5 +566,6 @@ func (s *linuxSource) Close() {
 	for id, d := range s.devices {
 		d.dev.Close()
 		delete(s.devices, id)
+		s.pollFail.forget(id)
 	}
 }

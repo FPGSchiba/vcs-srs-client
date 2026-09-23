@@ -49,6 +49,11 @@ type winSource struct {
 	// failed" are indistinguishable from the outside -- which is exactly the
 	// question hardware verification has to answer.
 	openFailed map[trigger.DeviceID]string
+
+	// pollFail counts CONSECUTIVE per-device Poll failures and rate-limits
+	// their logging. Both halves are load-bearing; see pollhealth.go and
+	// winPollFailuresBeforeRecreate.
+	pollFail *pollFailures
 }
 
 type winDevice struct {
@@ -99,6 +104,7 @@ func NewOSSource(log *slog.Logger) (Source, error) {
 		helper:     helper,
 		devices:    map[trigger.DeviceID]*winDevice{},
 		openFailed: map[trigger.DeviceID]string{},
+		pollFail:   newPollFailures(),
 	}
 	return s, nil
 }
@@ -192,6 +198,18 @@ func (s *winSource) Devices() ([]Device, error) {
 		id := sanitiseID(guidString(inst.GuidInstance))
 		seen[id] = true
 		if existing, ok := s.devices[id]; ok {
+			// Reusing the cached object here is safe ONLY because Poll
+			// evicts a dead one: DirectInput has no cheap liveness query
+			// distinct from GetDeviceState, which Poll already issues every
+			// 10ms, so the liveness check lives there rather than being
+			// duplicated into this 3s path. A device object that started
+			// returning DIERR_UNPLUGGED is dropped after
+			// winPollFailuresBeforeRecreate consecutive failures (~1s), so
+			// by the time this enumeration runs it is no longer in the map
+			// and falls through to a genuine re-create below. Without that
+			// eviction this short-circuit kept a dead object forever --
+			// instance GUIDs are stable across a replug BY DESIGN, so
+			// seen[id] stayed true and the sweep at the bottom never fired.
 			out = append(out, existing.info)
 			return di8.ENUM_CONTINUE
 		}
@@ -220,6 +238,7 @@ func (s *winSource) Devices() ([]Device, error) {
 		// Opened cleanly: forget any past failure so a LATER one is logged
 		// again rather than suppressed as a repeat.
 		delete(s.openFailed, id)
+		s.pollFail.forget(id)
 		info := Device{ID: id, Name: name}
 		s.devices[id] = &winDevice{dev: dev, info: info}
 		out = append(out, info)
@@ -235,6 +254,7 @@ func (s *winSource) Devices() ([]Device, error) {
 			d.dev.Unacquire()
 			d.dev.Release()
 			delete(s.devices, id)
+			s.pollFail.forget(id)
 		}
 	}
 	// A device that is unplugged while failing must forget its failure too,
@@ -266,6 +286,47 @@ func (s *winSource) noteOpenFailure(id trigger.DeviceID, name, call string, err 
 		"device", string(id), "name", name, "call", call, "err", err)
 }
 
+// notePollFailure handles one per-device poll failure: it logs it at most
+// once per transition, retries the acquire, and -- once the failures have run
+// long enough to rule out a transient -- DROPS the device object so the next
+// Devices() re-creates it. Caller holds s.mu (Poll holds it across the whole
+// sample); deleting from s.devices while Poll ranges over it is defined.
+//
+// The retry and the drop are two different repairs for two different
+// failures, and shipping only the first was I1's Windows half:
+//
+//   - DIERR_INPUTLOST is what a cooperative non-exclusive device reports
+//     after a focus change. Acquire() fixes it on the very next tick, which
+//     is why it is called first and unconditionally.
+//   - DIERR_UNPLUGGED is not repairable at all. The COM object is dead for
+//     good; re-acquiring it fails forever. The old code retried anyway,
+//     swallowed the error, and left the object in s.devices -- where
+//     Devices()'s cache hit kept it, kept listing the device as attached,
+//     and kept TriggerChip rendering its chips connected while every binding
+//     on the stick was silently dead for the session.
+//
+// Nothing distinguishes the two from a single failed call, so they are
+// separated by DURATION instead: see winPollFailuresBeforeRecreate.
+func (s *winSource) notePollFailure(id trigger.DeviceID, d *winDevice, call string, err error) {
+	logIt, n := s.pollFail.note(id, call)
+	if logIt {
+		s.log.Warn("joystick device stopped responding; retrying the acquire",
+			"device", string(id), "name", d.info.Name, "call", call, "err", err)
+	}
+	if n < winPollFailuresBeforeRecreate {
+		_ = d.dev.Acquire()
+		return
+	}
+	s.log.Warn("joystick device has not responded for the recreate threshold; "+
+		"dropping it so the next rediscover re-creates it",
+		"device", string(id), "name", d.info.Name, "call", call,
+		"consecutive", n, "err", err)
+	d.dev.Unacquire()
+	d.dev.Release()
+	delete(s.devices, id)
+	s.pollFail.forget(id)
+}
+
 func (s *winSource) Poll() (State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -285,9 +346,10 @@ func (s *winSource) Poll() (State, error) {
 		// instead risk a polling-model device silently never updating.
 		_ = d.dev.Poll()
 		if err := d.dev.GetDeviceState(&raw); err != nil {
-			_ = d.dev.Acquire()
+			s.notePollFailure(id, d, "GetDeviceState", err)
 			continue
 		}
+		s.pollFail.ok(id)
 
 		for i, pressed := range raw.Buttons {
 			if pressed&0x80 == 0 {
@@ -323,6 +385,7 @@ func (s *winSource) Close() {
 		d.dev.Unacquire()
 		d.dev.Release()
 		delete(s.devices, id)
+		s.pollFail.forget(id)
 	}
 	if s.di != nil {
 		s.di.Release()
