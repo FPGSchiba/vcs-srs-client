@@ -97,10 +97,19 @@ export interface AudioDevices {
 /** Audio subsystem health, mirroring Go's `app.AudioStateDTO`. */
 export interface AudioState {
   running: boolean;
+  starting: boolean;
   input_error: string;
   output_error: string;
   overruns: number;
   underruns: number;
+  /** The device ids actually in use, which is not necessarily what the
+   * settings asked for -- see the `_substituted` pair. */
+  input_device: string;
+  output_device: string;
+  /** The id above differs from the configured one because the saved device
+   * no longer enumerates and the engine fell back to the OS default. */
+  input_substituted: boolean;
+  output_substituted: boolean;
 }
 
 /** The ~20Hz meter reading, mirroring Go's `audio.VU` as carried on the
@@ -223,7 +232,18 @@ export const useSettings = create<SettingsState>((set) => ({
   // empty errors is the state that claims nothing the backend hasn't
   // confirmed, rather than optimistically claiming health up front the way
   // `hotkeys.registered` does for a subsystem that mostly works.
-  audioState: { running: false, input_error: "", output_error: "", overruns: 0, underruns: 0 },
+  audioState: {
+    running: false,
+    starting: false,
+    input_error: "",
+    output_error: "",
+    overruns: 0,
+    underruns: 0,
+    input_device: "",
+    output_device: "",
+    input_substituted: false,
+    output_substituted: false,
+  },
   // Empty until getAudioEffectPresets() resolves. Effects.tsx renders no
   // preset options in that brief window rather than a stale/guessed list.
   audioEffectPresets: { voice: [], clipping: [] },

@@ -195,12 +195,14 @@ func TestGetAudioDevicesAndStateReflectTheManager(t *testing.T) {
 	t.Cleanup(m.Stop)
 	a.SetAudioBackend(m)
 
+	// Each list is the System Default sentinel followed by the real
+	// enumeration -- see AudioDeviceDTOs, and the dedicated test below.
 	devs := a.GetAudioDevices()
-	if len(devs.Inputs) != 1 || devs.Inputs[0].ID != "mic-1" {
-		t.Errorf("GetAudioDevices().Inputs = %+v, want the one enumerated mic", devs.Inputs)
+	if len(devs.Inputs) != 2 || devs.Inputs[1].ID != "mic-1" {
+		t.Errorf("GetAudioDevices().Inputs = %+v, want the sentinel plus the one enumerated mic", devs.Inputs)
 	}
-	if len(devs.Outputs) != 1 || devs.Outputs[0].ID != "out-1" {
-		t.Errorf("GetAudioDevices().Outputs = %+v, want the one enumerated output", devs.Outputs)
+	if len(devs.Outputs) != 2 || devs.Outputs[1].ID != "out-1" {
+		t.Errorf("GetAudioDevices().Outputs = %+v, want the sentinel plus the one enumerated output", devs.Outputs)
 	}
 
 	st := a.GetAudioState()
@@ -393,5 +395,149 @@ func TestGetAudioEffectPresetsReturnsBuiltInDSPPresets(t *testing.T) {
 		if got.Clipping[i].Value != p.ID || got.Clipping[i].Label != p.Label {
 			t.Errorf("Clipping[%d] = %+v, want {%q %q}", i, got.Clipping[i], p.ID, p.Label)
 		}
+	}
+}
+
+// TestGetAudioDevicesLeadsWithSystemDefault is the C2 regression.
+//
+// Nothing anywhere synthesised the {ID: "", Name: "System Default"} entry:
+// internal/audio enumerates only real endpoints and GetAudioDevices mapped
+// that list 1:1, so the empty id that backend.go documents as a first-class
+// value, config.Default() persists and resolveDevice honours was
+// UNREACHABLE from the UI. The persisted default of "" also matched no
+// rendered <option>, so both device selects mounted on a value no option
+// carried, and a user who picked a real device could never go back to
+// following the OS.
+//
+// It looked covered because the frontend test fabricated the entry in its
+// own fixture and then asserted it rendered -- a test that invented the
+// contract it was checking. The assertion belongs here, at the only place
+// that can actually produce it.
+func TestGetAudioDevicesLeadsWithSystemDefault(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	b := audio.NewFakeBackend()
+	b.SetDevices(
+		[]audio.DeviceInfo{{ID: "mic-1", Name: "Test Mic", IsDefault: true}},
+		[]audio.DeviceInfo{{ID: "out-1", Name: "Test Out", IsDefault: true}},
+	)
+	m := audio.NewManager(b, audio.ManagerOptions{PollInterval: time.Hour, VUInterval: time.Hour})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(m.Stop)
+	a.SetAudioBackend(m)
+
+	devs := a.GetAudioDevices()
+	for _, tc := range []struct {
+		dir  string
+		list []AudioDeviceDTO
+		real string
+	}{
+		{"Inputs", devs.Inputs, "mic-1"},
+		{"Outputs", devs.Outputs, "out-1"},
+	} {
+		if len(tc.list) == 0 {
+			t.Fatalf("GetAudioDevices().%s is empty", tc.dir)
+		}
+		first := tc.list[0]
+		if first.ID != "" || first.Name != SystemDefaultDeviceName {
+			t.Errorf("GetAudioDevices().%s[0] = %+v, want the {ID:\"\", Name:%q} sentinel first", tc.dir, first, SystemDefaultDeviceName)
+		}
+		// The sentinel must be ADDED, not substituted for a real device.
+		found := false
+		for _, d := range tc.list[1:] {
+			if d.ID == tc.real {
+				found = true
+			}
+			if d.ID == "" {
+				t.Errorf("GetAudioDevices().%s contains a second empty-id entry: %+v", tc.dir, tc.list)
+			}
+		}
+		if !found {
+			t.Errorf("GetAudioDevices().%s = %+v, lost the real device %q behind the sentinel", tc.dir, tc.list, tc.real)
+		}
+	}
+}
+
+// TestGetAudioStateCarriesDeviceAndSubstitution is the I3 regression:
+// audio.State carries InputDevice/OutputDevice/InputSubstituted/
+// OutputSubstituted -- InputSubstituted exists SPECIFICALLY because Task
+// 10's review found spec 13's "records the substitution in State"
+// unimplemented -- and AudioStateDTO dropped every one of them,
+// reintroducing the same gap one layer up. Without these fields a user
+// silently pushed onto a different microphone has no way to find out.
+func TestGetAudioStateCarriesDeviceAndSubstitution(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	b := audio.NewFakeBackend()
+	b.SetDevices(
+		[]audio.DeviceInfo{{ID: "mic-1", Name: "Test Mic", IsDefault: true}},
+		[]audio.DeviceInfo{{ID: "out-1", Name: "Test Out", IsDefault: true}},
+	)
+	m := audio.NewManager(b, audio.ManagerOptions{PollInterval: time.Hour, VUInterval: time.Hour})
+	// A saved device that no longer enumerates: Manager falls back to the
+	// default and records the substitution.
+	m.SetConfig(audio.Config{InputDevice: "mic-unplugged"})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(m.Stop)
+	a.SetAudioBackend(m)
+
+	st := a.GetAudioState()
+	if st.InputDevice != "mic-1" {
+		t.Errorf("GetAudioState().InputDevice = %q, want the substituted default %q: %+v", st.InputDevice, "mic-1", st)
+	}
+	if !st.InputSubstituted {
+		t.Errorf("GetAudioState().InputSubstituted = false, want true: the fallback must be visible to the user: %+v", st)
+	}
+	if st.OutputDevice != "out-1" {
+		t.Errorf("GetAudioState().OutputDevice = %q, want %q: %+v", st.OutputDevice, "out-1", st)
+	}
+	if st.OutputSubstituted {
+		t.Errorf("GetAudioState().OutputSubstituted = true, want false: the output was never substituted: %+v", st)
+	}
+}
+
+// TestSetAudioBackendAppliesThePersistedDeviceBeforeStart is the other half
+// of C1: main.go used to call am.Start() BEFORE gui.SetAudioBackend(am), and
+// SetAudioBackend is the only thing that pushes the user's persisted audio
+// settings into a freshly constructed Manager. Start therefore resolved both
+// directions against NewManager's built-in default Config, whose
+// InputDevice/OutputDevice are "" -- so a saved device selection was ignored
+// on every single launch.
+//
+// This pins the contract main.go's ordering now depends on: after
+// SetAudioBackend and before any SetSettings call, the manager must already
+// be carrying the persisted device ids.
+func TestSetAudioBackendAppliesThePersistedDeviceBeforeStart(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	// A device selection saved in an earlier session.
+	s := a.GetSettings()
+	s.Audio.InputDevice = "mic-2"
+	s.Audio.OutputDevice = "out-2"
+	if err := a.SetSettings(s); err != nil {
+		t.Fatalf("SetSettings: %v", err)
+	}
+
+	b := audio.NewFakeBackend()
+	b.SetDevices(
+		[]audio.DeviceInfo{{ID: "mic-1", Name: "Default Mic", IsDefault: true}, {ID: "mic-2", Name: "Saved Mic"}},
+		[]audio.DeviceInfo{{ID: "out-1", Name: "Default Out", IsDefault: true}, {ID: "out-2", Name: "Saved Out"}},
+	)
+	m := audio.NewManager(b, audio.ManagerOptions{PollInterval: time.Hour, VUInterval: time.Hour})
+	t.Cleanup(m.Stop)
+
+	// main.go's order: configure, THEN start.
+	a.SetAudioBackend(m)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if calls := b.CaptureOpens(); len(calls) != 1 || calls[0] != "mic-2" {
+		t.Errorf("backend.OpenCapture calls = %v, want the persisted %q -- the saved selection never reached the manager before Start", calls, "mic-2")
+	}
+	if calls := b.PlaybackOpens(); len(calls) != 1 || calls[0] != "out-2" {
+		t.Errorf("backend.OpenPlayback calls = %v, want the persisted %q", calls, "out-2")
 	}
 }

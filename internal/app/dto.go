@@ -219,12 +219,33 @@ type AudioDevicesDTO struct {
 //     both, and any message here is specific to that one direction (e.g.
 //     "device busy", a saved device that vanished and had no fallback).
 //     THIS is the "your microphone failed to open" case.
+//
+// InputDevice/OutputDevice/InputSubstituted/OutputSubstituted/Starting are
+// carried straight off audio.State. They were dropped here once already, and
+// that dropped exactly the thing Task 10's review had just been fixed to
+// produce: spec 13's "record the substitution in State". A saved device that
+// no longer enumerates, or an open device that vanished mid-session, is
+// silently replaced by the default -- InputSubstituted is the ONLY signal
+// that the user is not on the device they picked, and InputDevice is the only
+// way to say which one they are on instead. Without both, the poll loop's
+// fallback and the device picker's reopen are invisible to the user.
 type AudioStateDTO struct {
 	Running     bool   `json:"running"`
+	Starting    bool   `json:"starting"`
 	InputError  string `json:"input_error"`
 	OutputError string `json:"output_error"`
 	Overruns    uint64 `json:"overruns"`
 	Underruns   uint64 `json:"underruns"`
+	// InputDevice/OutputDevice are the device ids actually in use, which is
+	// not necessarily what the settings asked for -- see the Substituted
+	// pair.
+	InputDevice  string `json:"input_device"`
+	OutputDevice string `json:"output_device"`
+	// InputSubstituted/OutputSubstituted report that the id above differs
+	// from the configured one because resolveDevice fell back to the
+	// default.
+	InputSubstituted  bool `json:"input_substituted"`
+	OutputSubstituted bool `json:"output_substituted"`
 }
 
 // CaptureDTO is a raw {code, modifiers} capture from the frontend's keydown

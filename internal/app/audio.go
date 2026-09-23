@@ -46,20 +46,49 @@ func (a *App) SetAudioBackend(m *audio.Manager) {
 	}
 }
 
+// SystemDefaultDeviceName is the display name of the empty-id "follow the
+// system default" entry -- see AudioDeviceDTOs.
+const SystemDefaultDeviceName = "System Default"
+
 // GetAudioDevices reports the most recently enumerated input/output
-// devices. Empty (never nil) lists when no backend is wired.
+// devices, each list led by the System Default sentinel. Empty (never nil)
+// lists when no backend is wired -- the honest "there is no audio at all"
+// answer, which is not the same thing as "you may follow the OS default".
 func (a *App) GetAudioDevices() AudioDevicesDTO {
 	m := a.audioManager()
 	if m == nil {
 		return AudioDevicesDTO{Inputs: []AudioDeviceDTO{}, Outputs: []AudioDeviceDTO{}}
 	}
 	inputs, outputs := m.Devices()
-	return AudioDevicesDTO{Inputs: audioDeviceDTOs(inputs), Outputs: audioDeviceDTOs(outputs)}
+	return AudioDevicesDTO{Inputs: AudioDeviceDTOs(inputs), Outputs: AudioDeviceDTOs(outputs)}
 }
 
-func audioDeviceDTOs(devs []audio.DeviceInfo) []AudioDeviceDTO {
-	out := make([]AudioDeviceDTO, 0, len(devs))
+// AudioDeviceDTOs converts an engine device list into the wire-facing shape,
+// PREPENDING the {ID: "", Name: "System Default"} entry.
+//
+// That entry is synthesised here, in the one converter every consumer goes
+// through (GetAudioDevices and main.go's audio:devices_changed emission),
+// rather than in any single screen. Nothing used to synthesise it ANYWHERE:
+// internal/audio enumerates only real endpoints, so the empty id that
+// backend.go documents as a first-class value, config.Default() persists,
+// and resolveDevice honours was simply unreachable from the UI. Worse, the
+// persisted default of "" then matched no rendered <option>, so both device
+// selects mounted on a value no option carried and a user who once picked a
+// real device could never get back to following the OS.
+//
+// IsDefault stays false on the sentinel on purpose: it means "this endpoint
+// is currently the OS default", which is a property of a real device in the
+// list below it. The sentinel's meaning is "whichever that turns out to be,
+// now and later".
+func AudioDeviceDTOs(devs []audio.DeviceInfo) []AudioDeviceDTO {
+	out := make([]AudioDeviceDTO, 0, len(devs)+1)
+	out = append(out, AudioDeviceDTO{ID: "", Name: SystemDefaultDeviceName})
 	for _, d := range devs {
+		if d.ID == "" {
+			// A backend that somehow enumerated an empty id would
+			// otherwise produce a duplicate sentinel.
+			continue
+		}
 		out = append(out, AudioDeviceDTO{ID: d.ID, Name: d.Name, IsDefault: d.IsDefault})
 	}
 	return out
@@ -74,12 +103,26 @@ func (a *App) GetAudioState() AudioStateDTO {
 		return AudioStateDTO{}
 	}
 	st := m.State()
+	return AudioStateDTOFrom(st)
+}
+
+// AudioStateDTOFrom is the one audio.State -> AudioStateDTO conversion,
+// shared by GetAudioState and main.go's OnState emitter so the two can never
+// drift into reporting different subsets of the same snapshot -- which is
+// exactly how the substitution and device fields came to be dropped on the
+// event path while State carried them.
+func AudioStateDTOFrom(st audio.State) AudioStateDTO {
 	return AudioStateDTO{
-		Running:     st.Running,
-		InputError:  st.InputError,
-		OutputError: st.OutputError,
-		Overruns:    st.Overruns,
-		Underruns:   st.Underruns,
+		Running:           st.Running,
+		Starting:          st.Starting,
+		InputError:        st.InputError,
+		OutputError:       st.OutputError,
+		Overruns:          st.Overruns,
+		Underruns:         st.Underruns,
+		InputDevice:       st.InputDevice,
+		OutputDevice:      st.OutputDevice,
+		InputSubstituted:  st.InputSubstituted,
+		OutputSubstituted: st.OutputSubstituted,
 	}
 }
 
