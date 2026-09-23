@@ -1,12 +1,88 @@
 import { create } from "zustand";
 import type { Capture } from "../components/KeyChip";
 
+/** The four mixer bus positions, normalized 0-1, mirroring Go's
+ * `app.AudioLevelsDTO`. `Audio.tsx` is the one place that converts this to
+ * the `Knob` component's 0-100 presentation scale -- see its doc comment. */
+export interface AudioLevels {
+  master: number;
+  voice: number;
+  sfx: number;
+  notification: number;
+}
+
+/** One Radio Effects slot's persisted state, mirroring Go's
+ * `app.AudioEffectDTO`. `available` is a placeholder today -- see the Go
+ * type's doc for why. */
+export interface AudioEffect {
+  enabled: boolean;
+  file: string;
+  label: string;
+  available: boolean;
+}
+
+/** Persisted audio configuration, mirroring Go's `app.AudioSettingsDTO`
+ * field-for-field. `levels` and `vox_threshold` are normalized 0-1 here --
+ * see `AudioLevels`'s doc for where the presentation-scale conversion
+ * lives. */
+export interface AudioSettings {
+  input_device: string;
+  output_device: string;
+  input_device_name: string;
+  output_device_name: string;
+  mic_passthrough: boolean;
+  agc: boolean;
+  noise_suppression: boolean;
+  vox: boolean;
+  vox_threshold: number;
+  vox_min_length_ms: number;
+  vox_hang_ms: number;
+  vox_noise_cancel: boolean;
+  ptt_start_delay_ms: number;
+  ptt_release_delay_ms: number;
+  voice_effect: string;
+  clipping_effect: string;
+  levels: AudioLevels;
+  effects: Record<string, AudioEffect>;
+}
+
 export interface Settings {
   start_minimized: boolean;
   minimize_to_tray: boolean;
   show_transmitter_name: boolean;
   play_connection_sounds: boolean;
   radio_switch_as_ptt: boolean;
+  audio: AudioSettings;
+}
+
+/** One selectable audio endpoint, mirroring Go's `app.AudioDeviceDTO`. */
+export interface AudioDevice {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+/** The full enumerated device list for both directions, mirroring Go's
+ * `app.AudioDevicesDTO`. */
+export interface AudioDevices {
+  inputs: AudioDevice[];
+  outputs: AudioDevice[];
+}
+
+/** Audio subsystem health, mirroring Go's `app.AudioStateDTO`. */
+export interface AudioState {
+  running: boolean;
+  input_error: string;
+  output_error: string;
+  overruns: number;
+  underruns: number;
+}
+
+/** The ~20Hz meter reading, mirroring Go's `audio.VU` as carried on the
+ * `audio:vu` event. Normalized 0-1 per bus, like `VU`'s `level` prop. */
+export interface AudioVU {
+  input: number;
+  output: number;
 }
 
 /** One way to activate an action. Mirrors Go's `app.TriggerDTO`.
@@ -95,15 +171,34 @@ interface SettingsState {
   keybinds: Keybind[];
   hotkeys: HotkeyState;
   joystick: JoystickState;
+  audioDevices: AudioDevices;
+  audioState: AudioState;
+  vu: AudioVU;
+  micMuted: boolean;
   setSettings: (s: Settings) => void;
   setKeybinds: (k: Keybind[]) => void;
   setHotkeyState: (h: HotkeyState) => void;
   setJoystickState: (j: JoystickState) => void;
+  setAudioDevices: (d: AudioDevices) => void;
+  setAudioState: (a: AudioState) => void;
+  setVU: (v: AudioVU) => void;
+  setMicMuted: (m: boolean) => void;
 }
 
 export const useSettings = create<SettingsState>((set) => ({
   settings: null,
   keybinds: [],
+  audioDevices: { inputs: [], outputs: [] },
+  // Honest, not optimistic, matching the reasoning already written into the
+  // `joystick` default above: whether the audio subsystem is actually
+  // running is unknown until `GetAudioState()` resolves (SetAudioBackend may
+  // never have been called -- see audio.go's doc), so `running: false` and
+  // empty errors is the state that claims nothing the backend hasn't
+  // confirmed, rather than optimistically claiming health up front the way
+  // `hotkeys.registered` does for a subsystem that mostly works.
+  audioState: { running: false, input_error: "", output_error: "", overruns: 0, underruns: 0 },
+  vu: { input: 0, output: 0 },
+  micMuted: false,
   // `registered: true` is the optimistic default on purpose. The Keybinds
   // section renders "Global hotkeys unavailable" whenever this is false, so
   // defaulting to false flashed that banner on every first paint, before
@@ -123,4 +218,8 @@ export const useSettings = create<SettingsState>((set) => ({
   setKeybinds: (keybinds) => set({ keybinds }),
   setHotkeyState: (hotkeys) => set({ hotkeys }),
   setJoystickState: (joystick) => set({ joystick }),
+  setAudioDevices: (audioDevices) => set({ audioDevices }),
+  setAudioState: (audioState) => set({ audioState }),
+  setVU: (vu) => set({ vu }),
+  setMicMuted: (micMuted) => set({ micMuted }),
 }));

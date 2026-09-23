@@ -7,6 +7,8 @@ import type {
   Capture,
   SetKeybindResult,
   JoystickState,
+  AudioDevices,
+  AudioState,
 } from "../store/settings";
 
 export interface RadioDTO {
@@ -87,4 +89,10 @@ export const api = {
   // Re-applies the OS registrations and emits hotkeys:state if it flipped.
   recheckHotkeyPermission: (): Promise<void> =>
     App.RecheckHotkeyPermission() as Promise<void>,
+  getAudioDevices: (): Promise<AudioDevices> =>
+    App.GetAudioDevices() as Promise<AudioDevices>,
+  getAudioState: (): Promise<AudioState> => App.GetAudioState() as Promise<AudioState>,
+  startMicTest: (): Promise<void> => App.StartMicTest() as Promise<void>,
+  stopMicTest: (): Promise<void> => App.StopMicTest() as Promise<void>,
+  previewEffect: (id: string): Promise<void> => App.PreviewEffect(id) as Promise<void>,
 };

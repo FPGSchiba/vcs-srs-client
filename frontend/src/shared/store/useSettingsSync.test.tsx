@@ -5,6 +5,8 @@ const getSettings = vi.fn();
 const getKeybinds = vi.fn();
 const getHotkeyState = vi.fn();
 const getJoystickState = vi.fn();
+const getAudioDevices = vi.fn();
+const getAudioState = vi.fn();
 
 vi.mock("../api/client", () => ({
   api: {
@@ -12,6 +14,8 @@ vi.mock("../api/client", () => ({
     getKeybinds: () => getKeybinds(),
     getHotkeyState: () => getHotkeyState(),
     getJoystickState: () => getJoystickState(),
+    getAudioDevices: () => getAudioDevices(),
+    getAudioState: () => getAudioState(),
   },
 }));
 
@@ -54,6 +58,10 @@ describe("useSettingsSync", () => {
     getKeybinds.mockReset().mockResolvedValue([]);
     getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
     getJoystickState.mockReset().mockResolvedValue({ supported: false, error: "", devices: [] });
+    getAudioDevices.mockReset().mockResolvedValue({ inputs: [], outputs: [] });
+    getAudioState.mockReset().mockResolvedValue({
+      running: false, input_error: "", output_error: "", overruns: 0, underruns: 0,
+    });
     useSettings.setState({
       settings: null, keybinds: [],
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
