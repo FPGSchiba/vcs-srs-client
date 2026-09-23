@@ -195,6 +195,7 @@ Expected: all three green.
   - `func NewRing(capacityFrames int) *Ring`
   - `func (r *Ring) Write(src []float32) (dropped int)`
   - `func (r *Ring) Read(dst []float32) (n int)`
+  - `func (r *Ring) Drain()`
   - `func (r *Ring) Dropped() uint64`, `func (r *Ring) Underruns() uint64`
 
 - [ ] **Step 1: Write `format.go`**
@@ -250,15 +251,57 @@ func TestRingWriteReadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRingOverflowDropsOldestAndCounts(t *testing.T) {
+// TestRingOverflowDropsNewestAndCounts covers overflow under the strict
+// index-ownership design: a Write that doesn't fit is refused whole (not
+// partially copied), the dropped counter advances by the refused amount,
+// and -- the assertion that would have caught the old lost-update/torn-
+// buffer bug -- the frames already buffered before the overflowing Write
+// come back out fully intact.
+func TestRingOverflowDropsNewestAndCounts(t *testing.T) {
 	r := NewRing(2)
-	frame := make([]float32, FrameSamples)
-	r.Write(frame)
-	r.Write(frame)
-	// Third frame overflows a 2-frame ring.
-	r.Write(frame)
-	if r.Dropped() == 0 {
-		t.Fatal("Dropped() == 0 after overflowing the ring")
+	frame0 := make([]float32, FrameSamples)
+	frame1 := make([]float32, FrameSamples)
+	for i := range frame0 {
+		frame0[i] = 1
+		frame1[i] = 2
+	}
+	if dropped := r.Write(frame0); dropped != 0 {
+		t.Fatalf("Write(frame0) dropped %d, want 0", dropped)
+	}
+	if dropped := r.Write(frame1); dropped != 0 {
+		t.Fatalf("Write(frame1) dropped %d, want 0", dropped)
+	}
+
+	overflow := make([]float32, FrameSamples)
+	for i := range overflow {
+		overflow[i] = 3
+	}
+	dropped := r.Write(overflow)
+	if dropped == 0 {
+		t.Fatal("Write did not report any dropped samples when the ring was full")
+	}
+	if got := r.Dropped(); got != uint64(dropped) {
+		t.Fatalf("Dropped() = %d, want %d", got, dropped)
+	}
+
+	// The two frames buffered before the overflow must still be there,
+	// untouched and intact -- not overwritten, not torn.
+	out := make([]float32, FrameSamples)
+	if n := r.Read(out); n != FrameSamples {
+		t.Fatalf("Read #1 returned %d, want %d", n, FrameSamples)
+	}
+	for i, v := range out {
+		if v != 1 {
+			t.Fatalf("frame0 sample %d = %v, want 1 (buffered frame was corrupted)", i, v)
+		}
+	}
+	if n := r.Read(out); n != FrameSamples {
+		t.Fatalf("Read #2 returned %d, want %d", n, FrameSamples)
+	}
+	for i, v := range out {
+		if v != 2 {
+			t.Fatalf("frame1 sample %d = %v, want 2 (buffered frame was corrupted)", i, v)
+		}
 	}
 }
 
@@ -270,6 +313,26 @@ func TestRingUnderrunCounts(t *testing.T) {
 	}
 	if r.Underruns() != 1 {
 		t.Fatalf("Underruns() = %d, want 1", r.Underruns())
+	}
+}
+
+// TestRingDrain verifies that Drain resets the backlog: after filling the
+// ring, Drain must advance r to w so the buffered-but-unread count is zero
+// and the next Read reports empty.
+func TestRingDrain(t *testing.T) {
+	r := NewRing(2)
+	frame := make([]float32, FrameSamples)
+	r.Write(frame)
+	r.Write(frame)
+
+	r.Drain()
+
+	if backlog := r.w.Load() - r.r.Load(); backlog != 0 {
+		t.Fatalf("w-r = %d after Drain, want 0", backlog)
+	}
+	out := make([]float32, FrameSamples)
+	if n := r.Read(out); n != 0 {
+		t.Fatalf("Read after Drain returned %d, want 0", n)
 	}
 }
 
@@ -293,6 +356,55 @@ func TestRingConcurrentProducerConsumer(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// TestRingConcurrentProducerConsumerFramesStayIntact runs a producer and a
+// consumer concurrently for enough iterations to force many overflows, and
+// asserts every frame the consumer reads is internally self-consistent:
+// every sample in the frame written for iteration N equals N (mod a small
+// period, so values repeat and stay easy to compare). A torn frame -- part
+// written by one Write, a stale leftover from a previous one, or a slot
+// being overwritten mid-Read -- is exactly what the old dual-Store,
+// producer-forces-r design could produce. This test would have failed
+// against that code; it passes against strict index ownership.
+func TestRingConcurrentProducerConsumerFramesStayIntact(t *testing.T) {
+	r := NewRing(4)
+	const iterations = 20000
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		f := make([]float32, FrameSamples)
+		for i := 0; i < iterations; i++ {
+			v := float32(i % 997)
+			for j := range f {
+				f[j] = v
+			}
+			r.Write(f)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		out := make([]float32, FrameSamples)
+		for i := 0; i < iterations; i++ {
+			n := r.Read(out)
+			if n == 0 {
+				continue
+			}
+			first := out[0]
+			for j := 1; j < n; j++ {
+				if out[j] != first {
+					t.Errorf("torn frame: sample %d = %v, want %v (same as sample 0)", j, out[j], first)
+					return
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
+}
 ```
 
 - [ ] **Step 3: Run the test and watch it fail**
@@ -310,9 +422,33 @@ import "sync/atomic"
 // Ring is a single-producer / single-consumer float32 ring buffer.
 //
 // It exists because the OS audio callbacks must never block, allocate or
-// take a contended lock: a mutex here is a click in the user's headset. Only
-// the capture callback writes and only the DSP goroutine reads (and vice
-// versa for playback), so atomics on the two indices are sufficient.
+// take a contended lock: a mutex here is a click in the user's headset.
+//
+// Index ownership is strict and one-directional: Write owns w and only ever
+// loads r; Read (and Drain) owns r and only ever loads w. Neither side ever
+// stores the other's index. This is load-bearing, not stylistic: an earlier
+// version had Write force r forward on overflow to implement drop-oldest,
+// which meant two goroutines could unconditionally Store the same atomic
+// index (a lost update with no CAS or forward-only guard) and, worse, meant
+// the producer could go on to write into buffer slots the consumer was
+// concurrently mid-copy on -- an unsynchronized access to the same
+// []float32 elements. That corrupts audio silently instead of crashing, and
+// the overlap window is narrow and timing-dependent enough that -race does
+// not reliably catch it. Strict ownership removes the hazard by
+// construction: there is no code path on either side that writes the
+// other's index, so there is nothing left to race.
+//
+// The cost of that guarantee is that overflow now drops the incoming
+// (newest) chunk instead of evicting the oldest buffered one, and drops it
+// whole rather than partially -- a partial write would tear a frame at the
+// boundary, and this package's contract is frame-sized chunks in and out.
+// Drop-oldest cannot be reintroduced without the producer touching r, so it
+// is not an option here regardless of how much more intuitive "keep the
+// newest audio" sounds. What preserves the original intent -- stale
+// backlog has no value and latency must recover -- is Drain: the consumer
+// (the only side allowed to move r) can jump r to the current w whenever it
+// observes Dropped() climbing, clearing the backlog from the side that
+// legally owns the index instead of the side that doesn't.
 //
 // Capacity is rounded up to a power of two so the wrap is a mask rather than
 // a modulo.
@@ -337,31 +473,34 @@ func NewRing(capacityFrames int) *Ring {
 	return &Ring{buf: make([]float32, size), mask: size - 1}
 }
 
-// Write copies src into the ring. On overflow it advances the read index,
-// discarding the OLDEST samples, and returns how many were dropped.
+// Write copies src into the ring. If there isn't enough free space for all
+// of src, it writes nothing, counts the whole of src as dropped, and
+// returns that count: a partial write would tear a frame across the
+// overflow boundary, so the incoming chunk is dropped whole or not at all.
 //
-// Dropping the oldest rather than refusing the newest is deliberate: stale
-// audio has no value, and a producer that silently stops is far harder to
-// diagnose than a counter that climbs.
+// Write owns w exclusively; it only loads r to compute free space and never
+// stores it. See the Ring doc comment for why that split matters.
 func (r *Ring) Write(src []float32) (dropped int) {
 	w := r.w.Load()
 	rd := r.r.Load()
 	free := uint64(len(r.buf)) - (w - rd)
-	if n := uint64(len(src)); n > free {
-		over := n - free
-		r.r.Store(rd + over)
-		r.dropped.Add(over)
-		dropped = int(over)
+	n := uint64(len(src))
+	if n > free {
+		r.dropped.Add(n)
+		return int(n)
 	}
 	for i, v := range src {
 		r.buf[(w+uint64(i))&r.mask] = v
 	}
-	r.w.Store(w + uint64(len(src)))
-	return dropped
+	r.w.Store(w + n)
+	return 0
 }
 
 // Read fills dst and returns how many samples were copied. A short or empty
 // read increments the underrun counter; the caller emits silence.
+//
+// Read owns r exclusively; it only loads w to compute available samples and
+// never stores it. See the Ring doc comment for why that split matters.
 func (r *Ring) Read(dst []float32) int {
 	w := r.w.Load()
 	rd := r.r.Load()
@@ -383,7 +522,18 @@ func (r *Ring) Read(dst []float32) int {
 	return int(n)
 }
 
-// Dropped is the cumulative overrun sample count, reported via audio:state.
+// Drain discards everything currently buffered by advancing r to the
+// current w, resetting queued latency to zero. It is consumer-side only,
+// since only the consumer may legally move r: the DSP goroutine should call
+// it when it observes Dropped() advancing, so a backlog left behind by
+// dropped Writes doesn't linger. See the Ring doc comment for why this,
+// rather than producer-side drop-oldest, is how latency recovers.
+func (r *Ring) Drain() {
+	r.r.Store(r.w.Load())
+}
+
+// Dropped is the cumulative count of samples discarded because a Write
+// arrived with insufficient free space, reported via audio:state.
 func (r *Ring) Dropped() uint64 { return r.dropped.Load() }
 
 // Underruns is the cumulative short-read count, reported via audio:state.
@@ -393,7 +543,7 @@ func (r *Ring) Underruns() uint64 { return r.underruns.Load() }
 - [ ] **Step 5: Run the tests under race**
 
 Run: `go test -tags purego -race ./internal/audio/ -run TestRing -v`
-Expected: PASS, all four tests, no race reports.
+Expected: PASS, all six tests, no race reports.
 
 - [ ] **Step 6: Commit**
 
@@ -2680,7 +2830,7 @@ Expected: FAIL — `undefined: NewManager`
 Build it to satisfy the tests, following these rules — they are the spec's architecture, not suggestions:
 
 1. `Start()` enumerates, resolves the configured device IDs (empty or missing ⇒ the entry with `IsDefault`, else the first), opens capture and playback, then launches the DSP goroutine, the poll ticker and the VU ticker.
-2. The **capture callback** does nothing but `captureRing.Write(frame)`.
+2. The **capture callback** does nothing but `captureRing.Write(frame)`. When the DSP goroutine observes `Dropped()` advancing on a ring, it should call that ring's `Drain()` so the backlog left behind by refused writes doesn't linger as latency.
 3. The **playback callback** does nothing but `playbackRing.Read(dst)`, zero-filling a short read.
 4. The **DSP goroutine** loops: drain one 480-sample frame from `captureRing`; if `VOXNoiseCancel` is set, denoise before measuring the level, else measure first; run `Denoiser` (when `NoiseSuppression`), `AGC` (when `AGC`), `Gate.Step`; when the gate is open, write to every `Sink` and, when `MicPassthrough`, into the monitor buffer; ask `SFX.MixInto`; `Mixer.Mix` into the playback ring. Accumulate peak VU for input and output.
 5. **Device resolution never fails the start.** A saved ID that no longer enumerates falls back to the default and records the substitution in `State`, per spec §13.
