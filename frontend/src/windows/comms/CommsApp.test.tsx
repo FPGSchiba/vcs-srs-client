@@ -5,6 +5,7 @@ const getClientState = vi.fn();
 const getSettings = vi.fn();
 const getKeybinds = vi.fn();
 const getHotkeyState = vi.fn();
+const getJoystickState = vi.fn();
 
 vi.mock("../../shared/api/client", () => ({
   api: {
@@ -12,6 +13,7 @@ vi.mock("../../shared/api/client", () => ({
     getSettings: () => getSettings(),
     getKeybinds: () => getKeybinds(),
     getHotkeyState: () => getHotkeyState(),
+    getJoystickState: () => getJoystickState(),
     closeWindow: vi.fn(),
     updateRadioInfo: vi.fn(),
   },
@@ -54,8 +56,11 @@ describe("CommsApp settings sync", () => {
     getSettings.mockReset().mockResolvedValue(settings);
     getKeybinds.mockReset().mockResolvedValue([]);
     getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
+    getJoystickState.mockReset().mockResolvedValue({ supported: false, error: "", devices: [] });
     useSettings.setState({
-      settings: null, keybinds: [], hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
+      settings: null, keybinds: [],
+      hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
+      joystick: { supported: false, error: "", devices: [] },
     });
   });
 
@@ -75,8 +80,17 @@ describe("CommsApp settings sync", () => {
   it("applies a keybind change made in the main window, without reopening", async () => {
     render(<CommsApp />);
     emit(EV.keybindsChanged, [
-      { action_id: "radio.1.ptt", label: "R01 (PTT)", desc: "", category: "per_radio", kind: "hold", chord: "F7" },
+      {
+        action_id: "radio.1.ptt",
+        label: "R01 (PTT)",
+        desc: "",
+        category: "per_radio",
+        kind: "hold",
+        triggers: [
+          { kind: "key", chord: "F7", device: "", device_name: "", label: "F7", connected: true },
+        ],
+      },
     ]);
-    expect(useSettings.getState().keybinds[0].chord).toBe("F7");
+    expect(useSettings.getState().keybinds[0].triggers[0].chord).toBe("F7");
   });
 });

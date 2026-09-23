@@ -16,6 +16,19 @@ import (
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
 
+// keybindsRawFromConfig converts cfg.Keybinds's persisted-value type into the
+// plain-string-slice shape keybinds.Store.Load expects. internal/config knows
+// nothing about internal/trigger's grammar and internal/keybinds knows
+// nothing about internal/config's on-disk shape, so this conversion has to
+// live at the layer that imports both.
+func keybindsRawFromConfig(src map[string]config.KeybindValue) map[string][]string {
+	out := make(map[string][]string, len(src))
+	for id, v := range src {
+		out[id] = []string(v)
+	}
+	return out
+}
+
 // sessionAPI is the session surface the bindings depend on (fakeable in tests).
 type sessionAPI interface {
 	Connect(ctx context.Context, serverURL, name, password, unitID string) error
@@ -77,14 +90,19 @@ func (a *App) SetApp(app *application.App) { a.wailsApp = app }
 // seeds kb from cfg.Keybinds, falling back to keybinds.Defaults() when
 // cfg.Keybinds is empty (fresh config, or one written before Phase 3).
 func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybinds.Store, hk *hotkeys.Manager, em events.Emitter) {
-	raw := cfg.Keybinds
-	if len(raw) == 0 {
-		raw = defaultKeybindsRaw()
+	src := cfg.Keybinds
+	if len(src) == 0 {
+		src = defaultKeybindsRaw()
 	}
-	kb.Load(raw)
+	kb.Load(keybindsRawFromConfig(src))
 
 	if a.perm == nil {
 		a.perm = hotkeys.NewPermissionChecker()
+	}
+
+	deviceNames := make(map[string]string, len(cfg.KeybindDevices))
+	for id, name := range cfg.KeybindDevices {
+		deviceNames[id] = name
 	}
 
 	a.settings = &settingsBackend{
@@ -96,6 +114,9 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 		captureTimeout: defaultCaptureTimeout,
 		permInterval:   defaultPermissionPollInterval,
 		permTimeout:    defaultPermissionPollTimeout,
+		presses:        newPressCount(),
+		holds:          map[string]bool{},
+		deviceNames:    deviceNames,
 	}
 	// Per-radio actions are derived from the local client's radios, which are
 	// empty at this point and only arrive at connect time. Observe the store
@@ -116,13 +137,18 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 // write-once value no goroutine can race.
 func (a *App) setPermissionChecker(p hotkeys.PermissionChecker) { a.perm = p }
 
-// defaultKeybindsRaw renders keybinds.Defaults() as the raw string map
-// keybinds.Store.Load expects.
-func defaultKeybindsRaw() map[string]string {
+// defaultKeybindsRaw renders keybinds.Defaults() in cfg.Keybinds's persisted
+// shape, for the case where no config.toml keybinds exist yet (fresh config,
+// or one written before Phase 3).
+func defaultKeybindsRaw() map[string]config.KeybindValue {
 	defaults := keybinds.Defaults()
-	out := make(map[string]string, len(defaults))
-	for id, c := range defaults {
-		out[string(id)] = c.String()
+	out := make(map[string]config.KeybindValue, len(defaults))
+	for id, list := range defaults {
+		strs := make([]string, 0, len(list))
+		for _, t := range list {
+			strs = append(strs, t.String())
+		}
+		out[string(id)] = config.KeybindValue(strs)
 	}
 	return out
 }

@@ -10,14 +10,31 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
+	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
 // defaultCaptureTimeout is how long BeginCapture waits before auto-resuming
-// OS hotkey registration if EndCapture never arrives (frontend crash, lost
-// IPC, etc). A spurious re-arm is harmless; a stuck-suspended state is
-// invisible to the user and maddening to diagnose.
-const defaultCaptureTimeout = 10 * time.Second
+// OS hotkey registration and telling the frontend the capture died.
+//
+// THE BUDGET IS SIZED FOR A HUMAN HUNTING A BUTTON, not for a crashed
+// frontend. That is a deliberate re-reading of what this timer is for. It
+// began as an invisible safety net for the case where EndCapture never
+// arrives (frontend crash, lost IPC): a stuck-suspended state is invisible to
+// the user and maddening to diagnose, while a spurious re-arm is harmless, so
+// 10 seconds was ample. Expiry is now a USER-VISIBLE event -- it closes the
+// capturing row -- which makes the timer a deadline the user has to beat, and
+// 10 seconds is a short one for "find the right button among thirty on a
+// throttle you cannot see while looking at the screen". Modifier capture
+// (hold one input, press another) asks for exactly that hunt twice over.
+//
+// 30 seconds is the upper end of the range, because the two failures are not
+// symmetric: overshooting only delays an automatic re-arm in the rare crashed
+// -frontend case, which nothing observes; undershooting closes the row under
+// a user who is mid-hunt, which they DO observe and cannot undo. Do not trim
+// this back toward 10 without a reason that outweighs that asymmetry.
+const defaultCaptureTimeout = 30 * time.Second
 
 // Bounds for the permission re-check that RequestHotkeyPermission arms.
 //
@@ -58,6 +75,21 @@ type settingsBackend struct {
 	hk      *hotkeys.Manager
 	em      *events.Tagged
 
+	// joy is the joystick manager. Optional: tests and any build without a
+	// backend leave it nil, so every use site must check.
+	joy *joystick.Manager
+	// presses joins keyboard and joystick edges into one press/release pair
+	// per action. See presscount.go.
+	presses *pressCount
+	// holds records which actions owe a Released (Kind == KindHold),
+	// refreshed by applyHotkeys. Press-kind actions must NOT be refcounted.
+	holds map[string]bool
+	// deviceNames remembers product names so a binding for an absent device
+	// is still nameable in the UI.
+	deviceNames map[string]string
+	// captureAction is the action a completed joystick capture binds to.
+	captureAction string
+
 	captureTimeout time.Duration
 	captureTimer   *time.Timer
 
@@ -91,6 +123,68 @@ type settingsBackend struct {
 	// the focus hook can return without touching the OS once access is
 	// granted (or was never applicable).
 	lastPerm hotkeys.Permission
+}
+
+// SetJoystickBackend wires the joystick manager. Optional -- when it is never
+// called, every joystick path degrades to "unsupported" and the keyboard
+// behaviour is exactly what it was before this feature existed.
+func (a *App) SetJoystickBackend(jm *joystick.Manager) {
+	sb := a.settings
+	sb.mu.Lock()
+	sb.joy = jm
+	sb.mu.Unlock()
+	a.applyHotkeys()
+	// Registered BEFORE Start: the loop's first act is an enumeration, and
+	// that first "nil -> one device" transition is itself a change the UI
+	// wants. Without this the DTO was pull-only, fetched once when a window
+	// mounted, so a stick plugged in later never appeared and a transient
+	// error never cleared.
+	jm.OnStateChanged(a.emitJoystickState)
+	jm.Start()
+}
+
+// emitJoystickState publishes the current joystick health on joystick:state.
+// The sibling of emitHotkeyState, and wired the same way the UI consumes it.
+//
+// Called from the manager's poll goroutine, only when something actually
+// changed -- see joystick.Manager.OnStateChanged.
+func (a *App) emitJoystickState() {
+	sb := a.settings
+	if sb == nil {
+		return
+	}
+	dto := a.GetJoystickState()
+	devices := make([]events.JoystickDevicePayload, 0, len(dto.Devices))
+	for _, d := range dto.Devices {
+		devices = append(devices, events.JoystickDevicePayload{ID: d.ID, Name: d.Name})
+	}
+	sb.em.JoystickState(dto.Supported, dto.Error, devices)
+}
+
+// GetJoystickState reports the joystick subsystem's health for the UI.
+func (a *App) GetJoystickState() JoystickStateDTO {
+	sb := a.settings
+	sb.mu.Lock()
+	jm := sb.joy
+	sb.mu.Unlock()
+	// Devices is ALWAYS a non-nil slice. The frontend types it as
+	// JoystickDevice[] and now iterates it to decide whether a bound stick is
+	// attached, and the push path (events.JoystickStatePayload) has always
+	// sent []. Building this one by append on a nil slice marshalled to
+	// `null` whenever nothing was attached, so the two paths disagreed on
+	// shape for the exact state the UI most needs to read.
+	if jm == nil {
+		return JoystickStateDTO{Supported: false, Devices: []JoystickDeviceDTO{}}
+	}
+	devs := jm.Devices()
+	out := JoystickStateDTO{Supported: jm.Supported(), Devices: make([]JoystickDeviceDTO, 0, len(devs))}
+	if err := jm.LastErr(); err != nil && jm.Supported() {
+		out.Error = err.Error()
+	}
+	for _, d := range devs {
+		out.Devices = append(out.Devices, JoystickDeviceDTO{ID: string(d.ID), Name: d.Name})
+	}
+	return out
 }
 
 // GetSettings returns the current General settings.
@@ -147,34 +241,113 @@ func (a *App) SetSettings(s SettingsDTO) error {
 }
 
 // GetKeybinds joins the static + per-radio action registry with the store's
-// live chords into the frontend-facing row list.
+// live triggers into the frontend-facing row list.
 func (a *App) GetKeybinds() []KeybindDTO {
 	sb := a.settings
 	actions := a.keybindActions()
+	connected := a.connectedDevices()
+
 	out := make([]KeybindDTO, 0, len(actions))
 	for _, act := range actions {
-		c, _ := sb.kb.Get(act.ID)
+		list, _ := sb.kb.Get(act.ID)
+		triggers := make([]TriggerDTO, 0, len(list))
+		for _, t := range list {
+			triggers = append(triggers, a.triggerDTO(t, connected))
+		}
 		out = append(out, KeybindDTO{
 			ActionID: string(act.ID),
 			Label:    act.Label,
 			Desc:     act.Desc,
 			Category: categoryString(act.Category),
 			Kind:     kindString(act.Kind),
-			Chord:    c.String(),
+			Triggers: triggers,
 		})
 	}
 	return out
 }
 
-// SetKeybind validates the raw capture, binds it, persists, re-applies OS
+// connectedDevices returns the currently-attached device ids, and refreshes
+// the remembered product names as a side effect so an absent device stays
+// nameable later.
+func (a *App) connectedDevices() map[string]bool {
+	sb := a.settings
+	out := map[string]bool{}
+	sb.mu.Lock()
+	jm := sb.joy
+	sb.mu.Unlock()
+	if jm == nil {
+		return out
+	}
+	for _, d := range jm.Devices() {
+		out[string(d.ID)] = true
+		a.rememberDevice(string(d.ID), d.Name)
+	}
+	return out
+}
+
+// triggerDTO renders one trigger for the frontend.
+func (a *App) triggerDTO(t trigger.Trigger, connected map[string]bool) TriggerDTO {
+	if t.Kind == trigger.KindKey {
+		return TriggerDTO{Kind: "key", Chord: t.Key.String(), Label: t.Key.String(), Connected: true}
+	}
+	sb := a.settings
+	dev := string(t.Joy.Device)
+	sb.mu.Lock()
+	name := sb.deviceNames[dev]
+	sb.mu.Unlock()
+	if name == "" {
+		name = dev
+	}
+	label := t.Joy.Button.Label()
+	if t.Joy.Modifier != nil {
+		label = t.Joy.Modifier.Button.Label() + " + " + label
+	}
+	return TriggerDTO{
+		Kind:       "joy",
+		Device:     dev,
+		DeviceName: name,
+		Label:      label,
+		Connected:  connected[dev],
+	}
+}
+
+// rememberDevice records a device's product name for display. Persisted
+// (config.KeybindDevices) rather than kept in memory so a binding for a
+// device that is not currently attached is still nameable after a restart.
+// Best-effort: a failed save costs a display name, never a binding.
+func (a *App) rememberDevice(id, name string) {
+	sb := a.settings
+	sb.mu.Lock()
+	if name == "" || sb.deviceNames[id] == name {
+		sb.mu.Unlock()
+		return
+	}
+	sb.deviceNames[id] = name
+	next := *sb.cfg
+	next.KeybindDevices = map[string]string{}
+	for k, v := range sb.cfg.KeybindDevices {
+		next.KeybindDevices[k] = v
+	}
+	next.KeybindDevices[id] = name
+	if sb.cfgPath != "" {
+		if err := config.Save(sb.cfgPath, &next); err == nil {
+			sb.cfg = &next
+		}
+	} else {
+		sb.cfg = &next
+	}
+	sb.mu.Unlock()
+}
+
+// AddTrigger validates the raw capture, binds it, persists, re-applies OS
 // hotkeys, and emits keybinds:changed. It reports which other action (if
-// any) lost the chord. If persistence fails, the store is rolled back to its
-// pre-Set contents (undoing both the new binding and any steal) so the live
-// store never disagrees with disk. writeMu is held for the whole call
+// any) lost the trigger. If persistence fails, the store is rolled back to
+// its pre-Add contents (undoing both the new binding and any steal) so the
+// live store never disagrees with disk. writeMu is held for the whole call
 // (through the emit) so a concurrent mutator's snapshot can never be older
 // than this call's own commit, which would otherwise let a failing rollback
 // here erase a different call's successful, already-persisted write.
-func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, error) {
+func (a *App) AddTrigger(actionID string, cap CaptureDTO) (SetKeybindResult, error) {
 	c, err := chord.FromCode(cap.Code, cap.Ctrl, cap.Alt, cap.Shift, cap.Super)
 	if err != nil {
 		return SetKeybindResult{}, fmt.Errorf("parse capture: %w", err)
@@ -185,9 +358,9 @@ func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, err
 	defer sb.writeMu.Unlock()
 
 	before := sb.kb.Snapshot()
-	stolen := sb.kb.Set(keybinds.ActionID(actionID), c)
+	stolen := sb.kb.Add(keybinds.ActionID(actionID), trigger.Key(c))
 	if err := a.persistKeybinds(); err != nil {
-		sb.kb.Load(before) // undo the Set (and any steal) so the store matches disk
+		sb.kb.Load(before) // undo the Add (and any steal) so the store matches disk
 		return SetKeybindResult{}, err
 	}
 	a.applyHotkeys()
@@ -197,17 +370,38 @@ func (a *App) SetKeybind(actionID string, cap CaptureDTO) (SetKeybindResult, err
 		result.Stolen = &StolenDTO{
 			ActionID: string(stolen.ActionID),
 			Label:    a.labelFor(stolen.ActionID),
-			Chord:    stolen.Chord.String(),
+			Trigger:  a.triggerDTO(stolen.Trigger, a.connectedDevices()),
 		}
 	}
 	sb.em.KeybindsChanged(a.GetKeybinds())
 	return result, nil
 }
 
+// RemoveTrigger drops one trigger from actionID, persists, re-applies, and
+// emits keybinds:changed. If persistence fails the store is rolled back, so
+// it never disagrees with disk.
+func (a *App) RemoveTrigger(actionID string, index int) error {
+	sb := a.settings
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
+	before := sb.kb.Snapshot()
+	if err := sb.kb.RemoveAt(keybinds.ActionID(actionID), index); err != nil {
+		return err
+	}
+	if err := a.persistKeybinds(); err != nil {
+		sb.kb.Load(before)
+		return err
+	}
+	a.applyHotkeys()
+	sb.em.KeybindsChanged(a.GetKeybinds())
+	return nil
+}
+
 // ClearKeybind removes any binding for actionID, persists, re-applies OS
 // hotkeys, and emits keybinds:changed. If persistence fails, the store is
 // rolled back to its pre-Clear contents. writeMu is held for the whole call
-// for the same reason as SetKeybind: it keeps this call's rollback from
+// for the same reason as AddTrigger: it keeps this call's rollback from
 // racing a concurrent mutator's successful commit.
 func (a *App) ClearKeybind(actionID string) error {
 	sb := a.settings
@@ -237,19 +431,36 @@ func (a *App) ClearKeybind(actionID string) error {
 // middle of B's capture -- the OS would then swallow the very keypress meant
 // to rebind B, which is exactly the hazard spec section 7 opens with. The
 // same inversion happens when the user clicks a new chip while the previous
-// row's SetKeybind is still in flight.
+// row's AddTrigger is still in flight.
 //
 // Making the token the authority moves that invariant into the only layer
 // that can enforce it: BeginCapture bumps the generation, and EndCapture and
 // the auto-resume timer are no-ops unless the token they carry is still
 // current. Every interleaving -- row switch, post-capture race, timeout -- is
 // then safe without the frontend sequencing anything.
-func (a *App) BeginCapture() int64 {
+//
+// actionID is the action a completed JOYSTICK capture binds to. Keyboard
+// capture still round-trips through the frontend (AddTrigger); joystick
+// capture completes in the backend, because the manager already knows the
+// binding and bouncing it out to the frontend only to be sent back would add
+// a race for nothing.
+//
+// BeginCapture suspends BOTH managers (spec section 9): without suspending
+// the joystick manager too, binding a joystick button would transmit while
+// it is being bound. hk.Suspend(), jm.Suspend() and jm.BeginCapture() are
+// ALL called OUTSIDE sb.mu: either Suspend can synchronously call back into
+// a.Released (a still-held action's forced release), which itself takes
+// sb.mu, so holding it across the call would deadlock. This is not
+// theoretical for the keyboard manager either -- hotkeys.Manager.Suspend()
+// calls Registrar.UnregisterAll(), and the real registrar's
+// dispatcher.clear() releases every latched hold action from inside it.
+func (a *App) BeginCapture(actionID string) int64 {
 	sb := a.settings
 	sb.mu.Lock()
 	sb.captureGen++
 	gen := sb.captureGen
-	sb.hk.Suspend()
+	sb.captureAction = actionID
+	jm := sb.joy
 	if sb.captureTimer != nil {
 		sb.captureTimer.Stop()
 	}
@@ -259,9 +470,81 @@ func (a *App) BeginCapture() int64 {
 	}
 	// The timer captures its OWN generation, so a timeout belonging to a
 	// superseded capture cannot re-arm hotkeys under a live one.
-	sb.captureTimer = time.AfterFunc(timeout, func() { a.resumeCapture(gen) })
+	sb.captureTimer = time.AfterFunc(timeout, func() { a.resumeCapture(gen, true) })
 	sb.mu.Unlock()
+
+	// Both Suspend calls are OUTSIDE sb.mu, and for the same reason -- see
+	// the doc comment above. hk.Suspend() reaches
+	// registrar.UnregisterAll() -> dispatcher.clear(), which synchronously
+	// calls a.Released for every latched hold action on THIS goroutine;
+	// a.Released asks isHold(), which takes sb.mu. Holding sb.mu here would
+	// self-deadlock the whole app with the microphone still open.
+	//
+	// Everything sb.mu protects has already been committed above (the
+	// generation bump, the capture action, the auto-resume timer), so the
+	// token this call returns is decided before either manager is touched:
+	// a Released re-entering a.Released between here and the return can
+	// only read that already-consistent state.
+	sb.hk.Suspend()
+	if jm != nil {
+		jm.Suspend()
+		jm.BeginCapture(func(c joystick.Captured) {
+			a.onJoystickCaptured(gen, c)
+		})
+	}
 	return gen
+}
+
+// onJoystickCaptured binds a completed joystick capture. Unlike keyboard
+// capture, this does not round-trip through the frontend: the manager
+// already holds the binding, and bouncing it out only to be sent back would
+// add a race for nothing.
+//
+// The token is checked for the same reason EndCapture checks it -- a capture
+// superseded by the user clicking another row must not bind anything.
+func (a *App) onJoystickCaptured(token int64, c joystick.Captured) {
+	sb := a.settings
+	sb.mu.Lock()
+	stale := token != sb.captureGen
+	actionID := sb.captureAction
+	sb.mu.Unlock()
+	if stale || actionID == "" {
+		return
+	}
+
+	sb.writeMu.Lock()
+	before := sb.kb.Snapshot()
+	stolen := sb.kb.Add(keybinds.ActionID(actionID), trigger.Joy(c.Binding))
+	if err := a.persistKeybinds(); err != nil {
+		sb.kb.Load(before)
+		sb.writeMu.Unlock()
+		a.logger.Warn("could not persist joystick binding", "action", actionID, "err", err)
+		return
+	}
+	a.applyHotkeys()
+
+	// The steal rides the event. A joystick capture completes here rather
+	// than returning to the caller, so this is the ONLY channel it has --
+	// logging it and dropping it left the losing row's chip vanishing on the
+	// next keybinds:changed with no warning, while the same steal performed
+	// with a key showed "taken from ..." (spec section 10 requires it for
+	// both kinds).
+	var stolenDTO *StolenDTO
+	if stolen != nil {
+		stolenDTO = &StolenDTO{
+			ActionID: string(stolen.ActionID),
+			Label:    a.labelFor(stolen.ActionID),
+			Trigger:  a.triggerDTO(stolen.Trigger, a.connectedDevices()),
+		}
+	}
+	sb.em.KeybindsChanged(a.GetKeybinds())
+	sb.em.JoystickCaptured(actionID, stolenDTO)
+	sb.writeMu.Unlock()
+
+	if stolen != nil {
+		a.logger.Info("joystick binding stolen from another action",
+			"from", string(stolen.ActionID), "to", actionID)
+	}
 }
 
 // EndCapture re-arms OS hotkey registration, but only if token is still the
@@ -276,12 +559,23 @@ func (a *App) BeginCapture() int64 {
 // in the banner -- treating one bad binding as a failure of the whole
 // operation.
 func (a *App) EndCapture(token int64) {
-	a.resumeCapture(token)
+	a.resumeCapture(token, false)
 }
 
 // resumeCapture is the single gate both EndCapture and the auto-resume timer
 // go through. A stale token is a no-op.
-func (a *App) resumeCapture(token int64) {
+//
+// expired distinguishes the two callers, and it is the whole reason this
+// takes a parameter at all: EndCapture is the frontend telling the backend
+// the capture is over, so the frontend already knows. The TIMER is the
+// backend telling itself, and until keybinds:capture_expired existed it told
+// nobody else. A live frontend went on rendering "Press a key or joystick
+// button ..." over a capture that no longer existed, with both managers
+// resumed -- so the next joystick press bound nothing and instead fired
+// whatever action already held that button, keying the radio with no visible
+// sign that anything had gone wrong. Raising the timeout would only have
+// narrowed that window; telling the UI closes it.
+func (a *App) resumeCapture(token int64, expired bool) {
 	sb := a.settings
 	sb.mu.Lock()
 	if token != sb.captureGen {
@@ -292,9 +586,22 @@ func (a *App) resumeCapture(token int64) {
 		sb.captureTimer.Stop()
 		sb.captureTimer = nil
 	}
+	jm := sb.joy
+	actionID := sb.captureAction
 	sb.mu.Unlock()
 
 	_ = sb.hk.Resume() // per-binding failures surface via the event below
+	if jm != nil {
+		jm.CancelCapture()
+		jm.Resume()
+	}
+	// Emitted BEFORE the hotkey-state event and after both managers are back,
+	// so by the time the row stops listening the backend is already in the
+	// state the row is about to reflect. Guarded on a non-empty action id
+	// only because a capture with none has no row to address.
+	if expired && actionID != "" {
+		sb.em.CaptureExpired(actionID)
+	}
 	// Resume is where bindings saved DURING the capture actually hit the OS
 	// (Apply only records the desired set while suspended), so it is the
 	// first moment a newly bound unregisterable key can be known to have
@@ -666,6 +973,9 @@ func (a *App) Pressed(actionID string) {
 	if a.settings == nil {
 		return
 	}
+	if a.isHold(actionID) && !a.settings.presses.press(actionID) {
+		return // already held by another input source
+	}
 	a.logger.Info("hotkey fired", "action", actionID, "edge", "down")
 	a.settings.em.HotkeyPressed(actionID)
 }
@@ -676,8 +986,22 @@ func (a *App) Released(actionID string) {
 	if a.settings == nil {
 		return
 	}
+	if a.isHold(actionID) && !a.settings.presses.release(actionID) {
+		return // another input source still holds it
+	}
 	a.logger.Info("hotkey fired", "action", actionID, "edge", "up")
 	a.settings.em.HotkeyReleased(actionID)
+}
+
+// isHold reports whether actionID owes a Released. Only hold actions are
+// refcounted: press-kind actions never receive a Released from either
+// manager, so counting them would strand the count at 1 and silently deaden
+// the action after its first press.
+func (a *App) isHold(actionID string) bool {
+	sb := a.settings
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.holds[actionID]
 }
 
 // ForceReleased implements hotkeys.StaleReleaser. The OS layer calls it when
@@ -746,7 +1070,10 @@ func (a *App) persistKeybinds() error {
 	sb := a.settings
 	sb.mu.Lock()
 	next := *sb.cfg
-	next.Keybinds = sb.kb.Snapshot()
+	next.Keybinds = map[string]config.KeybindValue{}
+	for id, list := range sb.kb.Snapshot() {
+		next.Keybinds[id] = config.KeybindValue(list)
+	}
 	var saveErr error
 	if sb.cfgPath != "" {
 		saveErr = config.Save(sb.cfgPath, &next)
@@ -761,19 +1088,113 @@ func (a *App) persistKeybinds() error {
 	return nil
 }
 
-// applyHotkeys re-applies the full desired binding set to the OS layer from
-// the current keybind store contents.
+// applyHotkeys re-applies the full desired binding set to BOTH OS layers from
+// the current keybind store contents, splitting triggers by kind.
 func (a *App) applyHotkeys() {
 	sb := a.settings
-	binds := map[string]hotkeys.Binding{}
+	kbBinds := map[string]hotkeys.Binding{}
+	joyBinds := map[string][]joystick.Binding{}
+	holds := map[string]bool{}
+
 	for _, act := range a.keybindActions() {
-		c, ok := sb.kb.Get(act.ID)
-		if !ok || c.IsZero() {
+		id := string(act.ID)
+		hold := act.Kind == keybinds.KindHold
+		holds[id] = hold
+
+		list, ok := sb.kb.Get(act.ID)
+		if !ok {
 			continue
 		}
-		binds[string(act.ID)] = hotkeys.Binding{Chord: c, Hold: act.Kind == keybinds.KindHold}
+		for _, t := range list {
+			switch t.Kind {
+			case trigger.KindKey:
+				if t.Key.IsZero() {
+					continue
+				}
+				kbBinds[id] = hotkeys.Binding{Chord: t.Key, Hold: hold}
+			case trigger.KindJoy:
+				joyBinds[id] = append(joyBinds[id], joystick.Binding{Joy: t.Joy, Hold: hold})
+			}
+		}
 	}
-	_ = sb.hk.Apply(binds) // failures surface via the event below
+
+	sb.mu.Lock()
+	jm := sb.joy
+	// The UNION of the old and the new hold sets is what is live across both
+	// Apply calls below. Neither map alone is safe there, because both
+	// directions of change are in flight at once:
+	//
+	//   - An action LEAVING the registry (the server removed radio 3 while
+	//     radio.3.ptt was held) is absent from the new map, so judging the
+	//     synchronous Released that Apply emits against it would make
+	//     isHold() false, skip presses.release(), and leak the refcount at 1
+	//     -- deadening the action for the session.
+	//   - An action ARRIVING in this apply (the server ADDED radio 3, already
+	//     bound to a joystick button in config.toml) is absent from the old
+	//     map, so a press landing between jm.Apply returning and the new map
+	//     being installed would skip presses.press(); its later Released then
+	//     hits presses.release() with n <= 0 and is swallowed. Stuck
+	//     transmission.
+	//
+	// The union answers both correctly: an id is treated as owing a Released
+	// if EITHER view says so, which is the conservative side -- an unmatched
+	// increment is reconciled by the release that follows, whereas a missed
+	// one is not recoverable.
+	union := make(map[string]bool, len(holds)+len(sb.holds))
+	for id, hold := range sb.holds {
+		if hold {
+			union[id] = true
+		}
+	}
+	for id, hold := range holds {
+		if hold {
+			union[id] = true
+		}
+	}
+	sb.holds = union
+	sb.mu.Unlock()
+
+	// A rebind drops WHATEVER WAS HELD on each manager -- not just an action
+	// whose own binding changed: hk.Apply always tears down and re-registers
+	// through dispatcher.clear(), and jm.Apply always calls
+	// takeActiveLocked(), and both release every currently-latched hold
+	// action as a side effect. Those synchronous Released calls run on THIS
+	// goroutine, from inside Apply, and each one goes back through
+	// a.Released -> isHold() -> presses.release().
+	//
+	// So sb.holds must still cover every action that was live when those
+	// actions were PRESSED, which is why the UNION is installed above and
+	// the new map only below. An action that has just disappeared from the
+	// registry -- the server removed radio 3 while radio.3.ptt was held --
+	// is absent from the new map, so judging its release against that map
+	// alone would make isHold() false, skip presses.release() entirely, and
+	// leak the refcount at 1: the action is then permanently deadened,
+	// because the next genuine press counts 1 -> 2 and is swallowed as
+	// "already held by another source".
+	//
+	// With the union in place through both Applies, each manager balances
+	// its own edges and there is nothing left over -- which is why there is
+	// no blanket press-count sweep here any more (pressCount.reset has since
+	// been deleted outright, so there is nothing left to call). That sweep
+	// was itself the
+	// residual stuck-PTT race: jm.Apply releases notifyMu on return, so a
+	// 100Hz tick landing before the reset re-pressed the still-held button
+	// (count 0 -> 1, HotkeyPressed emitted), the reset then zeroed the count
+	// while the manager still had the action active, and the eventual
+	// physical release hit presses.release() with n <= 0 -- swallowing
+	// HotkeyReleased and leaving the transmission open for good.
+	//
+	// joystick.Manager.Apply orders itself exactly this way already
+	// (takeActiveLocked runs before m.hold = hold); this is the app layer
+	// matching it.
+	_ = sb.hk.Apply(kbBinds) // failures surface via the event below
+	if jm != nil {
+		_ = jm.Apply(joyBinds)
+	}
+
+	sb.mu.Lock()
+	sb.holds = holds
+	sb.mu.Unlock()
 	// Without this the hotkeys:state event had no production emitter at all:
 	// a binding the OS refuses (Numpad7 and friends) saved cleanly, was
 	// recorded in Manager.Failed(), and never reached the UI, so the row

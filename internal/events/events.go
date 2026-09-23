@@ -28,6 +28,18 @@ const (
 	EventHotkeyPressed     = "hotkey:pressed"
 	EventHotkeyReleased    = "hotkey:released"
 	EventHotkeysState      = "hotkeys:state"
+	// EventJoystickCaptured is emitted when a joystick capture completed and bound
+	// itself.
+	EventJoystickCaptured = "keybinds:joy_captured"
+	// EventJoystickState is emitted when the joystick subsystem's health
+	// changes -- a device attached or detached, or the reported error
+	// appeared or cleared. The sibling of EventHotkeysState, and for the same
+	// reason: the UI must not have to re-ask.
+	EventJoystickState = "joystick:state"
+	// EventCaptureExpired is emitted when a capture's auto-resume timeout
+	// fires, i.e. the backend gave up waiting for EndCapture and tore the
+	// capture down itself.
+	EventCaptureExpired = "keybinds:capture_expired"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -155,6 +167,91 @@ func (t *Tagged) HotkeyReleased(actionID string) {
 	t.em.Emit(EventHotkeyReleased, struct {
 		ActionID string `json:"action_id"`
 	}{ActionID: actionID})
+}
+
+// JoystickCapturedPayload is the EventJoystickCaptured payload.
+type JoystickCapturedPayload struct {
+	ActionID string `json:"action_id"`
+	// Stolen names the action that lost this trigger to the new binding, and
+	// is nil when there was no conflict.
+	//
+	// It has to travel on the event because a joystick capture completes in
+	// the BACKEND and returns no result to any caller -- unlike the keyboard
+	// path, where AddTrigger hands its StolenDTO straight back. Without it
+	// the steal was logged and dropped: the losing row's chip just vanished
+	// on the next keybinds:changed with no warning at all, while the
+	// identical action performed with a key showed one.
+	//
+	// Typed as any for the same reason KeybindsChanged's payload is: the
+	// concrete shape is app.StolenDTO, and internal/app already imports this
+	// package, so naming it here would be an import cycle.
+	Stolen any `json:"stolen"`
+}
+
+// JoystickCaptured tells the UI that a joystick capture completed and bound
+// itself, so the listening chip can close and any steal can be reported. The
+// binding itself arrives via EventKeybindsChanged; this carries the action id
+// and the steal, which is everything the UI cannot derive from that list.
+func (t *Tagged) JoystickCaptured(actionID string, stolen any) {
+	t.em.Emit(EventJoystickCaptured, JoystickCapturedPayload{
+		ActionID: actionID,
+		Stolen:   stolen,
+	})
+}
+
+// CaptureExpiredPayload is the EventCaptureExpired payload.
+type CaptureExpiredPayload struct {
+	ActionID string `json:"action_id"`
+}
+
+// CaptureExpired tells the UI that the capture it started has been torn down
+// by the backend's auto-resume timeout rather than by anything the user did.
+//
+// The timeout exists as a crashed-frontend safety net, but a LIVE frontend
+// has to be told its capture died. Without this event the timeout cancelled
+// the joystick capture and resumed both managers while the row went on
+// rendering "Press a key or joystick button ...": the next button press then
+// fired whatever action it was already bound to -- a live transmission on the
+// radio -- and bound nothing. The keyboard half used to be self-recovering
+// (a keypress after the timeout still reached AddTrigger and still bound), so
+// this only became reachable once the joystick half, which completes INSIDE
+// the manager and is gone once cancelled, was armed under the same budget.
+func (t *Tagged) CaptureExpired(actionID string) {
+	t.em.Emit(EventCaptureExpired, CaptureExpiredPayload{ActionID: actionID})
+}
+
+// JoystickDevicePayload is one attached device, mirroring
+// app.JoystickDeviceDTO.
+type JoystickDevicePayload struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// JoystickStatePayload is the EventJoystickState payload, mirroring
+// app.JoystickStateDTO.
+type JoystickStatePayload struct {
+	Supported bool   `json:"supported"`
+	Error     string `json:"error"`
+	// Devices is the attached device list. Deliberately carried in full
+	// rather than as a delta, for the same reason KeybindsChanged is: the
+	// list is tiny and a replacement removes a class of divergence bug.
+	Devices []JoystickDevicePayload `json:"devices"`
+}
+
+// JoystickState emits EventJoystickState.
+//
+// Pushed rather than polled, and emitted only when something actually
+// changed: the health DTO used to be fetched exactly once, when a window
+// mounted, so a transient error pinned the "unavailable" banner forever and a
+// stick plugged in afterwards stayed invisible. The manager's poll loop runs
+// at 100Hz and its enumeration every 3s, so emitting per tick instead of per
+// change would flood the event bus.
+func (t *Tagged) JoystickState(supported bool, errMsg string, devices []JoystickDevicePayload) {
+	t.em.Emit(EventJoystickState, JoystickStatePayload{
+		Supported: supported,
+		Error:     errMsg,
+		Devices:   devices,
+	})
 }
 
 // HotkeysState emits EventHotkeysState so a failed registration is visible in

@@ -106,26 +106,68 @@ type CaptureDTO struct {
 	Super bool   `json:"super"`
 }
 
-// KeybindDTO is one row of the joined action-registry + bound-chord list.
+// TriggerDTO is one way to activate an action, as the frontend sees it.
+//
+// Display labels are rendered HERE, in Go, not in the frontend: the physical
+// naming of buttons and hats has exactly one home, the same discipline that
+// keeps canonical chord formatting inside internal/chord.
+type TriggerDTO struct {
+	Kind string `json:"kind"` // "key" | "joy"
+	// Chord is the canonical chord form; set only when Kind == "key".
+	Chord string `json:"chord"`
+	// Device is the stable device id; set only when Kind == "joy".
+	Device string `json:"device"`
+	// DeviceName is the product name for display. Falls back to Device when
+	// the device has never been seen.
+	DeviceName string `json:"device_name"`
+	// Label is the rendered input name, e.g. "Btn 12", "Hat 1 ↑",
+	// "Btn 5 + Btn 3".
+	Label string `json:"label"`
+	// Connected reports whether the device is attached right now. A binding
+	// for an absent device is still valid and renders muted rather than
+	// vanishing.
+	Connected bool `json:"connected"`
+}
+
+// KeybindDTO is one row of the joined action-registry + bound-trigger list.
 type KeybindDTO struct {
-	ActionID string `json:"action_id"`
-	Label    string `json:"label"`
-	Desc     string `json:"desc"`
-	Category string `json:"category"` // "global" | "channel" | "per_radio" | "status"
-	Kind     string `json:"kind"`     // "hold" | "press"
-	Chord    string `json:"chord"`    // canonical form, "" when unbound
+	ActionID string       `json:"action_id"`
+	Label    string       `json:"label"`
+	Desc     string       `json:"desc"`
+	Category string       `json:"category"` // "global" | "channel" | "per_radio" | "status"
+	Kind     string       `json:"kind"`     // "hold" | "press"
+	Triggers []TriggerDTO `json:"triggers"`
 }
 
-// StolenDTO reports which action lost its chord to a new binding.
+// StolenDTO reports which action lost a trigger to a new binding.
 type StolenDTO struct {
-	ActionID string `json:"action_id"`
-	Label    string `json:"label"`
-	Chord    string `json:"chord"`
+	ActionID string     `json:"action_id"`
+	Label    string     `json:"label"`
+	Trigger  TriggerDTO `json:"trigger"`
 }
 
-// SetKeybindResult is the result of SetKeybind.
+// SetKeybindResult is the result of AddTrigger.
 type SetKeybindResult struct {
 	Stolen *StolenDTO `json:"stolen"` // nil when there was no conflict
+}
+
+// JoystickStateDTO reports the joystick subsystem's health.
+type JoystickStateDTO struct {
+	// Supported is false where there is no backend (macOS). The UI must hide
+	// the joystick affordance rather than showing a broken one, and must NOT
+	// offer a permission grant: unsupported is not denied.
+	Supported bool `json:"supported"`
+	// Error is the most recent source error, "" when healthy. On Linux this
+	// carries the actionable 'input' group message.
+	Error string `json:"error"`
+	// Devices is the attached device list, for display.
+	Devices []JoystickDeviceDTO `json:"devices"`
+}
+
+// JoystickDeviceDTO is one attached device.
+type JoystickDeviceDTO struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // HotkeyStateDTO reports whether OS hotkey registration is currently healthy.

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { api } from "../api/client";
 import { on, EV } from "../api/events";
 import { useSettings } from "./settings";
-import type { Settings, Keybind, HotkeyState } from "./settings";
+import type { Settings, Keybind, HotkeyState, JoystickState } from "./settings";
 
 /**
  * useSettingsSync hydrates the shared settings store from the backend and
@@ -45,11 +45,29 @@ export function useSettingsSync(): void {
         // so the console line is the only trace of why.
         console.error("getHotkeyState failed; hotkey health is unknown", err);
       });
+    api
+      .getJoystickState()
+      .then((j) => useSettings.getState().setJoystickState(j))
+      .catch((err) => {
+        // Logged for the same reason as getHotkeyState above: the store's
+        // honest `supported: false` default hides the capture affordance's
+        // joystick half, so a rejection here silently leaves it hidden even
+        // on a machine that does support it, with nothing but this line to
+        // explain why.
+        console.error("getJoystickState failed; joystick support is unknown", err);
+      });
 
     const offs = [
       on<Settings>(EV.settingsChanged, (s) => useSettings.getState().setSettings(s)),
       on<Keybind[]>(EV.keybindsChanged, (k) => useSettings.getState().setKeybinds(k)),
       on<HotkeyState>(EV.hotkeysState, (h) => useSettings.getState().setHotkeyState(h)),
+      // The joystick half of the same contract. The hydrate above runs once,
+      // on mount, and the backend's view changes on its own afterwards: a
+      // stick plugged in later, or a transient enumeration error clearing.
+      // Without this subscription that first answer was the only one the UI
+      // ever had, so a device attached after Settings mounted stayed invisible
+      // and one bad poll pinned "Joystick unavailable" for the session.
+      on<JoystickState>(EV.joystickState, (j) => useSettings.getState().setJoystickState(j)),
     ];
     return () => offs.forEach((off) => off());
   }, []);

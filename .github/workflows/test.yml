@@ -30,10 +30,17 @@ jobs:
       # pure-Go X11 backend, so none of libxtst/libxcb/libxkbcommon is
       # required. Dropping the tag would need six more apt packages AND hit
       # gohook issue #67 (a hard C23 build break on GCC 14+).
+      #
+      # xvfb is separate: internal/hotkeys registers REAL global hotkeys
+      # through gohook's X11 backend, so 43 tests in registrar_gohook_test.go
+      # fail on a headless runner with "no X11 display found (DISPLAY is
+      # unset)". A virtual display makes them RUN rather than skip. Skipping
+      # would leave the keyboard hotkey OS layer with no CI coverage at all --
+      # the one place a regression is both silent and user-facing.
       - name: Install Linux GUI deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev xvfb
 
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
@@ -58,8 +65,11 @@ jobs:
       - name: Go vet
         run: go vet -tags purego ./...
 
+      # xvfb-run -a picks a free display number; without it, internal/hotkeys'
+      # registrar tests cannot open one. -race stays on: the hotkey dispatcher
+      # and the joystick poll loop are both concurrent.
       - name: Go test (race)
-        run: go test -tags purego -race ./...
+        run: xvfb-run -a go test -tags purego -race ./...
 
       - name: Go build
         run: go build -tags purego -o /tmp/vcs-client .

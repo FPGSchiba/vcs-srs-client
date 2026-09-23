@@ -1,33 +1,44 @@
 package keybinds
 
 import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 
-	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
-// Stolen reports which action lost a chord when another action took it.
+// ErrNoSuchTrigger means the index handed to RemoveAt was out of range.
+var ErrNoSuchTrigger = errors.New("keybinds: no such trigger")
+
+// Stolen reports which action lost a trigger when another action took it.
 type Stolen struct {
 	ActionID ActionID
-	Chord    chord.Chord
+	Trigger  trigger.Trigger
 }
 
-// Store holds the live action->chord map. Safe for concurrent use.
+// Store holds the live action->triggers map. Safe for concurrent use.
+//
+// An action holds a LIST of triggers, so a user can drive the same action
+// from a keyboard chord and a joystick button at once. Nothing here assumes
+// a trigger's kind.
 type Store struct {
 	mu sync.RWMutex
-	// binds holds bindings for action IDs we understand.
-	binds map[ActionID]chord.Chord
+	// binds holds triggers for action IDs we understand.
+	binds map[ActionID][]trigger.Trigger
 	// unknown holds raw entries whose action ID we do not recognise, so a
 	// config written by a newer version survives a load/save cycle here.
-	unknown map[string]string
+	unknown map[string][]string
 }
 
 // New returns an empty Store.
 func New() *Store {
 	return &Store{
-		binds:   map[ActionID]chord.Chord{},
-		unknown: map[string]string{},
+		binds:   map[ActionID][]trigger.Trigger{},
+		unknown: map[string][]string{},
 	}
 }
 
@@ -51,80 +62,248 @@ func isPerRadioID(id string) bool {
 }
 
 // Load replaces the store contents from a raw map (as read from config.toml).
-// Entries whose chord will not parse are dropped; entries whose action ID is
-// unrecognised are preserved verbatim for the next Snapshot.
-func (s *Store) Load(raw map[string]string) {
+// Entries that will not parse are dropped INDIVIDUALLY, keeping the rest of
+// that action's list; entries whose action ID is unrecognised are preserved
+// verbatim for the next Snapshot. An unparseable entry gets a Warn naming the
+// action and the rejected string -- like the dropped-chord Warn below, the
+// drop is destructive on the next Save, so it must be diagnosable.
+//
+// An action holds AT MOST ONE keyboard trigger (see Add's doc comment for
+// why). Load is the boundary where a hand-edited or version-skewed
+// config.toml enters, so it enforces the same invariant defensively: only
+// the FIRST KindKey trigger in an action's list survives, in the same
+// per-entry-drop spirit as an unparseable trigger. The file's order is the
+// user's order, so keeping the first is stable and predictable.
+// Joystick triggers are unaffected -- there is no limit on those.
+//
+// The drop is NOT silent. It is destructive on the next write: the store is
+// snapshotted back out on every Save, so a hand-edited
+// `"global.push_to_mute" = ["V", "Ctrl+B"]` is rewritten as
+// `"global.push_to_mute" = "V"` and the user's second chord is gone from
+// their file for good. Dropping it still beats keeping a binding that is
+// silently dead at dispatch (internal/hotkeys registers one chord per action
+// ID), but the destruction has to be diagnosable, so each dropped chord gets
+// a Warn naming the action and the chord.
+//
+// A trigger belongs to AT MOST ONE action, and Load enforces that too: a
+// trigger already claimed by an earlier action is dropped from the later one,
+// with the same Warn treatment. Without this, a hand-edited or merged config
+// with the same button under `global.ptt` and `global.push_to_mute` loaded
+// happily and one press opened PTT *and* push-to-mute, with nothing in the UI
+// indicating the collision -- Add refuses to create that state, so nothing
+// downstream is written to cope with it.
+//
+// Action IDs are therefore visited in SORTED order, not map order. Which
+// action keeps a contested trigger has to be stable: with map iteration the
+// same file would load differently on different launches, so the user would
+// see the binding move between two rows at random and, worse, the next Save
+// would persist whichever way that run happened to go.
+func (s *Store) Load(raw map[string][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.binds = map[ActionID]chord.Chord{}
-	s.unknown = map[string]string{}
+	s.binds = map[ActionID][]trigger.Trigger{}
+	s.unknown = map[string][]string{}
 	known := knownIDs()
-	for id, str := range raw {
+
+	ids := make([]string, 0, len(raw))
+	for id := range raw {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	// claimed records every trigger already taken and by whom. A slice
+	// scanned with trigger.Equal rather than a map keyed by String(): Equal
+	// is the definition of collision everywhere else in this file (Add uses
+	// it), and the action count is a few dozen, so an exact answer costs
+	// nothing.
+	type claim struct {
+		t     trigger.Trigger
+		owner string
+	}
+	var claimed []claim
+	claimant := func(t trigger.Trigger) (string, bool) {
+		for _, c := range claimed {
+			if c.t.Equal(t) {
+				return c.owner, true
+			}
+		}
+		return "", false
+	}
+
+	for _, id := range ids {
+		list := raw[id]
 		if !known[ActionID(id)] && !isPerRadioID(id) {
-			s.unknown[id] = str
+			s.unknown[id] = append([]string(nil), list...)
 			continue
 		}
-		c, err := chord.Parse(str)
-		if err != nil {
-			continue // malformed chord: drop this entry, keep the rest
+		var out []trigger.Trigger
+		keptKey := "" // the one surviving chord, for the drop warning below
+		for _, str := range list {
+			t, err := trigger.Parse(str)
+			if err != nil {
+				// Malformed trigger: drop this entry, keep the rest.
+				// Logged for the same reason as the dropped-chord Warn
+				// below -- the next Save erases the entry from the user's
+				// config.toml, so the destruction has to be diagnosable.
+				slog.Default().Warn("keybind config has an entry that could not be parsed; "+
+					"it is ignored and dropped from the file on the next save",
+					"action", id, "dropped", str, "err", err)
+				continue
+			}
+			// Checked BEFORE the one-chord-per-action rule, deliberately: a
+			// chord an earlier action already owns must not also consume
+			// this action's single chord slot. `global.ptt = ["F1"]` with
+			// `global.push_to_mute = ["F1", "F2"]` leaves push_to_mute bound
+			// to F2, which is what the file asked for once F1 is off the
+			// table; the other order would leave it bound to nothing.
+			if owner, taken := claimant(t); taken {
+				// Already bound to an earlier action. Dropped rather than
+				// duplicated, because a duplicate is not a richer binding --
+				// it is one press firing two actions with no way to see why.
+				// Logged like the other two drops: the next Save erases it
+				// from the user's config.toml, so it has to be diagnosable.
+				slog.Default().Warn("keybind config binds one trigger to more than one action; "+
+					"it is kept on the first action only and dropped from the file on the next save",
+					"action", id, "dropped", t.String(), "kept_on", owner)
+				continue
+			}
+			if t.Kind == trigger.KindKey {
+				if keptKey != "" {
+					// At most one keyboard trigger per action: drop extras,
+					// first wins. Logged because the next Save erases it
+					// from the user's config.toml. keptKey rather than
+					// out[0] -- a joystick trigger listed before the chord
+					// would otherwise be reported as the survivor.
+					slog.Default().Warn("keybind config has more than one keyboard chord for an action; "+
+						"only the first is kept and the rest are dropped from the file on the next save",
+						"action", id, "kept", keptKey, "dropped", t.String())
+					continue
+				}
+				keptKey = t.String()
+			}
+			claimed = append(claimed, claim{t: t, owner: id})
+			out = append(out, t)
 		}
-		s.binds[ActionID(id)] = c
+		if len(out) > 0 {
+			s.binds[ActionID(id)] = out
+		}
 	}
 }
 
-// Snapshot renders the store as a raw map for persistence, including preserved
-// unknown entries.
-func (s *Store) Snapshot() map[string]string {
+// Snapshot renders the store as a raw map for persistence, including
+// preserved unknown entries.
+func (s *Store) Snapshot() map[string][]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[string]string, len(s.binds)+len(s.unknown))
-	for id, c := range s.binds {
-		out[string(id)] = c.String()
+	out := make(map[string][]string, len(s.binds)+len(s.unknown))
+	for id, list := range s.binds {
+		strs := make([]string, 0, len(list))
+		for _, t := range list {
+			strs = append(strs, t.String())
+		}
+		out[string(id)] = strs
 	}
-	for id, str := range s.unknown {
-		out[id] = str
+	for id, list := range s.unknown {
+		out[id] = append([]string(nil), list...)
 	}
 	return out
 }
 
-// Get returns the chord bound to id.
-func (s *Store) Get(id ActionID) (chord.Chord, bool) {
+// Get returns the triggers bound to id.
+func (s *Store) Get(id ActionID) ([]trigger.Trigger, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	c, ok := s.binds[id]
-	return c, ok
+	list, ok := s.binds[id]
+	return append([]trigger.Trigger(nil), list...), ok
 }
 
-// All returns a copy of the live bindings.
-func (s *Store) All() map[ActionID]chord.Chord {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make(map[ActionID]chord.Chord, len(s.binds))
-	for k, v := range s.binds {
-		out[k] = v
-	}
-	return out
-}
-
-// Set binds c to id. If another action already holds c, that action is unbound
-// and returned as Stolen. Rebinding an action to the chord it already holds is
-// not a steal.
-func (s *Store) Set(id ActionID, c chord.Chord) *Stolen {
+// Add appends t to id's trigger list. If another action already holds t, that
+// action loses just that one trigger and it is returned as Stolen -- its
+// other bindings survive, which is the point of the additive model. Adding a
+// trigger an action already holds is a no-op, not a steal.
+//
+// Keyboard and joystick triggers can never collide because trigger.Equal
+// compares Kind first, so the two kinds are separate conflict namespaces
+// without a special case here.
+//
+// The steal loop breaks after the FIRST victim, and that is exact rather
+// than approximate: a trigger belongs to at most one action, and the
+// invariant is inductive over every mutator. Load establishes it (it drops a
+// trigger an earlier action already claimed), Add preserves it (it takes the
+// one holder's copy before adding its own), and RemoveAt/Clear only ever
+// remove. So there is never a second victim to find, and Stolen -- which
+// names exactly one action, all the way out to StolenDTO and the UI's
+// "taken from ..." line -- can stay a single value. Sweeping the whole map
+// anyway would not report any more than this does; it would only hide a
+// broken invariant instead of letting it surface.
+//
+// An action holds AT MOST ONE keyboard trigger: adding a second chord
+// replaces the first. internal/hotkeys registers one chord per action ID
+// (Manager.Apply and dispatcher.binds are both keyed that way), so a second
+// chord would persist, render, and never fire. Replacing keeps that
+// impossible without reopening the shipped keyboard path. Joystick triggers
+// have no such limit.
+func (s *Store) Add(id ActionID, t trigger.Trigger) *Stolen {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	for _, existing := range s.binds[id] {
+		if existing.Equal(t) {
+			return nil // already bound here
+		}
+	}
+
+	if t.Kind == trigger.KindKey {
+		kept := s.binds[id][:0:0]
+		for _, existing := range s.binds[id] {
+			if existing.Kind != trigger.KindKey {
+				kept = append(kept, existing)
+			}
+		}
+		s.binds[id] = kept
+	}
+
 	var stolen *Stolen
-	for other, existing := range s.binds {
-		if other != id && existing == c {
-			stolen = &Stolen{ActionID: other, Chord: existing}
-			delete(s.binds, other)
+	for other, list := range s.binds {
+		if other == id {
+			continue
+		}
+		for i, existing := range list {
+			if !existing.Equal(t) {
+				continue
+			}
+			stolen = &Stolen{ActionID: other, Trigger: existing}
+			s.binds[other] = append(list[:i:i], list[i+1:]...)
+			if len(s.binds[other]) == 0 {
+				delete(s.binds, other)
+			}
+			break
+		}
+		if stolen != nil {
 			break
 		}
 	}
-	s.binds[id] = c
+
+	s.binds[id] = append(s.binds[id], t)
 	return stolen
 }
 
-// Clear removes any binding for id.
+// RemoveAt drops the trigger at index i from id's list.
+func (s *Store) RemoveAt(id ActionID, i int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.binds[id]
+	if i < 0 || i >= len(list) {
+		return fmt.Errorf("%w: %s[%d]", ErrNoSuchTrigger, id, i)
+	}
+	s.binds[id] = append(list[:i:i], list[i+1:]...)
+	if len(s.binds[id]) == 0 {
+		delete(s.binds, id)
+	}
+	return nil
+}
+
+// Clear removes every binding for id.
 func (s *Store) Clear(id ActionID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -12,6 +12,14 @@ interface KeyChipProps {
   binding: string;
   onCapture: (c: Capture) => void;
   onCancel?: () => void;
+  /** Seeds the chip already listening on mount, skipping the click-to-arm
+   * step. Keybinds.tsx's capture affordance needs this: clicking its "+"
+   * already begins a backend capture session (which arms the joystick half
+   * immediately), so a fresh KeyChip must start listening in the same
+   * instant -- an extra click here would make the keyboard half of "one
+   * capture, either input" lag behind the joystick half. Every other caller
+   * keeps the default click-to-arm behaviour. */
+  autoListen?: boolean;
 }
 
 /** Physical key codes that are modifiers on their own -- ignored while
@@ -48,12 +56,14 @@ const BARE_MODIFIER_CODES = new Set([
  * `stopListening` below so a future new exit path can't forget to call
  * `onCancel`.
  */
-export function KeyChip({ binding, onCapture, onCancel }: KeyChipProps) {
-  const [listening, setListening] = useState(false);
+export function KeyChip({ binding, onCapture, onCancel, autoListen = false }: KeyChipProps) {
+  const [listening, setListening] = useState(autoListen);
 
   // Mirrors `listening` synchronously so the unmount cleanup below can read
   // the latest value without depending on an extra render having happened.
-  const listeningRef = useRef(false);
+  // Seeded from `autoListen` too, or a chip that starts listening would
+  // report itself as not listening to its own unmount cleanup.
+  const listeningRef = useRef(autoListen);
   const onCaptureRef = useRef(onCapture);
   const onCancelRef = useRef(onCancel);
   onCaptureRef.current = onCapture;

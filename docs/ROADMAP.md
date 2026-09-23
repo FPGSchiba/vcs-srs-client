@@ -71,6 +71,32 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
 
 ---
 
+## Phase 3.5 — Joystick / gamepad keybinds
+
+**Status:** `[x]` complete 2026-09-23 — Trigger lists (keyboard chord and/or joystick), the polled `internal/joystick` manager, vendored DirectInput backend on Windows, evdev backend on Linux, macOS unsupported stub, refcounted multi-source PTT, and the Settings Keybinds multi-chip UI all landed on `feat/joystick-gamepad-keybinds`.
+
+Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Audio at the user's request, and churning eight phase numbers to record that would cost more than it explains.
+
+**Verification status:** the full automated suite is green — `go build ./...`, `go vet ./...`, `go test -race ./internal/...` (13 packages), clean cross-compilation of `./internal/joystick/...` for windows/amd64, linux/amd64 and darwin/arm64, and the frontend's `vitest`/`tsc --noEmit`/production build (see Task 15's report). (A *whole-tree* `GOOS=linux` build cannot be done from a macOS host at all: Wails v3's own GTK backend needs cgo and Linux C headers. That is pre-existing and unrelated to this phase — the failure is entirely inside `wails/v3/pkg/application`.) **The phase has NOT been verified on real hardware.** This environment is macOS-only, so the Windows DirectInput and Linux evdev backends have never been executed — only compiled. In particular, whether Star Citizen keeps force feedback on a real FFB stick while VCS reads the same device (spec risk J1/J2, the one finding the original spike could not prove) is still unknown, as is whether `BTN_TRIGGER_HAPPY*` buttons register on a high-button-count Linux HOTAS (risk J5 for identical devices is likewise unverified). A concrete manual checklist covering every hardware-dependent item — force-feedback coexistence in both launch orders first, then background input, tray behaviour, hot-plug, config round-trip, capture safety, Linux group permissions, and the macOS no-op path — is written up and waiting for a human to run: [`2026-09-18-joystick-manual-verification.md`](./superpowers/plans/2026-09-18-joystick-manual-verification.md). Treat Phase 3.5 as code-complete, not field-verified, until that checklist has been executed.
+
+**Design doc:** [`2026-09-18-joystick-gamepad-keybinds-design.md`](./superpowers/specs/2026-09-18-joystick-gamepad-keybinds-design.md)
+**Spike:** [`2026-09-18-gamepad-joystick-bindings-spike.md`](./superpowers/specs/2026-09-18-gamepad-joystick-bindings-spike.md)
+
+**Headline deliverables**
+- An action holds a *list* of triggers — keyboard chord and/or joystick button — instead of one. Purely additive; existing `config.toml` files load unchanged and are rewritten byte-identical.
+- `internal/trigger` (Trigger / JoyBinding value types) and `internal/joystick` (polled OS source, sibling to `internal/hotkeys`)
+- Non-exclusive background DirectInput on Windows via vendored `gonutz/di8`; `holoplot/go-evdev` on Linux; macOS reports unsupported
+- Buttons and POV hat directions, with an optional modifier button that may live on a different device
+- Per-action press refcount so keyboard + joystick held together cannot cut PTT mid-transmission
+
+**Why no SDL:** SDL unconditionally takes `DISCL_EXCLUSIVE` on every DirectInput joystick it opens, and Microsoft documents exclusive access as both required for force feedback and mutually exclusive between applications — so an SDL-based client would likely cost Star Citizen its force feedback. DCS-SRS, the closest prior art, uses `Background | NonExclusive`. See the spike for the evidence.
+
+**Blocking deps:** none
+
+**Hardware gate:** field verification is not done until run on Windows with Star Citizen running and a force-feedback stick — SC must keep force feedback while VCS reads the same device. See "Verification status" above and the manual checklist it links.
+
+---
+
 ## Phase 4 — Audio I/O
 
 **Status:** `[ ]`
@@ -137,6 +163,10 @@ Cross-phase tracking. Phase 1 is detailed in `docs/superpowers/specs/2026-05-31-
   notification channel lands it is the right home, since a registration
   failure is exactly the kind of thing the user must learn about without
   having Settings open. See the Phase 3 spec's R12 for the origin.
+  **This covers joystick failures too** (Phase 3.5): the same two cases, plus
+  a third global state that is informational rather than an error —
+  "joystick input is unsupported on this platform" on macOS, which must never
+  render as a failure.
 - Fleet Mode popout (C2 view)
 - Transmission history view (local JSON ring buffer)
 - OS-keychain migration for session token (closes R4)

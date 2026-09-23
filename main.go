@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"log"
+	"log/slog"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -10,6 +11,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
+	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/session"
 	"github.com/FPGSchiba/vcs-srs-client/internal/version"
@@ -45,6 +47,38 @@ func main() {
 		JSON:     true,
 		FilePath: logPath, // empty if resolution failed → logger uses its default
 	})
+
+	// Install appLog as the slog default so packages that log through
+	// slog.Default() reach the rotating FILE, not just stderr.
+	//
+	// This is load-bearing, not tidiness. internal/keybinds/store.go destroys
+	// a binding when a config lists more than one keyboard chord for an
+	// action, and justifies that destruction on the grounds that the drop is
+	// diagnosable -- it emits a Warn naming the action and the dropped chord.
+	// Nothing ever called slog.SetDefault in production, so that Warn went to
+	// stderr alone, and a Wails GUI build on Windows has no console: the
+	// warning was discarded outright while its unit test passed, because the
+	// test installs a handler of its own. Same for internal/app/app.go's
+	// slog.Default() fallback and the Windows joystick backend's.
+	//
+	// appLog is logger.New's handler over io.MultiWriter(stderr, lumberjack),
+	// so this adds a route, it does not duplicate one: nothing else bridges
+	// slog.Default() to appLog. It also redirects the standard log package's
+	// output here, which is what carries the log.Fatal at the bottom of main
+	// into the log file instead of a console nobody sees.
+	//
+	// SetLogLoggerLevel FIRST, and it is not optional. SetDefault routes the
+	// standard log package through a handlerWriter pinned at LevelInfo, which
+	// DROPS the record when the handler is not enabled at that level. So with
+	// log_level = "WARN" or "ERROR" -- a perfectly ordinary setting for a user
+	// cutting noise -- log.Fatal(err) at the bottom of main would write
+	// NOWHERE: not the file, not stderr, where before this line it at least
+	// reached stderr. The app would exit 1 in total silence on the single most
+	// important message it can emit. Error is enabled at every level ParseLevel
+	// can return, so pinning it there keeps that message alive whatever the
+	// user configured.
+	slog.SetLogLoggerLevel(slog.LevelError)
+	slog.SetDefault(appLog)
 
 	if logPathErr != nil {
 		appLog.Warn("could not resolve app-data log path; using default location", "err", logPathErr)
@@ -94,6 +128,19 @@ func main() {
 	kb := keybinds.New()
 	hk := hotkeys.New(hotkeys.NewOSRegistrar(), gui)
 	gui.SetSettingsBackend(cfg, cfgPath, kb, hk, emitter)
+
+	// Joystick/gamepad input. A failure here is never fatal: the client is a
+	// voice-comms app first, and keyboard binds must keep working on a
+	// machine with no joystick, no permission to read one, or no backend at
+	// all (macOS). The manager reports "unsupported" and the UI hides the
+	// affordance.
+	if joySrc, err := joystick.NewOSSource(appLog); err != nil {
+		appLog.Warn("joystick input unavailable; keyboard binds are unaffected", "err", err)
+	} else {
+		jm := joystick.New(joySrc, gui, appLog)
+		gui.SetJoystickBackend(jm)
+		defer jm.Close()
+	}
 
 	// Main window: frameless + transparent, fixed 1440x900, loads the main entry.
 	// Named so the tray (internal/app/tray.go) can resolve it back out of the

@@ -10,6 +10,30 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// BestEffort wraps w so that its write errors can never abort an
+// io.MultiWriter chain: Write always reports a full, successful write.
+//
+// io.MultiWriter.Write returns on the FIRST writer's error and never reaches
+// the rest. A production Windows build links with -H windowsgui (see
+// build/windows/Taskfile.yml), so a binary launched from Explorer has no
+// console and every os.Stderr.Write fails with ERROR_INVALID_HANDLE. Without
+// this wrapper the rotating log file -- the only sink that exists on such a
+// build, and the one the joystick hardware-verification checklist reads
+// "joystick bind fired" from -- would receive nothing at all, and the
+// verifier would read an empty file as "the binding did not fire".
+//
+// Only stderr is wrapped. The file writer stays unwrapped so a genuinely
+// broken log file still surfaces its error to the caller.
+func BestEffort(w io.Writer) io.Writer { return bestEffort{w: w} }
+
+type bestEffort struct{ w io.Writer }
+
+// Write attempts the underlying write and then reports success regardless.
+func (b bestEffort) Write(p []byte) (int, error) {
+	b.w.Write(p) //nolint:errcheck // deliberately ignored; see BestEffort's doc
+	return len(p), nil
+}
+
 // Options configures the logger. Writer overrides FilePath when set (used in tests).
 type Options struct {
 	Level    slog.Level
@@ -27,7 +51,10 @@ func New(opt Options) *slog.Logger {
 			path = "log/vcs-client.log"
 		}
 		file := &lumberjack.Logger{Filename: path, MaxSize: 10, MaxBackups: 3, MaxAge: 180}
-		w = io.MultiWriter(os.Stderr, file)
+		// stderr first and best-effort, the file second and unwrapped: a dead
+		// console can then never starve the file, while a broken file still
+		// reports its own error. See BestEffort.
+		w = io.MultiWriter(BestEffort(os.Stderr), file)
 	}
 	handlerOpts := &slog.HandlerOptions{Level: opt.Level, AddSource: true}
 	var handler slog.Handler

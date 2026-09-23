@@ -1,15 +1,17 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Panel } from "../../../../../shared/components/Panel";
 import { Button } from "../../../../../shared/components/Button";
 import { KeyChip } from "../../../../../shared/components/KeyChip";
 import type { Capture } from "../../../../../shared/components/KeyChip";
+import { TriggerChip } from "../../../../../shared/components/TriggerChip";
 import { api } from "../../../../../shared/api/client";
+import { on, EV } from "../../../../../shared/api/events";
 import { useSettings } from "../../../../../shared/store/settings";
-import type { Keybind } from "../../../../../shared/store/settings";
+import type { Keybind, Stolen } from "../../../../../shared/store/settings";
 
 interface StolenInfo {
   actionId: string;
-  chord: string;
+  triggerLabel: string;
   label: string;
 }
 
@@ -18,7 +20,7 @@ interface GroupDef {
   title: string;
 }
 
-/** Categories rendered as flat rows (one KeyChip + UNBIND each). PerRadio is
+/** Categories rendered as flat rows (chips + UNBIND each). PerRadio is
  * handled separately below since it renders as a `.tbl` table instead. */
 const SIMPLE_GROUPS: GroupDef[] = [
   { category: "global", title: "GLOBAL" },
@@ -58,24 +60,27 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
 /**
  * Keybinds renders the four keybind groups from the design prototype's
  * SettingsKeybinds (`design/vcs/project/screens/settings.jsx`), backed by
- * `useSettings().keybinds` / `.hotkeys`.
+ * `useSettings().keybinds` / `.hotkeys` / `.joystick`.
  *
- * Three correctness properties this file is built around:
+ * Five correctness properties this file is built around:
  *
  * 1. `handleCapture` always ends the capture in a `finally`. The backend
  *    suspends every OS hotkey registration for the duration of a capture;
- *    if `setKeybind` throws and the capture is never ended, every global
+ *    if `addTrigger` throws and the capture is never ended, every global
  *    hotkey stays dead until the backend's own timeout.
  *
- * 2. Only one chip may listen at a time. `capturingId` tracks which
- *    action_id is currently allowed to listen; clicking a different chip
- *    bumps that other chip's `epoch`, which changes its KeyChip `key` and
- *    forces React to unmount the old (listening) instance. KeyChip already
- *    treats "unmount while listening" as a cancel path (see its own
- *    doc-comment), so the forced remount routes through that existing
- *    safety net instead of duplicating it here -- without this, two
- *    mounted chips would both hold a window keydown listener and a single
- *    keypress would fire `setKeybind` twice.
+ * 2. Only one chip may listen at a time, by construction. `capturingId` is a
+ *    single string, and each row's capture affordance is a straight type
+ *    swap on it: `capturingId === kb.action_id` renders that row's KeyChip,
+ *    anything else renders its `+` button. Clicking a different row's `+`
+ *    therefore does not just start a new capture; it also flips the
+ *    PREVIOUS row's element from KeyChip back to a button, a type change
+ *    React unmounts regardless of any `key`. KeyChip already treats
+ *    "unmount while listening" as a cancel path (see its own doc-comment),
+ *    so that existing safety net closes the superseded capture without this
+ *    file having to orchestrate it directly -- without it, two mounted
+ *    chips would both hold a window keydown listener and a single keypress
+ *    would fire `addTrigger` twice.
  *
  *    That forced unmount arrives AFTER React commits, so the superseded
  *    chip's cancel reaches the backend after the new chip's
@@ -85,8 +90,14 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    token back, and the backend only re-arms for the token that is still
  *    current. A superseded row's end is a no-op there, so the new capture
  *    keeps its hotkeys suspended. The same inversion happens when the user
- *    clicks a new chip while the previous row's `setKeybind` is still in
+ *    clicks a new chip while the previous row's `addTrigger` is still in
  *    flight, and the token covers that too.
+ *
+ *    (An earlier revision of this file forced that unmount itself, via a
+ *    per-row `epoch` counter bumped into a KeyChip `key`. That machinery is
+ *    gone: once idle-vs-capturing became a type swap instead of one KeyChip
+ *    always mounted per row, the swap itself already unmounts the old
+ *    instance, and the extra remount trigger had nothing left to do.)
  *
  * 3. Per-row failures: `internal/chord` accepts keys the OS layer can't
  *    register (Numpad, F21-F24, punctuation, navigation), so a chord can
@@ -105,13 +116,25 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    is nothing to grant. `requestHotkeyPermission()`'s `prompted` result is
  *    never treated as a grant -- macOS resolves the prompt asynchronously
  *    and the answer only ever arrives via `hotkeys:state`.
+ *
+ * 5. One capture affordance, either input. Rather than making the user
+ *    choose "keyboard or joystick" first, a single capture accepts
+ *    whichever arrives first: a DOM keydown through KeyChip, or a joystick
+ *    binding the backend captured and bound itself. The joystick half
+ *    completes in Go (the manager already holds the binding, so bouncing it
+ *    through here would add a race for nothing) and arrives as
+ *    `keybinds:joy_captured`, which this component uses only to close the
+ *    listening chip. KeyChip is told to start listening the instant it
+ *    mounts (`autoListen`), rather than requiring a second click to arm it,
+ *    so the keyboard half is live from the same click that starts the
+ *    joystick half -- one click, one capture, either input.
  */
 export function Keybinds() {
   const keybinds = useSettings((s) => s.keybinds);
   const hotkeys = useSettings((s) => s.hotkeys);
+  const joystick = useSettings((s) => s.joystick);
 
   const [capturingId, setCapturingId] = useState<string | null>(null);
-  const [epoch, setEpoch] = useState<Record<string, number>>({});
   const [stolen, setStolen] = useState<StolenInfo | null>(null);
 
   // Permission-banner state. `requested` unlocks RE-CHECK; `promptSpent`
@@ -127,12 +150,6 @@ export function Keybinds() {
   // another row's capture, and it must never trigger a re-render.
   const tokens = useRef<Map<string, Promise<number>>>(new Map());
 
-  const bumpEpoch = (actionId: string) =>
-    setEpoch((e) => ({ ...e, [actionId]: (e[actionId] ?? 0) + 1 }));
-
-  // Wired via onClickCapture on a wrapper around each KeyChip, so it runs
-  // before KeyChip's own onClick (bubble phase) -- "beginCapture first,
-  // then let KeyChip listen".
   const handleChipClick = (actionId: string) => {
     if (capturingId === actionId) {
       // Re-clicking the chip that's already listening is itself a cancel;
@@ -140,11 +157,10 @@ export function Keybinds() {
       return;
     }
     setStolen(null);
-    if (capturingId) bumpEpoch(capturingId);
     setCapturingId(actionId);
     tokens.current.set(
       actionId,
-      api.beginCapture().catch((err) => {
+      api.beginCapture(actionId).catch((err) => {
         console.error("beginCapture failed", err);
         // 0 is never a live generation, so the matching endCapture below is
         // a no-op -- which is right: if the capture never began, the backend
@@ -171,20 +187,31 @@ export function Keybinds() {
     }
   };
 
+  // Ends this row's pending capture and stops it from listening. Shared by
+  // every "capture is over" path that isn't a successful keyboard capture:
+  // Escape/blur/re-click (via KeyChip's onCancel) and a joystick capture
+  // completing server-side (via keybinds:joy_captured below).
+  const closeCapture = (actionId: string) => {
+    void endCapture(actionId);
+    setCapturingId((cur) => (cur === actionId ? null : cur));
+  };
+
   const handleCapture = (actionId: string) => async (cap: Capture) => {
     try {
-      const res = await api.setKeybind(actionId, cap);
+      const res = await api.addTrigger(actionId, cap);
       setStolen(
-        res.stolen ? { actionId, chord: res.stolen.chord, label: res.stolen.label } : null,
+        res.stolen
+          ? { actionId, triggerLabel: res.stolen.trigger.label, label: res.stolen.label }
+          : null,
       );
     } catch {
       // Swallowed deliberately: KeyChip invokes onCapture without awaiting
       // or catching its result, so a rethrow here would only surface as an
-      // unhandled rejection. The backend is the source of truth for the
-      // bound chord (SettingsScreen's keybinds:changed subscription), so a
-      // failed write simply leaves the row showing its previous chord.
+      // unhandled rejection. The backend is the source of truth for bound
+      // triggers (SettingsScreen's keybinds:changed subscription), so a
+      // failed write simply leaves the row showing its previous triggers.
     } finally {
-      // Runs even when setKeybind throws, so the backend always re-arms its
+      // Runs even when addTrigger throws, so the backend always re-arms its
       // OS hotkey registrations instead of staying suspended until its own
       // timeout.
       await endCapture(actionId);
@@ -192,16 +219,106 @@ export function Keybinds() {
     }
   };
 
-  const handleCancel = (actionId: string) => () => {
-    void endCapture(actionId);
-    setCapturingId((cur) => (cur === actionId ? null : cur));
+  const handleCancel = (actionId: string) => () => closeCapture(actionId);
+
+  const handleRemove = async (actionId: string, index: number) => {
+    try {
+      await api.removeTrigger(actionId, index);
+    } catch (err) {
+      // The backend is the source of truth (keybinds:changed), so a failed
+      // removal simply leaves the row as it was.
+      console.error("removeTrigger failed", err);
+    }
   };
 
   const handleUnbind = (actionIds: string[]) => () => {
     actionIds.forEach((id) => void api.clearKeybind(id));
   };
 
-  const chipKey = (actionId: string) => `${actionId}:${epoch[actionId] ?? 0}`;
+  // Closes the listening chip when a joystick capture completes and binds
+  // itself server-side (see the doc-comment's property 5), and reports any
+  // steal it caused. Guarded on the action id still matching so a late/stale
+  // event for a row the user has already moved away from cannot reopen or
+  // re-end a capture that finished through some other path.
+  //
+  // The steal has to arrive HERE rather than from a call's return value: a
+  // joystick capture completes in the backend and returns to no caller, so
+  // without the event the losing row's chip would simply vanish on the next
+  // `keybinds:changed` with no warning -- while the identical steal performed
+  // with a key shows one. Same banner, same shape, either input.
+  useEffect(() => {
+    return on<{ action_id: string; stolen?: Stolen | null }>(
+      EV.joystickCaptured,
+      ({ action_id, stolen: taken }) => {
+        if (capturingId !== action_id) return;
+        setStolen(
+          taken ? { actionId: action_id, triggerLabel: taken.trigger.label, label: taken.label } : null,
+        );
+        closeCapture(action_id);
+      },
+    );
+  }, [capturingId]);
+
+  // Stops the row listening when the BACKEND tore the capture down on its own
+  // -- the auto-resume timeout fired because `endCapture` never arrived (see
+  // the doc-comment's property 1 for why it normally does).
+  //
+  // That timeout is a crashed-frontend safety net, but a live frontend has to
+  // be told too. Without this the row kept rendering "Press a key or joystick
+  // button ..." over a capture that no longer existed, with both backend
+  // managers already resumed: the user's next joystick press bound nothing and
+  // instead fired whatever action already held that button -- keying the radio,
+  // with nothing on screen to say why the binding had not taken. The keyboard
+  // half was self-recovering (a keypress still reached `addTrigger`), so this
+  // only bites the joystick half, which completes inside the Go manager and is
+  // gone once cancelled.
+  //
+  // `tokens` is cleared FIRST so the unmount KeyChip performs on the type swap
+  // back to `+` -- which it reports as a cancel -- finds nothing to end: the
+  // backend has already resumed this generation and must not be told again.
+  useEffect(() => {
+    return on<{ action_id: string }>(EV.captureExpired, ({ action_id }) => {
+      if (capturingId !== action_id) return;
+      tokens.current.delete(action_id);
+      setCapturingId((cur) => (cur === action_id ? null : cur));
+    });
+  }, [capturingId]);
+
+  // Unsupported (macOS) is not denied -- there is nothing the user can grant
+  // -- so the joystick half of the prompt, and any joystick affordance,
+  // disappears entirely rather than showing a dead end.
+  const capturePrompt = joystick.supported
+    ? "Press a key or joystick button — hold a second button first for a modifier."
+    : "Press a key.";
+
+  const renderTriggers = (kb: Keybind) => (
+    <span className="trigger-row">
+      {kb.triggers.map((t, i) => (
+        <TriggerChip
+          key={`${t.kind}-${t.label}-${i}`}
+          trigger={t}
+          onRemove={() => void handleRemove(kb.action_id, i)}
+        />
+      ))}
+      {capturingId === kb.action_id ? (
+        <KeyChip
+          binding=""
+          autoListen
+          onCapture={handleCapture(kb.action_id)}
+          onCancel={handleCancel(kb.action_id)}
+        />
+      ) : (
+        <button
+          type="button"
+          className="kbd add-binding"
+          aria-label={`Add binding for ${kb.label}`}
+          onClick={() => handleChipClick(kb.action_id)}
+        >
+          +
+        </button>
+      )}
+    </span>
+  );
 
   const renderChip = (kb: Keybind) => {
     // Suppressed while the banner is up. `registered === false` means NOTHING
@@ -213,16 +330,18 @@ export function Keybinds() {
     // which is the only case where the per-row text says something the
     // banner does not.
     const failedReason = hotkeys.registered ? hotkeys.failed[kb.action_id] : undefined;
+    const isCapturing = capturingId === kb.action_id;
     return (
       <div className="col" style={{ gap: 2, alignItems: "flex-end" }}>
-        <span onClickCapture={() => handleChipClick(kb.action_id)}>
-          <KeyChip
-            key={chipKey(kb.action_id)}
-            binding={kb.chord}
-            onCapture={handleCapture(kb.action_id)}
-            onCancel={handleCancel(kb.action_id)}
-          />
-        </span>
+        {renderTriggers(kb)}
+        {isCapturing && (
+          <span
+            className="cap-dim"
+            style={{ fontSize: 9, textTransform: "none", letterSpacing: "0.04em" }}
+          >
+            {capturePrompt}
+          </span>
+        )}
         {failedReason && (
           <span className="cap" style={{ fontSize: 9, color: "var(--ac-warn)" }}>
             {failedReason}
@@ -230,7 +349,7 @@ export function Keybinds() {
         )}
         {stolen?.actionId === kb.action_id && (
           <span className="cap" style={{ fontSize: 9, color: "var(--ac-warn)" }}>
-            ⚠ {stolen.chord} taken from {stolen.label}
+            ⚠ {stolen.triggerLabel} taken from {stolen.label}
           </span>
         )}
       </div>
@@ -353,6 +472,20 @@ export function Keybinds() {
               Accessibility is granted — restart VCS for hotkeys to take effect.
             </span>
           )}
+        </div>
+      )}
+
+      {/* Unsupported (macOS today) is informational, not an error -- there is
+          nothing to grant -- so this never renders any affordance, only the
+          fixed error text a supported-but-broken subsystem reports. Its own
+          copy, deliberately not the Accessibility banner's: a Linux
+          `input`-group permission problem and a macOS Accessibility grant
+          are different causes with different fixes. */}
+      {joystick.supported && joystick.error && (
+        <div className="col gap-3" style={{ padding: "8px 12px" }}>
+          <span className="cap" style={{ color: "var(--ac-warn)" }}>
+            Joystick unavailable — {joystick.error}
+          </span>
         </div>
       )}
 

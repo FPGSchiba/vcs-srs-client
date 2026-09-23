@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
 // ActionID identifies a bindable action, e.g. "global.ptt", "radio.1.ptt".
@@ -82,17 +83,18 @@ func PerRadioActions(radios []RadioRef) []Action {
 }
 
 // Defaults are the bindings shipped on first run, matching the design
-// prototype. global.ptt ships unbound deliberately — it is the one the user is
-// most likely to want on their own key.
-func Defaults() map[ActionID]chord.Chord {
-	must := func(s string) chord.Chord {
+// prototype. global.ptt ships unbound deliberately -- it is the one the user
+// is most likely to want on their own key. No joystick defaults ship: we
+// cannot know what devices a user owns.
+func Defaults() map[ActionID][]trigger.Trigger {
+	must := func(s string) []trigger.Trigger {
 		c, err := chord.Parse(s)
 		if err != nil {
 			panic("keybinds: bad default chord " + s + ": " + err.Error())
 		}
-		return c
+		return []trigger.Trigger{trigger.Key(c)}
 	}
-	return map[ActionID]chord.Chord{
+	return map[ActionID][]trigger.Trigger{
 		"global.push_to_mute":        must("V"),
 		"global.mute_toggle":         must("M"),
 		"global.emergency_broadcast": must("Ctrl+E"),

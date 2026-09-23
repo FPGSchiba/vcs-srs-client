@@ -1,167 +1,419 @@
-package keybinds
+package keybinds_test
 
 import (
-	"reflect"
+	"bytes"
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
+	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
-func mustChord(t *testing.T, s string) chord.Chord {
+func key(t *testing.T, s string) trigger.Trigger {
 	t.Helper()
 	c, err := chord.Parse(s)
 	if err != nil {
-		t.Fatalf("Parse(%q): %v", s, err)
+		t.Fatalf("chord.Parse(%q): %v", s, err)
 	}
-	return c
+	return trigger.Key(c)
 }
 
-func TestIsPerRadioID(t *testing.T) {
-	tests := []struct {
-		id   string
-		want bool
-	}{
-		{"radio.1.ptt", true},
-		{"radio.12.select", true},
-		{"radio.999.ptt", true},
-		{"radio.ptt", false},    // no ID segment
-		{"radio..ptt", false},   // empty ID segment
-		{"global.ptt", false},   // wrong prefix
-		{"radio.1.mute", false}, // wrong suffix
-		{"radio.1.PTT", false},  // case-sensitive
-		{"radio", false},        // too short
-		{"radio.", false},       // incomplete
-		{"radio.1", false},      // incomplete (missing suffix)
-	}
-	for _, tt := range tests {
-		t.Run(tt.id, func(t *testing.T) {
-			if got := isPerRadioID(tt.id); got != tt.want {
-				t.Errorf("isPerRadioID(%q) = %v, want %v", tt.id, got, tt.want)
-			}
-		})
-	}
+func joy(dev string, btn trigger.Button) trigger.Trigger {
+	return trigger.Joy(trigger.JoyBinding{Device: trigger.DeviceID(dev), Button: btn})
 }
 
-func TestSetAndGet(t *testing.T) {
-	s := New()
-	c := mustChord(t, "F1")
-	if stolen := s.Set("global.ptt", c); stolen != nil {
-		t.Errorf("unexpected steal: %+v", stolen)
-	}
+func TestAddAccumulatesTriggers(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+
 	got, ok := s.Get("global.ptt")
-	if !ok || got != c {
-		t.Errorf("Get = %v/%v, want %v/true", got, ok, c)
+	if !ok || len(got) != 2 {
+		t.Fatalf("Get after two Adds = %v (ok=%v), want 2 triggers", got, ok)
+	}
+	if !got[0].Equal(key(t, "F1")) || !got[1].Equal(joy("stick-c3", 11)) {
+		t.Errorf("triggers out of order or wrong: %+v", got)
 	}
 }
 
-func TestSetStealsExistingBinding(t *testing.T) {
-	s := New()
-	f1 := mustChord(t, "F1")
-	s.Set("radio.1.ptt", f1)
+func TestAddIsIdempotentForTheSameTrigger(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	if stolen := s.Add("global.ptt", key(t, "F1")); stolen != nil {
+		t.Errorf("re-adding an action's own trigger reported a steal: %+v", stolen)
+	}
+	if got, _ := s.Get("global.ptt"); len(got) != 1 {
+		t.Errorf("re-adding duplicated the trigger: %+v", got)
+	}
+}
 
-	stolen := s.Set("radio.2.ptt", f1)
+func TestAddStealsFromAnotherAction(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	stolen := s.Add("channel.intercom", key(t, "F1"))
 	if stolen == nil {
-		t.Fatal("expected a steal, got nil")
+		t.Fatal("Add over another action's trigger reported no steal")
 	}
-	if stolen.ActionID != "radio.1.ptt" {
-		t.Errorf("stolen from %q, want radio.1.ptt", stolen.ActionID)
+	if stolen.ActionID != "global.ptt" {
+		t.Errorf("stolen from %q, want global.ptt", stolen.ActionID)
 	}
-	if stolen.Chord != f1 {
-		t.Errorf("stolen chord = %v, want %v", stolen.Chord, f1)
-	}
-	if _, ok := s.Get("radio.1.ptt"); ok {
-		t.Error("previous owner must be unbound after a steal")
-	}
-	if got, _ := s.Get("radio.2.ptt"); got != f1 {
-		t.Error("new owner must hold the chord")
+	if got, _ := s.Get("global.ptt"); len(got) != 0 {
+		t.Errorf("victim kept the stolen trigger: %+v", got)
 	}
 }
 
-func TestSetSameActionSameChordIsNotASteal(t *testing.T) {
-	s := New()
-	f1 := mustChord(t, "F1")
-	s.Set("global.ptt", f1)
-	if stolen := s.Set("global.ptt", f1); stolen != nil {
-		t.Errorf("rebinding an action to its own chord must not report a steal, got %+v", stolen)
+func TestStealTakesOnlyTheConflictingTrigger(t *testing.T) {
+	// The victim's OTHER bindings must survive -- this is the whole point of
+	// the additive model.
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Add("channel.intercom", key(t, "F1"))
+
+	got, _ := s.Get("global.ptt")
+	if len(got) != 1 || !got[0].Equal(joy("stick-c3", 11)) {
+		t.Errorf("steal took more than the conflicting trigger: %+v", got)
 	}
 }
 
-func TestClear(t *testing.T) {
-	s := New()
-	s.Set("global.ptt", mustChord(t, "F1"))
-	s.Clear("global.ptt")
-	if _, ok := s.Get("global.ptt"); ok {
-		t.Error("binding should be gone after Clear")
+func TestKeyboardNeverStealsFromJoystick(t *testing.T) {
+	// Separate conflict namespaces (spec section 10). This works because
+	// Trigger.Equal compares Kind first.
+	s := keybinds.New()
+	s.Add("global.ptt", joy("stick-c3", 11))
+	if stolen := s.Add("channel.intercom", key(t, "F1")); stolen != nil {
+		t.Errorf("keyboard trigger stole from a joystick binding: %+v", stolen)
 	}
 }
 
-func TestSnapshotRoundTrip(t *testing.T) {
-	s := New()
-	s.Set("global.ptt", mustChord(t, "F1"))
-	s.Set("global.mute_toggle", mustChord(t, "Ctrl+M"))
+func TestSecondKeyboardTriggerReplacesTheFirst(t *testing.T) {
+	// internal/hotkeys registers one chord per action ID, so a second
+	// keyboard chord would save, display, and never fire. Replace instead.
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", key(t, "F2"))
 
-	snap := s.Snapshot()
-	want := map[string]string{"global.ptt": "F1", "global.mute_toggle": "Ctrl+M"}
-	if !reflect.DeepEqual(snap, want) {
-		t.Errorf("Snapshot() = %v, want %v", snap, want)
+	got, _ := s.Get("global.ptt")
+	if len(got) != 1 {
+		t.Fatalf("Get = %+v, want exactly one keyboard trigger", got)
 	}
-
-	s2 := New()
-	s2.Load(snap)
-	if !reflect.DeepEqual(s2.Snapshot(), want) {
-		t.Errorf("round trip lost data: %v", s2.Snapshot())
+	if !got[0].Equal(key(t, "F2")) {
+		t.Errorf("kept %+v, want the newer chord F2", got[0])
 	}
 }
 
-func TestLoadPreservesUnknownActionIDs(t *testing.T) {
-	// A binding written by a FUTURE version must survive a load/save cycle
-	// rather than being silently dropped.
-	s := New()
-	s.Load(map[string]string{
-		"global.ptt":            "F1",
-		"future.unknown.action": "Ctrl+Shift+Z",
-	})
-	snap := s.Snapshot()
-	if snap["future.unknown.action"] != "Ctrl+Shift+Z" {
-		t.Errorf("unknown action ID was dropped; snapshot = %v", snap)
-	}
-}
+func TestKeyboardReplacementKeepsJoystickTriggers(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", key(t, "F2"))
 
-func TestLoadDropsUnparseableChords(t *testing.T) {
-	s := New()
-	s.Load(map[string]string{
-		"global.ptt":         "F1",
-		"global.mute_toggle": "!!!not-a-chord!!!",
-	})
-	if _, ok := s.Get("global.mute_toggle"); ok {
-		t.Error("unparseable chord should not become an active binding")
+	got, _ := s.Get("global.ptt")
+	if len(got) != 2 {
+		t.Fatalf("Get = %+v, want the joystick trigger plus one chord", got)
 	}
-	if _, ok := s.Get("global.ptt"); !ok {
-		t.Error("a bad entry must not prevent good entries from loading")
-	}
-}
-
-func TestAllReturnsACopy(t *testing.T) {
-	s := New()
-	s.Set("global.ptt", mustChord(t, "F1"))
-	all := s.All()
-	delete(all, "global.ptt")
-	if _, ok := s.Get("global.ptt"); !ok {
-		t.Error("All() must return a copy; mutating it changed the store")
-	}
-}
-
-func TestConcurrentAccessIsRaceFree(t *testing.T) {
-	s := New()
-	done := make(chan struct{})
-	go func() {
-		for i := 0; i < 200; i++ {
-			s.Set("global.ptt", mustChord(t, "F1"))
+	var joys, keysN int
+	for _, tr := range got {
+		if tr.Kind == trigger.KindJoy {
+			joys++
+		} else {
+			keysN++
 		}
-		close(done)
-	}()
-	for i := 0; i < 200; i++ {
-		_ = s.Snapshot()
 	}
-	<-done
+	if joys != 1 || keysN != 1 {
+		t.Errorf("got %d joystick and %d keyboard triggers, want 1 and 1", joys, keysN)
+	}
+}
+
+func TestSeveralJoystickTriggersAccumulate(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Add("global.ptt", joy("throttle-a1", 6))
+	if got, _ := s.Get("global.ptt"); len(got) != 2 {
+		t.Errorf("Get = %+v, want both joystick triggers", got)
+	}
+}
+
+func TestRemoveAt(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+
+	if err := s.RemoveAt("global.ptt", 0); err != nil {
+		t.Fatalf("RemoveAt(0): %v", err)
+	}
+	got, _ := s.Get("global.ptt")
+	if len(got) != 1 || !got[0].Equal(joy("stick-c3", 11)) {
+		t.Errorf("after RemoveAt(0) = %+v, want the joystick trigger only", got)
+	}
+	for _, bad := range []int{-1, 1, 99} {
+		if err := s.RemoveAt("global.ptt", bad); err == nil {
+			t.Errorf("RemoveAt(%d) = nil error, want out-of-range failure", bad)
+		}
+	}
+}
+
+func TestLoadSnapshotRoundTrip(t *testing.T) {
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt":       {"F1", "joy:stick-c3:btn12"},
+		"channel.intercom": {"joy:throttle-a1:btn7+stick-c3:btn3"},
+		"future.action":    {"Ctrl+Q"}, // unknown id: must survive verbatim
+	})
+	snap := s.Snapshot()
+	if len(snap["global.ptt"]) != 2 ||
+		snap["global.ptt"][0] != "F1" || snap["global.ptt"][1] != "joy:stick-c3:btn12" {
+		t.Errorf("global.ptt round trip = %v", snap["global.ptt"])
+	}
+	if got := snap["future.action"]; len(got) != 1 || got[0] != "Ctrl+Q" {
+		t.Errorf("unknown action id lost: %v", got)
+	}
+}
+
+func TestLoadDropsOnlyTheUnparseableEntry(t *testing.T) {
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"F1", "joy:!!!bad", "joy:stick-c3:btn12"},
+	})
+	got, _ := s.Get("global.ptt")
+	if len(got) != 2 {
+		t.Fatalf("Get = %+v, want the two parseable triggers", got)
+	}
+	if !got[0].Equal(key(t, "F1")) || !got[1].Equal(joy("stick-c3", 11)) {
+		t.Errorf("wrong survivors: %+v", got)
+	}
+}
+
+func TestLoadKeepsOnlyTheFirstKeyboardTrigger(t *testing.T) {
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"F1", "joy:stick-c3:btn12", "F2"},
+	})
+	got, _ := s.Get("global.ptt")
+	if len(got) != 2 {
+		t.Fatalf("Get = %+v, want exactly two triggers", got)
+	}
+	if !got[0].Equal(key(t, "F1")) || !got[1].Equal(joy("stick-c3", 11)) {
+		t.Errorf("wrong survivors: %+v, want F1 keyboard trigger and the joystick trigger (F2 dropped)", got)
+	}
+}
+
+func TestClearRemovesEveryTrigger(t *testing.T) {
+	s := keybinds.New()
+	s.Add("global.ptt", key(t, "F1"))
+	s.Add("global.ptt", joy("stick-c3", 11))
+	s.Clear("global.ptt")
+	if got, ok := s.Get("global.ptt"); ok && len(got) != 0 {
+		t.Errorf("after Clear = %+v, want empty", got)
+	}
+}
+
+// TestLoadWarnsAboutTheDroppedKeyboardChord pins the diagnosability half of
+// the one-keyboard-trigger rule.
+//
+// The rule itself is right, but enforcing it silently means a hand-edited
+// `"global.push_to_mute" = ["V", "Ctrl+B"]` loads as V and the very next
+// Save rewrites that line as `"global.push_to_mute" = "V"` -- the user's
+// second chord destroyed on disk with no trace anywhere. Dropping it is
+// still better than a binding that is silently dead at dispatch, but the
+// destruction has to be diagnosable, so Load names the action and the chord
+// it threw away.
+func TestLoadWarnsAboutTheDroppedKeyboardChord(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	// The chord is listed AFTER a joystick trigger on purpose: the survivor
+	// reported in the warning must be the kept CHORD, not merely the first
+	// surviving trigger of any kind.
+	s.Load(map[string][]string{
+		"global.push_to_mute": {"joy:stick-c3:btn12", "V", "Ctrl+B"},
+	})
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("Load dropped a second keyboard chord silently; the next Save rewrites " +
+			"the user's file without it and nothing anywhere records why")
+	}
+	if !strings.Contains(out, "global.push_to_mute") {
+		t.Errorf("warning does not name the action: %q", out)
+	}
+	if !strings.Contains(out, "Ctrl+B") {
+		t.Errorf("warning does not name the dropped chord: %q", out)
+	}
+	if !strings.Contains(out, "dropped=Ctrl+B") {
+		t.Errorf("warning does not attribute Ctrl+B to the DROPPED slot: %q", out)
+	}
+	if !strings.Contains(out, "kept=V") {
+		t.Errorf("warning does not name V as the survivor: %q", out)
+	}
+}
+
+// TestLoadDoesNotWarnForAJoystickTriggerAlongsideAChord guards the other
+// direction: joystick triggers are unlimited, so a key + several buttons is
+// the ordinary case and must produce no warning at all.
+func TestLoadDoesNotWarnForAJoystickTriggerAlongsideAChord(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"F1", "joy:stick-c3:btn12", "joy:stick-c3:btn3"},
+	})
+	if got := buf.String(); got != "" {
+		t.Errorf("Load warned about a perfectly legal binding list: %q", got)
+	}
+	if got, _ := s.Get("global.ptt"); len(got) != 3 {
+		t.Fatalf("Get = %+v, want all three triggers", got)
+	}
+}
+
+// TestLoadWarnsAboutAnUnparseableTrigger pins the other destructive drop in
+// Load, for the same reason as the dropped-chord warning above.
+//
+// A hand-edited `"global.ptt" = ["joy:stick-c3:btn3", "joy:stick-c3:btn!2"]`
+// with a typo in the second entry loads as the first alone, and the very next
+// Save rewrites that line without the typo'd entry -- the user's binding gone
+// from config.toml for good, with no trace anywhere of what was rejected or
+// why. The two paths destroy config by exactly the same mechanism, so they
+// must be equally diagnosable.
+func TestLoadWarnsAboutAnUnparseableTrigger(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"joy:stick-c3:btn3", "joy:stick-c3:btn!2"},
+	})
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("Load dropped an unparseable trigger silently; the next Save rewrites " +
+			"the user's file without it and nothing anywhere records why")
+	}
+	if !strings.Contains(out, "global.ptt") {
+		t.Errorf("warning does not name the action: %q", out)
+	}
+	if !strings.Contains(out, "joy:stick-c3:btn!2") {
+		t.Errorf("warning does not name the rejected entry: %q", out)
+	}
+	// The surviving entry must not be reported as dropped.
+	if strings.Contains(out, "dropped=joy:stick-c3:btn3 ") {
+		t.Errorf("warning blames the surviving entry: %q", out)
+	}
+	if got, _ := s.Get("global.ptt"); len(got) != 1 {
+		t.Fatalf("Get = %+v, want the one parseable trigger kept", got)
+	}
+}
+
+// TestLoadDropsATriggerAlreadyClaimedByAnotherAction pins cross-action
+// uniqueness, the third invariant Load is the boundary for.
+//
+// Load used to enforce "at most one keyboard chord per action" but never
+// checked whether the same trigger appeared under TWO action IDs. A
+// hand-edited or merged config with one button under both global.ptt and
+// global.push_to_mute loaded happily, and a single press then opened PTT
+// *and* push-to-mute with nothing in the UI indicating the collision -- Add
+// refuses to create that state, so nothing downstream is written to survive
+// it.
+func TestLoadDropsATriggerAlreadyClaimedByAnotherAction(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt":          {"joy:stick-c3:btn5"},
+		"global.push_to_mute": {"joy:stick-c3:btn5"},
+	})
+
+	ptt, _ := s.Get("global.ptt")
+	if len(ptt) != 1 || !ptt[0].Equal(joy("stick-c3", 4)) {
+		t.Fatalf("global.ptt = %+v, want the contested trigger kept on the first action", ptt)
+	}
+	if got, ok := s.Get("global.push_to_mute"); ok && len(got) != 0 {
+		t.Errorf("global.push_to_mute = %+v, want nothing -- one press must not fire two actions", got)
+	}
+
+	// Destructive on the next Save, exactly like the other two drops, so it
+	// has to be diagnosable.
+	out := buf.String()
+	if out == "" {
+		t.Fatal("Load dropped a doubly-claimed trigger silently; the next Save rewrites " +
+			"the user's file without it and nothing anywhere records why")
+	}
+	if !strings.Contains(out, "global.push_to_mute") {
+		t.Errorf("warning does not name the action that lost the trigger: %q", out)
+	}
+	if !strings.Contains(out, "kept_on=global.ptt") {
+		t.Errorf("warning does not name the action that kept it: %q", out)
+	}
+}
+
+// TestLoadResolvesACollisionTheSameWayEveryTime is the half that map
+// iteration cannot deliver.
+//
+// Which action keeps a contested trigger has to be stable across launches.
+// With map-order iteration the same file loads differently each run, so the
+// binding appears to hop between two rows at random -- and the next Save
+// persists whichever way that particular run happened to go. Ordering by
+// action ID makes it a property of the FILE, not of the run.
+func TestLoadResolvesACollisionTheSameWayEveryTime(t *testing.T) {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	raw := map[string][]string{
+		"global.ptt":          {"joy:stick-c3:btn5"},
+		"global.push_to_mute": {"joy:stick-c3:btn5"},
+		"global.mute_toggle":  {"joy:stick-c3:btn5"},
+	}
+	// Enough runs that map iteration order would almost certainly have
+	// varied at least once if it were still in play.
+	for i := 0; i < 50; i++ {
+		s := keybinds.New()
+		s.Load(raw)
+		if got, _ := s.Get("global.mute_toggle"); len(got) != 1 {
+			t.Fatalf("run %d: global.mute_toggle = %+v, want the trigger -- the "+
+				"lowest action ID must win every time", i, got)
+		}
+		if got, ok := s.Get("global.ptt"); ok && len(got) != 0 {
+			t.Fatalf("run %d: global.ptt = %+v, want nothing", i, got)
+		}
+		if got, ok := s.Get("global.push_to_mute"); ok && len(got) != 0 {
+			t.Fatalf("run %d: global.push_to_mute = %+v, want nothing", i, got)
+		}
+	}
+}
+
+// TestLoadDoesNotSpendTheChordSlotOnAStolenChord guards the ordering of the
+// two rules inside Load. A chord an earlier action already owns must not
+// also consume this action's single keyboard slot, or the file's second
+// chord -- the only one that could still be honoured -- is dropped too and
+// the action ends up bound to nothing.
+func TestLoadDoesNotSpendTheChordSlotOnAStolenChord(t *testing.T) {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt":          {"F1"},
+		"global.push_to_mute": {"F1", "F2"},
+	})
+	got, _ := s.Get("global.push_to_mute")
+	if len(got) != 1 || !got[0].Equal(key(t, "F2")) {
+		t.Errorf("global.push_to_mute = %+v, want F2 -- F1 was already taken, "+
+			"so it must not also consume the one chord slot", got)
+	}
 }

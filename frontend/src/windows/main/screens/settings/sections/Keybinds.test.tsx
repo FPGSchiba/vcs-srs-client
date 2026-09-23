@@ -3,11 +3,14 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 
 import { Keybinds } from "./Keybinds";
 import { useSettings } from "../../../../../shared/store/settings";
+import type { Keybind, Trigger, JoystickState } from "../../../../../shared/store/settings";
+import { EV } from "../../../../../shared/api/events";
 
 /** The store's untouched default hotkey state, read before any test mutates it. */
 const initialHotkeyState = () => useSettings.getInitialState().hotkeys;
 
-const setKeybind = vi.fn();
+const addTrigger = vi.fn();
+const removeTrigger = vi.fn();
 const beginCapture = vi.fn();
 const endCapture = vi.fn().mockResolvedValue(undefined);
 const requestHotkeyPermission = vi.fn();
@@ -16,9 +19,10 @@ const recheckHotkeyPermission = vi.fn();
 
 vi.mock("../../../../../shared/api/client", () => ({
   api: {
-    setKeybind: (...a: unknown[]) => setKeybind(...a),
+    addTrigger: (...a: unknown[]) => addTrigger(...a),
+    removeTrigger: (...a: unknown[]) => removeTrigger(...a),
     clearKeybind: vi.fn().mockResolvedValue(undefined),
-    beginCapture: () => beginCapture(),
+    beginCapture: (actionId: string) => beginCapture(actionId),
     endCapture: (token: number) => endCapture(token),
     requestHotkeyPermission: () => requestHotkeyPermission(),
     openHotkeyPermissionSettings: () => openHotkeyPermissionSettings(),
@@ -26,24 +30,78 @@ vi.mock("../../../../../shared/api/client", () => ({
   },
 }));
 
+/** Minimal stand-in for the Wails event bus (mirrors the same pattern in
+ * useSettingsSync.test.tsx and CommsApp.test.tsx): `on` registers a handler
+ * and returns its unsubscribe, and `emit` drives it from the test. Without
+ * this mock, Keybinds.tsx's `on(EV.joystickCaptured, ...)` subscribes to the
+ * REAL (unmocked) event bus, which nothing in a test ever emits through --
+ * that subscription would silently never fire. */
+const handlers = new Map<string, Set<(d: unknown) => void>>();
+const emit = (name: string, data: unknown) => handlers.get(name)?.forEach((h) => h(data));
+
+vi.mock("../../../../../shared/api/events", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../../shared/api/events")>();
+  return {
+    EV: actual.EV,
+    on: (name: string, cb: (d: unknown) => void) => {
+      const set = handlers.get(name) ?? new Set();
+      set.add(cb);
+      handlers.set(name, set);
+      return () => set.delete(cb);
+    },
+  };
+});
+
 /** Mirrors the backend's capture-token generation counter: every
  * BeginCapture hands out a new, strictly increasing token, and only the
  * newest one is honoured by EndCapture. Starts at 1 so 0 stays reserved for
  * "beginCapture failed". */
 let nextToken = 0;
 
-const rows = [
+const key = (chord: string): Trigger => ({
+  kind: "key", chord, device: "", device_name: "", label: chord, connected: true,
+});
+
+const rows: Keybind[] = [
   { action_id: "global.ptt", label: "Global PTT", desc: "Transmits on the Selected radio",
-    category: "global", kind: "hold", chord: "" },
+    category: "global", kind: "hold", triggers: [] },
   { action_id: "global.mute_toggle", label: "Mute toggle", desc: "",
-    category: "global", kind: "press", chord: "M" },
+    category: "global", kind: "press", triggers: [key("M")] },
   { action_id: "radio.1.ptt", label: "R01 · GUARD (PTT)", desc: "",
-    category: "per_radio", kind: "hold", chord: "F1" },
+    category: "per_radio", kind: "hold", triggers: [key("F1")] },
 ];
+
+/** Builds a single "global.ptt" row with the given triggers -- the fixture
+ * used by tests that only need one row and don't care about the rest of the
+ * groups. */
+function pttRow(triggers: Trigger[]): Keybind {
+  return {
+    action_id: "global.ptt",
+    label: "Global PTT",
+    desc: "",
+    category: "global",
+    kind: "hold",
+    triggers,
+  };
+}
+
+const DEFAULT_JOYSTICK: JoystickState = { supported: false, error: "", devices: [] };
+
+function renderWithKeybinds(keybinds: Keybind[], joystick: JoystickState = DEFAULT_JOYSTICK) {
+  useSettings.setState({
+    settings: null,
+    keybinds,
+    hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
+    joystick,
+  });
+  return render(<Keybinds />);
+}
 
 describe("Keybinds section", () => {
   beforeEach(() => {
-    setKeybind.mockReset().mockResolvedValue({ stolen: null });
+    handlers.clear();
+    addTrigger.mockReset().mockResolvedValue({ stolen: null });
+    removeTrigger.mockReset().mockResolvedValue(undefined);
     nextToken = 0;
     beginCapture.mockReset().mockImplementation(() => Promise.resolve(++nextToken));
     endCapture.mockReset().mockResolvedValue(undefined);
@@ -55,12 +113,10 @@ describe("Keybinds section", () => {
       .mockResolvedValue({ prompted: true, permission: "denied" });
     openHotkeyPermissionSettings.mockReset().mockResolvedValue(undefined);
     recheckHotkeyPermission.mockReset().mockResolvedValue(undefined);
-    // NOTE: the task-11 brief's literal for `hotkeys` omits `failed`, which
-    // `HotkeyState` requires (see shared/store/settings.ts). Completed here
-    // rather than weakening the type or reaching for `as any`.
     useSettings.setState({
       settings: null, keybinds: rows,
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
+      joystick: DEFAULT_JOYSTICK,
     });
   });
 
@@ -77,38 +133,38 @@ describe("Keybinds section", () => {
 
   it("suspends hotkeys while capturing", async () => {
     render(<Keybinds />);
-    fireEvent.click(screen.getAllByText("—")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalled());
   });
 
   it("sends the capture and re-arms hotkeys", async () => {
     render(<Keybinds />);
-    fireEvent.click(screen.getAllByText("—")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalled());
     fireEvent.keyDown(window, { code: "F2", key: "F2" });
     await waitFor(() => {
-      expect(setKeybind).toHaveBeenCalledWith("global.ptt", {
+      expect(addTrigger).toHaveBeenCalledWith("global.ptt", {
         code: "F2", ctrl: false, alt: false, shift: false, super: false,
       });
       expect(endCapture).toHaveBeenCalled();
     });
   });
 
-  it("re-arms hotkeys even when setKeybind rejects", async () => {
-    setKeybind.mockRejectedValue(new Error("backend unreachable"));
+  it("re-arms hotkeys even when addTrigger rejects", async () => {
+    addTrigger.mockRejectedValue(new Error("backend unreachable"));
     render(<Keybinds />);
-    fireEvent.click(screen.getAllByText("—")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalled());
     fireEvent.keyDown(window, { code: "F2", key: "F2" });
     await waitFor(() => expect(endCapture).toHaveBeenCalled());
   });
 
   it("reports which action lost a stolen key", async () => {
-    setKeybind.mockResolvedValue({
-      stolen: { action_id: "radio.1.ptt", label: "R01 · GUARD (PTT)", chord: "F1" },
+    addTrigger.mockResolvedValue({
+      stolen: { action_id: "radio.1.ptt", label: "R01 · GUARD (PTT)", trigger: key("F1") },
     });
     render(<Keybinds />);
-    fireEvent.click(screen.getAllByText("—")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalled());
     fireEvent.keyDown(window, { code: "F1", key: "F1" });
     // The warning belongs on the row that just captured the stolen key
@@ -156,12 +212,13 @@ describe("Keybinds section", () => {
   it("cancels the previously listening chip when another chip starts capturing", async () => {
     render(<Keybinds />);
 
-    // Start capturing on the unbound global.ptt chip.
-    fireEvent.click(screen.getAllByText("—")[0]);
+    // Start capturing on the unbound global.ptt row.
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(1));
 
-    // Before pressing a key, start capturing on a different chip (bound "M").
-    fireEvent.click(screen.getByText("M"));
+    // Before pressing a key, start capturing on a different row (already
+    // bound to "M").
+    fireEvent.click(screen.getByRole("button", { name: /add binding for mute toggle/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
 
@@ -177,40 +234,40 @@ describe("Keybinds section", () => {
 
     // A single keypress must only be attributed to the second (still
     // listening) chip -- if the first chip were still listening too, this
-    // would call setKeybind twice, once per chip, off one keypress.
+    // would call addTrigger twice, once per chip, off one keypress.
     fireEvent.keyDown(window, { code: "F5", key: "F5" });
     await waitFor(() =>
-      expect(setKeybind).toHaveBeenCalledWith("global.mute_toggle", {
+      expect(addTrigger).toHaveBeenCalledWith("global.mute_toggle", {
         code: "F5", ctrl: false, alt: false, shift: false, super: false,
       }),
     );
-    expect(setKeybind).toHaveBeenCalledTimes(1);
-    expect(setKeybind).not.toHaveBeenCalledWith("global.ptt", expect.anything());
+    expect(addTrigger).toHaveBeenCalledTimes(1);
+    expect(addTrigger).not.toHaveBeenCalledWith("global.ptt", expect.anything());
 
     // And the live capture, once it completes, ends with its own token.
     await waitFor(() => expect(endCapture).toHaveBeenCalledWith(2));
   });
 
-  it("does not end the live capture when a row switch races an in-flight setKeybind", async () => {
-    // The other half of the same hazard: the user presses a key on chip A and
-    // then clicks chip B while A's setKeybind is still awaiting. A's `finally`
+  it("does not end the live capture when a row switch races an in-flight addTrigger", async () => {
+    // The other half of the same hazard: the user presses a key on row A and
+    // then clicks row B while A's addTrigger is still awaiting. A's `finally`
     // therefore runs AFTER B's beginCapture. It must still surrender only A's
     // own token, or B would capture with every OS hotkey re-armed.
-    let resolveSet: (v: unknown) => void = () => {};
-    setKeybind.mockImplementation(() => new Promise((res) => { resolveSet = res; }));
+    let resolveAdd: (v: unknown) => void = () => {};
+    addTrigger.mockImplementation(() => new Promise((res) => { resolveAdd = res; }));
 
     render(<Keybinds />);
-    fireEvent.click(screen.getAllByText("—")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(1));
     fireEvent.keyDown(window, { code: "F2", key: "F2" });
-    await waitFor(() => expect(setKeybind).toHaveBeenCalledTimes(1));
-    expect(endCapture).not.toHaveBeenCalled(); // still awaiting setKeybind
+    await waitFor(() => expect(addTrigger).toHaveBeenCalledTimes(1));
+    expect(endCapture).not.toHaveBeenCalled(); // still awaiting addTrigger
 
     // Start a new capture on another row while A is still in flight.
-    fireEvent.click(screen.getByText("M"));
+    fireEvent.click(screen.getByRole("button", { name: /add binding for mute toggle/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(2));
 
-    resolveSet({ stolen: null });
+    resolveAdd({ stolen: null });
     await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
     expect(endCapture).toHaveBeenCalledWith(1);
     expect(endCapture).not.toHaveBeenCalledWith(2);
@@ -218,13 +275,13 @@ describe("Keybinds section", () => {
 
   it("ends each capture with the token that capture was issued", async () => {
     render(<Keybinds />);
-    fireEvent.click(screen.getAllByText("—")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(1));
     fireEvent.keyDown(window, { code: "F2", key: "F2" });
     await waitFor(() => expect(endCapture).toHaveBeenCalledWith(1));
 
     // A second, independent capture gets a fresh token.
-    fireEvent.click(screen.getByText("M"));
+    fireEvent.click(screen.getByRole("button", { name: /add binding for mute toggle/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(2));
     fireEvent.keyDown(window, { code: "F3", key: "F3" });
     await waitFor(() => expect(endCapture).toHaveBeenCalledWith(2));
@@ -234,7 +291,7 @@ describe("Keybinds section", () => {
     render(<Keybinds />);
     // Escape on a chip the user never clicked cannot happen, but a cancel
     // with no outstanding token must stay a no-op rather than guessing one.
-    fireEvent.click(screen.getAllByText("—")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding for global ptt/i }));
     await waitFor(() => expect(beginCapture).toHaveBeenCalledTimes(1));
     fireEvent.keyDown(window, { code: "Escape", key: "Escape" });
     await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
@@ -447,5 +504,212 @@ describe("Keybinds section", () => {
     render(<Keybinds />);
     expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
     expect(screen.getByText(/no OS key mapping for Numpad7/i)).toBeInTheDocument();
+  });
+
+  // ---- Multi-trigger rows and the single capture affordance --------------
+
+  it("renders one chip per trigger", () => {
+    renderWithKeybinds([
+      {
+        action_id: "global.ptt",
+        label: "Global PTT",
+        desc: "",
+        category: "global",
+        kind: "hold",
+        triggers: [
+          { kind: "key", chord: "F1", device: "", device_name: "", label: "F1", connected: true },
+          {
+            kind: "joy",
+            chord: "",
+            device: "stick-c3",
+            device_name: "Test Stick",
+            label: "Btn 12",
+            connected: true,
+          },
+        ],
+      },
+    ]);
+    expect(screen.getByText("F1")).toBeInTheDocument();
+    expect(screen.getByText("Btn 12")).toBeInTheDocument();
+  });
+
+  it("passes the action id to beginCapture", async () => {
+    beginCapture.mockResolvedValue(1);
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+  });
+
+  it("removes the clicked trigger by index", async () => {
+    renderWithKeybinds([
+      pttRow([
+        { kind: "key", chord: "F1", device: "", device_name: "", label: "F1", connected: true },
+        {
+          kind: "joy",
+          chord: "",
+          device: "stick-c3",
+          device_name: "Test Stick",
+          label: "Btn 12",
+          connected: true,
+        },
+      ]),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: /remove btn 12/i }));
+    await waitFor(() => expect(removeTrigger).toHaveBeenCalledWith("global.ptt", 1));
+  });
+
+  it("mentions joystick in the capture prompt when supported", () => {
+    renderWithKeybinds([pttRow([])], { supported: true, error: "", devices: [] });
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    expect(screen.getByText(/joystick button/i)).toBeInTheDocument();
+  });
+
+  it("omits the joystick half of the prompt when unsupported", () => {
+    renderWithKeybinds([pttRow([])], { supported: false, error: "", devices: [] });
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    expect(screen.queryByText(/joystick button/i)).not.toBeInTheDocument();
+  });
+
+  it("offers no grant affordance for an unsupported platform", () => {
+    // Unsupported is NOT denied. There is nothing the user can grant, so
+    // offering a button would be a dead end.
+    renderWithKeybinds([pttRow([])], { supported: false, error: "", devices: [] });
+    expect(screen.queryByRole("button", { name: /grant/i })).not.toBeInTheDocument();
+  });
+
+  it("shows a joystick error without reusing the accessibility copy", () => {
+    renderWithKeybinds([pttRow([])], {
+      supported: true,
+      error: "joystick: cannot read /dev/input (add your user to the 'input' group...)",
+      devices: [],
+    });
+    expect(screen.getByText(/input' group/)).toBeInTheDocument();
+    expect(screen.queryByText(/accessibility/i)).not.toBeInTheDocument();
+  });
+
+  // ---- keybinds:joy_captured -- the joystick half of "one capture,
+  // either input" terminating -----------------------------------------
+
+  it("closes the listening chip and ends its capture exactly once when the backend completes a joystick capture", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    // The backend bound the trigger itself (over the joystick channel) and
+    // tells the frontend only which row to close.
+    emit(EV.joystickCaptured, { action_id: "global.ptt" });
+
+    // The row returns to showing its "+" -- the listening KeyChip, and the
+    // window keydown listener that came with it, is gone.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add binding/i })).toBeInTheDocument(),
+    );
+
+    // The capture is genuinely ended on the backend, not just visually
+    // closed -- this is what re-arms every OS hotkey. Closing the row also
+    // unmounts the auto-listening KeyChip, which fires its OWN onCancel --
+    // a second call into the same close path for the same row. That second
+    // call must be a no-op: the token was already deleted by the first,
+    // real end, so endCapture is called exactly once, not twice.
+    await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
+    expect(endCapture).toHaveBeenCalledWith(1);
+  });
+
+  it("reports a steal that a joystick capture caused, on the row that captured", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    // The backend bound BTN 5 to global.ptt and took it off radio.1.ptt. It
+    // returns to no caller, so the steal can only arrive on this event -- and
+    // without it the losing row's chip would just vanish on the next
+    // keybinds:changed with no warning, while the same steal by keyboard
+    // shows one.
+    emit(EV.joystickCaptured, {
+      action_id: "global.ptt",
+      stolen: {
+        action_id: "radio.1.ptt",
+        label: "R01 · GUARD (PTT)",
+        trigger: {
+          kind: "joy", chord: "", device: "stick-c3", device_name: "Test Stick",
+          label: "BTN 5", connected: true,
+        },
+      },
+    });
+
+    const capturingRow = screen.getByText("Global PTT").closest("[data-row]") as HTMLElement;
+    await waitFor(() =>
+      expect(
+        within(capturingRow).getByText(/BTN 5 taken from R01 · GUARD \(PTT\)/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("shows no steal banner when a joystick capture took nothing", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    emit(EV.joystickCaptured, { action_id: "global.ptt", stolen: null });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add binding/i })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/taken from/i)).not.toBeInTheDocument();
+  });
+
+  it("ignores a joystick capture event for a row that is not currently capturing", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    // A stale or unrelated event naming some other action must not touch
+    // this row's live capture.
+    emit(EV.joystickCaptured, { action_id: "some.other.action" });
+
+    // Still listening -- the "+" has not come back -- and nothing was ended.
+    expect(screen.queryByRole("button", { name: /add binding/i })).not.toBeInTheDocument();
+    expect(endCapture).not.toHaveBeenCalled();
+  });
+
+  // ---- keybinds:capture_expired -- the backend's auto-resume timeout
+  // reaching a LIVE frontend --------------------------------------------
+
+  it("stops the row listening when the backend reports the capture expired", async () => {
+    renderWithKeybinds([pttRow([])], { supported: true, error: "", devices: [] });
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+    expect(screen.getByText(/joystick button/i)).toBeInTheDocument();
+
+    // 10s passed without an endCapture, so the backend tore the capture down
+    // itself: it cancelled the joystick capture and resumed BOTH managers.
+    // Until this event existed the row was told nothing -- it kept rendering
+    // the prompt over a capture that no longer existed, and the user's next
+    // joystick press bound nothing and instead keyed the radio.
+    emit(EV.captureExpired, { action_id: "global.ptt" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add binding/i })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/joystick button/i)).not.toBeInTheDocument();
+
+    // The backend has ALREADY resumed this generation. Ending it again would
+    // be a second resume for a capture that is over, so the token is dropped
+    // rather than spent -- including by the onCancel the unmounting KeyChip
+    // fires as the row swaps back to "+".
+    expect(endCapture).not.toHaveBeenCalled();
+  });
+
+  it("ignores a capture-expired event for a row that is not currently capturing", async () => {
+    renderWithKeybinds([pttRow([])], { supported: true, error: "", devices: [] });
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    emit(EV.captureExpired, { action_id: "some.other.action" });
+
+    // Still listening -- a superseded capture's timeout must not close the
+    // capture that replaced it.
+    expect(screen.queryByRole("button", { name: /add binding/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/joystick button/i)).toBeInTheDocument();
   });
 });

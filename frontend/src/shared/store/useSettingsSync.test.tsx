@@ -4,12 +4,14 @@ import { render, waitFor } from "@testing-library/react";
 const getSettings = vi.fn();
 const getKeybinds = vi.fn();
 const getHotkeyState = vi.fn();
+const getJoystickState = vi.fn();
 
 vi.mock("../api/client", () => ({
   api: {
     getSettings: () => getSettings(),
     getKeybinds: () => getKeybinds(),
     getHotkeyState: () => getHotkeyState(),
+    getJoystickState: () => getJoystickState(),
   },
 }));
 
@@ -51,8 +53,11 @@ describe("useSettingsSync", () => {
     getSettings.mockReset().mockResolvedValue(settings);
     getKeybinds.mockReset().mockResolvedValue([]);
     getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
+    getJoystickState.mockReset().mockResolvedValue({ supported: false, error: "", devices: [] });
     useSettings.setState({
-      settings: null, keybinds: [], hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
+      settings: null, keybinds: [],
+      hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
+      joystick: { supported: false, error: "", devices: [] },
     });
   });
   afterEach(() => vi.restoreAllMocks());
@@ -73,9 +78,18 @@ describe("useSettingsSync", () => {
   it("keeps the store live via keybinds:changed", async () => {
     render(<Probe />);
     emit(EV.keybindsChanged, [
-      { action_id: "global.ptt", label: "Global PTT", desc: "", category: "global", kind: "hold", chord: "F9" },
+      {
+        action_id: "global.ptt",
+        label: "Global PTT",
+        desc: "",
+        category: "global",
+        kind: "hold",
+        triggers: [
+          { kind: "key", chord: "F9", device: "", device_name: "", label: "F9", connected: true },
+        ],
+      },
     ]);
-    expect(useSettings.getState().keybinds[0].chord).toBe("F9");
+    expect(useSettings.getState().keybinds[0].triggers[0].chord).toBe("F9");
   });
 
   it("keeps the store live via hotkeys:state", async () => {
@@ -96,6 +110,51 @@ describe("useSettingsSync", () => {
     // having confirmed it, and no trace of why.
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     getHotkeyState.mockRejectedValue(new Error("backend unreachable"));
+
+    render(<Probe />);
+    await waitFor(() => expect(err).toHaveBeenCalled());
+  });
+
+  it("hydrates joystick support on mount", async () => {
+    getJoystickState.mockResolvedValue({ supported: true, error: "", devices: [{ id: "stick-c3", name: "Test Stick" }] });
+    render(<Probe />);
+    await waitFor(() => expect(useSettings.getState().joystick.supported).toBe(true));
+    expect(useSettings.getState().joystick.devices).toEqual([{ id: "stick-c3", name: "Test Stick" }]);
+  });
+
+  it("keeps the store live via joystick:state", async () => {
+    // The hydrate above runs once, on mount. Without this subscription a
+    // stick plugged in afterwards stayed invisible (chips rendered muted
+    // until some unrelated keybinds:changed forced a re-render), and one
+    // transient enumeration error pinned "Joystick unavailable" for the life
+    // of the process.
+    render(<Probe />);
+    await waitFor(() => expect(getJoystickState).toHaveBeenCalled());
+
+    emit(EV.joystickState, {
+      supported: true,
+      error: "",
+      devices: [{ id: "stick-c3", name: "Test Stick" }],
+    });
+    await waitFor(() => expect(useSettings.getState().joystick.supported).toBe(true));
+    expect(useSettings.getState().joystick.devices).toEqual([
+      { id: "stick-c3", name: "Test Stick" },
+    ]);
+
+    // And a later error state replaces it rather than accumulating.
+    emit(EV.joystickState, { supported: true, error: "device read failed", devices: [] });
+    await waitFor(() =>
+      expect(useSettings.getState().joystick.error).toBe("device read failed"),
+    );
+    expect(useSettings.getState().joystick.devices).toEqual([]);
+  });
+
+  it("logs rather than swallows a getJoystickState rejection", async () => {
+    // Same failure mode as getHotkeyState: the store's honest `supported:
+    // false` default would otherwise hide the joystick capture affordance
+    // on a machine that actually supports it, with no trace of why.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    getJoystickState.mockRejectedValue(new Error("backend unreachable"));
 
     render(<Probe />);
     await waitFor(() => expect(err).toHaveBeenCalled());
