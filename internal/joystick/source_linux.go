@@ -54,11 +54,52 @@ func NewOSSource() (Source, error) {
 	return s, nil
 }
 
+// isJoystickButton reports whether c is one of the EV_KEY codes the Linux
+// kernel reserves for joystick/gamepad buttons. It is the SINGLE definition
+// of "this is a button, not a key" and MUST be used everywhere that
+// distinction matters -- both in looksLikeJoystick's device-shape gate and in
+// the button-map loop in Devices() that decides which codes actually become
+// addressable trigger.Button values.
+//
+// Those two call sites used to disagree: looksLikeJoystick gated correctly,
+// but the button map took every EV_KEY code the device declared, unfiltered.
+// A composite evdev node -- ABS_X, a joystick button, AND literal KEY_*
+// codes on one node -- would pass the gate, then have its KEY_* codes mapped
+// as buttons and reported held from Poll(). manager.go's logEdge would then
+// write those "buttons" to the log by label, which is exactly the keylog
+// logEdge's own doc comment says this package must never become: "a
+// joystick backend sees joystick buttons and nothing else" is the entire
+// reason logging input identities is permitted here when internal/hotkeys is
+// forbidden from doing it. Routing both call sites through one predicate
+// means they cannot drift apart the way they did before.
+//
+// The eligible set is the union of two kernel-defined ranges, not one:
+//
+//   - BTN_JOYSTICK..BTN_GAMEPAD+0x7f (0x120-0x1AF): the standard joystick and
+//     gamepad button block.
+//   - BTN_TRIGGER_HAPPY1..BTN_TRIGGER_HAPPY40 (0x2c0-0x2e7): the kernel's
+//     overflow block for devices with more buttons than the standard block
+//     has room for -- exactly what a high-button-count HOTAS (e.g. a
+//     Warthog-class throttle) uses. A single-range filter would silently
+//     drop every one of those buttons, trading the keylog bug for a
+//     "half my buttons vanished" bug.
+//
+// Everything strictly between the two ranges (0x1AF-0x2c0) is ordinary
+// KEY_* space -- multimedia/consumer keys, KEY_OK, KEY_KBD_LCD_MENU*, and so
+// on -- and stays excluded, which is what keeps the keylog closure intact.
+// Do not "simplify" this back to one range or widen it to admit that gap.
+func isJoystickButton(c evdev.EvCode) bool {
+	if c >= evdev.BTN_JOYSTICK && c <= evdev.BTN_GAMEPAD+0x7f {
+		return true
+	}
+	return c >= evdev.BTN_TRIGGER_HAPPY1 && c <= evdev.BTN_TRIGGER_HAPPY40
+}
+
 // looksLikeJoystick reports whether the device declares joystick-shaped
-// capabilities: an absolute X axis plus at least one gamepad/joystick button.
-// See the type comment for why this filter is load-bearing: a keyboard
-// declares EV_KEY capability but no ABS_X, and reports none of the codes in
-// BTN_JOYSTICK..BTN_GAMEPAD's range, so it can never pass this check.
+// capabilities: an absolute X axis plus at least one gamepad/joystick
+// button. See the type comment for why this filter is load-bearing: a
+// keyboard declares EV_KEY capability but no ABS_X, and reports no
+// isJoystickButton code, so it can never pass this check.
 func looksLikeJoystick(d *evdev.InputDevice) bool {
 	hasAbsX := false
 	for _, c := range d.CapableEvents(evdev.EV_ABS) {
@@ -71,7 +112,7 @@ func looksLikeJoystick(d *evdev.InputDevice) bool {
 		return false
 	}
 	for _, c := range d.CapableEvents(evdev.EV_KEY) {
-		if c >= evdev.BTN_JOYSTICK && c <= evdev.BTN_GAMEPAD+0x7f {
+		if isJoystickButton(c) {
 			return true
 		}
 	}
@@ -194,13 +235,31 @@ func (s *linuxSource) Devices() ([]Device, error) {
 			buttons: map[evdev.EvCode]trigger.Button{},
 		}
 
-		// Bounds check is genuinely reachable here, unlike a purely
-		// defensive one: evdev's joystick/gamepad button range
-		// (BTN_JOYSTICK..BTN_GAMEPAD+0x7f, ~144 codes) is wider than
-		// trigger.MaxButton+1 (128) slots, so a device declaring capability
-		// across most of that range would overflow without this guard.
+		// isJoystickButton is the SAME predicate looksLikeJoystick's gate 2
+		// uses. This must filter here too, not just gate the device: without
+		// it, a composite node's literal KEY_* codes would be mapped as
+		// buttons and reported held from Poll(), which is precisely the
+		// keylog logEdge's doc comment says this package must not become.
+		// See isJoystickButton's doc for the two-range union and why a
+		// single range is wrong.
+		//
+		// The bounds check is genuinely reachable here, unlike a purely
+		// defensive one: isJoystickButton's eligible set spans the standard
+		// joystick/gamepad block (0x120-0x1AF, ~144 codes) UNION the
+		// BTN_TRIGGER_HAPPY overflow block (0x2c0-0x2e7, 40 codes) -- up to
+		// ~184 possible codes -- which is wider than trigger.MaxButton+1
+		// (128) slots. A device declaring capability across enough of both
+		// ranges (a high-button-count HOTAS is exactly the kernel's reason
+		// for the overflow block existing) would overflow without this
+		// guard. On overflow the first 128 eligible codes, in the order
+		// CapableEvents reports them, keep their indices; anything past that
+		// is dropped rather than misindexed -- the break happens before any
+		// write past next==127.
 		var next trigger.Button
 		for _, c := range dev.CapableEvents(evdev.EV_KEY) {
+			if !isJoystickButton(c) {
+				continue
+			}
 			if next > trigger.MaxButton {
 				break
 			}
