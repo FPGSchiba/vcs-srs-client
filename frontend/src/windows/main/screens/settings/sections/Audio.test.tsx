@@ -30,9 +30,17 @@ function seed() {
         effect_order: [],
       },
     },
+    // Real enumerated endpoints ONLY. The { id: "", name: "System Default" }
+    // sentinel is synthesised in Go (internal/app.AudioDeviceDTOs) and
+    // arrives here already prepended in production; putting it in this
+    // fixture and then asserting it rendered -- which is what this file used
+    // to do -- proved nothing except that the fixture contained what the
+    // fixture contained. The assertion that the sentinel EXISTS lives where
+    // it can actually fail: TestGetAudioDevicesLeadsWithSystemDefault in
+    // internal/app/audio_test.go.
     audioDevices: {
-      inputs: [{ id: "", name: "System Default", is_default: true }, { id: "mic-1", name: "Procyon Headset", is_default: false }],
-      outputs: [{ id: "", name: "System Default", is_default: true }],
+      inputs: [{ id: "mic-1", name: "Procyon Headset", is_default: true }],
+      outputs: [{ id: "out-1", name: "Bridge Speakers", is_default: true }],
     },
   });
 }
@@ -40,10 +48,15 @@ function seed() {
 describe("Audio settings", () => {
   beforeEach(() => { setSettings.mockClear(); seed(); });
 
-  it("lists enumerated input devices including System Default", () => {
+  it("renders exactly the devices the backend hands it, synthesising none of its own", () => {
     render(<Audio />);
-    expect(screen.getByRole("option", { name: "System Default" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Procyon Headset" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Bridge Speakers" })).toBeInTheDocument();
+    // The fixture carries no "System Default" entry, so one appearing here
+    // could only have been invented by this component -- which is exactly
+    // the duplication the Go-side prepend exists to avoid.
+    expect(screen.queryByRole("option", { name: "System Default" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "System Default (output)" })).not.toBeInTheDocument();
   });
 
   it("persists a device change through setSettings", async () => {
