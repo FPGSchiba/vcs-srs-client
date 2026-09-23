@@ -19,6 +19,10 @@ export const EV = {
   joystickCaptured: "keybinds:joy_captured",
   joystickState: "joystick:state",
   captureExpired: "keybinds:capture_expired",
+  audioDevicesChanged: "audio:devices_changed",
+  audioVU: "audio:vu",
+  audioState: "audio:state",
+  audioMicMuted: "audio:mic_muted",
 } as const;
 
 // on subscribes to a Wails event and returns an unsubscribe function.

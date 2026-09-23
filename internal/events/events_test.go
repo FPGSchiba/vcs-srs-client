@@ -172,3 +172,26 @@ func TestEmitter_HotkeysState(t *testing.T) {
 		t.Errorf("Permission = %q, want %q", p.Permission, "denied")
 	}
 }
+
+func TestAudioEventNames(t *testing.T) {
+	cases := map[string]string{
+		events.EventAudioDevicesChanged: "audio:devices_changed",
+		events.EventAudioVU:             "audio:vu",
+		events.EventAudioState:          "audio:state",
+		events.EventAudioMicMuted:       "audio:mic_muted",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("event name %q, want %q", got, want)
+		}
+	}
+}
+
+func TestAudioEmittersForwardPayloads(t *testing.T) {
+	f := &fakeEmitter{}
+	e := events.New(f)
+	e.AudioMicMuted(true)
+	if f.last().name != events.EventAudioMicMuted {
+		t.Fatalf("emitted %q", f.last().name)
+	}
+}
