@@ -1039,7 +1039,6 @@ func (a *App) applyHotkeys() {
 	}
 
 	sb.mu.Lock()
-	sb.holds = holds
 	jm := sb.joy
 	sb.mu.Unlock()
 
@@ -1047,26 +1046,40 @@ func (a *App) applyHotkeys() {
 	// whose own binding changed: hk.Apply always tears down and re-registers
 	// through dispatcher.clear(), and jm.Apply always calls
 	// takeActiveLocked(), and both release every currently-latched hold
-	// action as a side effect. Those synchronous Released calls must run
-	// FIRST and go through Pressed/Released -> presses.release() so each one
-	// properly balances the refcount (and is forwarded to the UI). Only
-	// AFTER both Apply calls is it safe to sweep the refcount with a blanket
-	// reset: by then every genuine release the managers owed has already
-	// been applied, so reset only clears entries nothing released (e.g. a
-	// press-kind action, which is never counted in the first place).
+	// action as a side effect. Those synchronous Released calls run on THIS
+	// goroutine, from inside Apply, and each one goes back through
+	// a.Released -> isHold() -> presses.release().
 	//
-	// Resetting BEFORE Apply (the original order) zeroed the count first, so
-	// those synchronous releases landed on an already-empty entry and
-	// presses.release() swallowed them: HotkeyReleased never reached the UI
-	// for an action that was, at that instant, still genuinely held -- and
-	// on unlucky timing (the physical key came up in the same window) it
-	// could never be closed by a later event either, since the manager's own
-	// active/latch tracking had already been cleared too.
+	// So sb.holds must still be the map that was live when those actions
+	// were PRESSED, which is why it is assigned below rather than here. An
+	// action that has just disappeared from the registry -- the server
+	// removed radio 3 while radio.3.ptt was held -- is absent from the new
+	// map, so judging its release against it would make isHold() false,
+	// skip presses.release() entirely, and leak the refcount at 1: the
+	// action is then permanently deadened, because the next genuine press
+	// counts 1 -> 2 and is swallowed as "already held by another source".
+	//
+	// With the old map in place through both Applies, each manager balances
+	// its own edges and there is nothing left over -- which is why there is
+	// no blanket sb.presses.reset() here any more. That sweep was itself the
+	// residual stuck-PTT race: jm.Apply releases notifyMu on return, so a
+	// 100Hz tick landing before the reset re-pressed the still-held button
+	// (count 0 -> 1, HotkeyPressed emitted), the reset then zeroed the count
+	// while the manager still had the action active, and the eventual
+	// physical release hit presses.release() with n <= 0 -- swallowing
+	// HotkeyReleased and leaving the transmission open for good.
+	//
+	// joystick.Manager.Apply orders itself exactly this way already
+	// (takeActiveLocked runs before m.hold = hold); this is the app layer
+	// matching it.
 	_ = sb.hk.Apply(kbBinds) // failures surface via the event below
 	if jm != nil {
 		_ = jm.Apply(joyBinds)
 	}
-	sb.presses.reset()
+
+	sb.mu.Lock()
+	sb.holds = holds
+	sb.mu.Unlock()
 	// Without this the hotkeys:state event had no production emitter at all:
 	// a binding the OS refuses (Numpad7 and friends) saved cleanly, was
 	// recorded in Manager.Failed(), and never reached the UI, so the row

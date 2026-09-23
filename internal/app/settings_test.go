@@ -1266,3 +1266,77 @@ func TestBeginCaptureDoesNotDeadlockWhileAHotkeyIsHeld(t *testing.T) {
 			em.count(events.EventHotkeyPressed), em.count(events.EventHotkeyReleased))
 	}
 }
+
+// TestApplyHotkeysBalancesEdgesWhenAPerRadioActionDisappears is the I1 guard.
+//
+// sb.holds used to be assigned BEFORE both Apply calls, so the synchronous
+// Released callbacks those Applies emit were judged against the NEW holds
+// map. When the server removes a radio while its PTT is held,
+// isHold("radio.3.ptt") is false by the time the release arrives,
+// presses.release() is never called, and the refcount leaks at 1 -- which
+// deadens the action for the rest of the session. That leak used to be swept
+// by a blanket sb.presses.reset() after the Applies, and the sweep itself was
+// the residual stuck-PTT race: a 100Hz tick landing between jm.Apply's return
+// and reset() re-pressed the still-held button, reset() then zeroed the count
+// underneath it, and the physical release was swallowed with the transmission
+// stuck open.
+//
+// With sb.holds assigned AFTER both Applies, each manager balances its own
+// edges against the map that was live when the action was pressed, and there
+// is nothing left for reset() to sweep. joystick.Manager.Apply already orders
+// itself this way (takeActiveLocked before m.hold = hold).
+//
+// The action is re-bound and pressed a SECOND time at the end because that is
+// the only externally visible symptom of a leaked count: a leak of 1 makes the
+// next genuine press a no-op.
+func TestApplyHotkeysBalancesEdgesWhenAPerRadioActionDisappears(t *testing.T) {
+	st := state.New()
+	a, em := newTestAppOn(t, st, &countingRegistrar{})
+
+	radios := func(ids ...uint32) *srspb.RadioInfo {
+		out := &srspb.RadioInfo{}
+		for _, id := range ids {
+			out.Radios = append(out.Radios, &srspb.Radio{Id: id, Name: "RADIO"})
+		}
+		return out
+	}
+	st.SetRadios("me", radios(1, 3))
+	st.SetSelf("me", &srspb.ClientInfo{Name: "me"})
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	btn := trigger.JoyButton{Device: "stick-c3", Button: 0}
+	a.settings.kb.Add(keybinds.ActionID("radio.3.ptt"),
+		trigger.Joy(trigger.JoyBinding{Device: btn.Device, Button: btn.Button}))
+	a.applyHotkeys()
+
+	src.setHeld(btn, true)
+	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyPressed) >= 1 })
+
+	// The server drops radio 3 while its PTT is still physically held. The
+	// action vanishes from the registry, so the new holds map does not
+	// contain it at all.
+	st.SetRadios("me", radios(1))
+
+	waitUntil(t, time.Second, func() bool {
+		return em.count(events.EventHotkeyReleased) == em.count(events.EventHotkeyPressed)
+	})
+	time.Sleep(20 * time.Millisecond) // settle: the action is gone, nothing more may fire
+	if p, r := em.count(events.EventHotkeyPressed), em.count(events.EventHotkeyReleased); p != r {
+		t.Fatalf("Pressed=%d Released=%d after the bound radio disappeared mid-hold; want them equal", p, r)
+	}
+
+	// Let go, give the radio back, and press again. A leaked refcount is
+	// invisible until exactly here: press() would see 1 -> 2 and swallow the
+	// edge, leaving the user's PTT permanently dead.
+	src.setHeld(btn, false)
+	time.Sleep(20 * time.Millisecond)
+	st.SetRadios("me", radios(1, 3))
+	src.setHeld(btn, true)
+
+	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyPressed) >= 2 })
+}
