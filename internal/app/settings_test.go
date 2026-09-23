@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
@@ -356,6 +357,70 @@ func TestSetSettingsEmitsChange(t *testing.T) {
 	}
 }
 
+// TestGetSettingsReflectsAudioDefaults proves SettingsDTO.Audio carries
+// config.Default()'s Audio table, not a zero value.
+func TestGetSettingsReflectsAudioDefaults(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	s := a.GetSettings()
+	if !s.Audio.AGC || s.Audio.Levels.Master != 0.75 {
+		t.Fatalf("audio defaults missing from SettingsDTO: %+v", s.Audio)
+	}
+}
+
+// TestSetSettingsPersistsAudio proves the audio fields ride the SAME
+// copy-persist-swap as General -- not a second, parallel persistence path.
+func TestSetSettingsPersistsAudio(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	a, _, _ := newTestAppWithPath(t, cfgPath)
+
+	s := a.GetSettings()
+	s.Audio.VOX = true
+	s.Audio.Levels.SFX = 0.25
+	s.Audio.InputDevice = "mic-9"
+	if err := a.SetSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Audio.VOX || cfg.Audio.Levels.SFX != 0.25 || cfg.Audio.InputDevice != "mic-9" {
+		t.Fatalf("audio settings not persisted: %+v", cfg.Audio)
+	}
+}
+
+// TestSetSettingsWithAWiredManagerDoesNotDeadlock proves SetSettings's
+// mgr.SetConfig push happens after sb.mu.Unlock() as documented, not while
+// holding it: Manager.SetConfig only takes Manager's own lock-free atomic
+// store, so nesting the two would still not self-deadlock on its own, but
+// this pins the ordering down directly rather than relying on that being a
+// coincidence, and gives a fast, deterministic failure (a hung goroutine)
+// instead of trusting go test's multi-minute default timeout to eventually
+// notice.
+func TestSetSettingsWithAWiredManagerDoesNotDeadlock(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	m := audio.NewManager(audio.NewFakeBackend(), audio.ManagerOptions{
+		PollInterval: time.Hour, VUInterval: time.Hour,
+	})
+	t.Cleanup(m.Stop)
+	a.SetAudioBackend(m)
+
+	s := a.GetSettings()
+	s.Audio.Levels.Master = 0.42
+
+	done := make(chan error, 1)
+	go func() { done <- a.SetSettings(s) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SetSettings: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetSettings did not return within 2s with an audio backend wired -- suspect a lock ordering deadlock against Manager.SetConfig")
+	}
+}
+
 func TestGetKeybindsJoinsRegistryWithChords(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	list := a.GetKeybinds()
@@ -615,7 +680,10 @@ func TestSetSettingsFailsWithoutMutatingOnPersistError(t *testing.T) {
 	if err := a.SetSettings(next); err == nil {
 		t.Fatal("expected SetSettings to fail when the config path is unwritable")
 	}
-	if got := a.GetSettings(); got != before {
+	// SettingsDTO now carries Audio.Effects (a map), so it is no longer
+	// comparable with == -- reflect.DeepEqual is the correct replacement,
+	// not a weaker check: it still walks every field, map included.
+	if got := a.GetSettings(); !reflect.DeepEqual(got, before) {
 		t.Errorf("GetSettings() = %+v after a failed save, want unchanged %+v", got, before)
 	}
 	if contains(em.names(), events.EventSettingsChanged) {

@@ -86,13 +86,95 @@ func SnapshotFromProto(clients map[string]*srspb.ClientInfo, radios map[string]*
 	return snap
 }
 
-// SettingsDTO is the binding-facing shape of config.General.
+// SettingsDTO is the binding-facing shape of config.General plus
+// config.Audio (Audio). One settings path, one settings:changed event -- see
+// audio.go's package doc for why Audio does not get its own
+// Get/SetAudioSettings pair.
 type SettingsDTO struct {
 	StartMinimized       bool `json:"start_minimized"`
 	MinimizeToTray       bool `json:"minimize_to_tray"`
 	ShowTransmitterName  bool `json:"show_transmitter_name"`
 	PlayConnectionSounds bool `json:"play_connection_sounds"`
 	RadioSwitchAsPTT     bool `json:"radio_switch_as_ptt"`
+
+	Audio AudioSettingsDTO `json:"audio"`
+}
+
+// AudioSettingsDTO is the binding-facing shape of config.Audio. Levels and
+// the VOX threshold are normalized 0-1 here; the UI renders the design's
+// 0-100 scale. Keeping the scale conversion in one place (the React
+// component) stops the two representations from drifting.
+type AudioSettingsDTO struct {
+	InputDevice       string                    `json:"input_device"`
+	OutputDevice      string                    `json:"output_device"`
+	InputDeviceName   string                    `json:"input_device_name"`
+	OutputDeviceName  string                    `json:"output_device_name"`
+	MicPassthrough    bool                      `json:"mic_passthrough"`
+	AGC               bool                      `json:"agc"`
+	NoiseSuppression  bool                      `json:"noise_suppression"`
+	VOX               bool                      `json:"vox"`
+	VOXThreshold      float32                   `json:"vox_threshold"`
+	VOXMinLengthMS    int                       `json:"vox_min_length_ms"`
+	VOXHangMS         int                       `json:"vox_hang_ms"`
+	VOXNoiseCancel    bool                      `json:"vox_noise_cancel"`
+	PTTStartDelayMS   int                       `json:"ptt_start_delay_ms"`
+	PTTReleaseDelayMS int                       `json:"ptt_release_delay_ms"`
+	VoiceEffect       string                    `json:"voice_effect"`
+	ClippingEffect    string                    `json:"clipping_effect"`
+	Levels            AudioLevelsDTO            `json:"levels"`
+	Effects           map[string]AudioEffectDTO `json:"effects"`
+}
+
+// AudioLevelsDTO holds the four mixer bus positions, 0-1.
+type AudioLevelsDTO struct {
+	Master       float32 `json:"master"`
+	Voice        float32 `json:"voice"`
+	SFX          float32 `json:"sfx"`
+	Notification float32 `json:"notification"`
+}
+
+// AudioEffectDTO is one Radio Effects slot's persisted state.
+//
+// Label and Available cannot be sourced from internal/audio's *SFX manifest
+// from this package today -- Manager exposes no accessor for it, and this
+// task is scoped to internal/app only. Available is unconditionally false
+// as a result, which happens to also be the true answer right now: the SFX
+// sample pack (internal/audio/assets/README.md) has not landed, so every
+// slot is silent regardless of id. A future task that touches
+// internal/audio should add a Manager accessor and thread the real label
+// and per-slot availability through here instead of this placeholder.
+type AudioEffectDTO struct {
+	Enabled bool   `json:"enabled"`
+	File    string `json:"file"`
+	Label   string `json:"label"`
+	// Available is false when no sample is behind the slot -- expected
+	// until the sample pack lands. The UI greys the row rather than
+	// presenting a PREVIEW button that does nothing.
+	Available bool `json:"available"`
+}
+
+// AudioDeviceDTO is one selectable endpoint.
+type AudioDeviceDTO struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"is_default"`
+}
+
+// AudioDevicesDTO is the full enumerated device list for both directions.
+type AudioDevicesDTO struct {
+	Inputs  []AudioDeviceDTO `json:"inputs"`
+	Outputs []AudioDeviceDTO `json:"outputs"`
+}
+
+// AudioStateDTO reports the audio subsystem's health, mirroring
+// HotkeyStateDTO and JoystickStateDTO so Phase 7's notification channel can
+// absorb all three the same way.
+type AudioStateDTO struct {
+	Running     bool   `json:"running"`
+	InputError  string `json:"input_error"`
+	OutputError string `json:"output_error"`
+	Overruns    uint64 `json:"overruns"`
+	Underruns   uint64 `json:"underruns"`
 }
 
 // CaptureDTO is a raw {code, modifiers} capture from the frontend's keydown
