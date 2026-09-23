@@ -25,7 +25,7 @@ Every task's requirements implicitly include this section. Values are copied ver
 7. **`DeviceID` is constrained to `[A-Za-z0-9_.-]+`** so it can never contain the `:` or `+` field separators. Backends sanitise (spec §3).
 8. **Existing `config.toml` files must round-trip byte-identical.** An action with exactly one trigger of kind key is written as a bare string (spec §6).
 9. **Buttons 0..127; hats encoded `128 + hat*8 + dir`, hat 0..3, dir 0..7 clockwise from up** (spec §3).
-10. **Keyboard logging stays action-ID-only.** Joystick edges DO log device and button identity; the Linux device filter must open only joystick-like devices, or this rule breaks (spec §11).
+10. **Nothing that observes the keyboard may log what it observed.** `internal/hotkeys` is that thing: action IDs only, never a key, chord, scancode or keysym, on any path. Joystick edges DO log device and button identity, and `internal/keybinds.Store.Load` DOES name a chord it is destroying (a value out of the user's own `config.toml`, not an observed keystroke). The Linux device filter must open only joystick-like devices, or the joystick half of this breaks (spec §11).
 11. **Literal TOML fixtures, never symmetric round-trips alone,** for every persisted field. Phase 3 proved a symmetric round-trip cannot catch a mistyped struct tag (spec §12).
 12. **`go test -race ./...` must pass.** The poll loop, manager and refcount are concurrent.
 13. **Conventional commits.** End every commit message with `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.

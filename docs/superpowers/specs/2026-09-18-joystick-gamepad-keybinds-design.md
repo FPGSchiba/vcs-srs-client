@@ -346,9 +346,18 @@ The ROADMAP's Phase 7 note about routing hotkey failures through the notificatio
 
 Phase 3 forbids logging key identity because the gohook listener sees every keystroke on the machine — a log line naming keys would be a keylog.
 
-**That rationale does not transfer to joystick input, and the distinction is deliberate.** A DirectInput or evdev joystick reader sees joystick buttons and nothing else; it cannot observe typing. Joystick edges therefore **DO** log device and button identity alongside the action ID, which is what makes "my HOTAS bind does nothing" diagnosable at all. Keyboard logging stays action-ID-only, exactly as today.
+**That rationale does not transfer to joystick input, and the distinction is deliberate.** A DirectInput or evdev joystick reader sees joystick buttons and nothing else; it cannot observe typing. Joystick edges therefore **DO** log device and button identity alongside the action ID, which is what makes "my HOTAS bind does nothing" diagnosable at all.
 
-The Linux backend's device filter (§8) is what preserves this property: it must open only joystick-like devices. Opening a keyboard through evdev would turn this log line into a keylog and break the rule that justifies it.
+The rule, stated precisely enough to check a diff against:
+
+> **Nothing that observes the keyboard may log what it observed.** `internal/hotkeys` — the gohook listener — is that thing, and its prohibition is absolute: no key, chord, scancode or keysym at any level, in any form, including on an error path. It may log action IDs and nothing else.
+
+The prohibition is scoped to **observed keystrokes**, and it does not reach a chord the user typed into their own `config.toml`. `internal/keybinds.Store.Load` therefore **does** name a chord when it destroys one — an unparseable trigger, a trigger already claimed by an earlier action, a second keyboard chord on an action that may hold only one. Those drops are rewritten out of the user's file on the next `Save`, so a silent one is a value the user loses with no way to learn what it was; the logged string is a line of their own config being read back at them, not a key the app watched them press. That is a different disclosure from the listener's, and it is the only exception.
+
+Two consequences, both deliberate:
+
+- This is **not** licence to widen `internal/hotkeys`. A config-file value being named as it is destroyed says nothing about what a global listener may write.
+- The Linux joystick backend's device filter (§8) is what preserves the joystick half: it must open only joystick-like devices. Opening a keyboard through evdev would make that backend an observer of typing, and its log lines a keylog — breaking the rule that justifies them.
 
 ---
 
