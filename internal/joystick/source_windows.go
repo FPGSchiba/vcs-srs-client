@@ -57,6 +57,28 @@ type winDevice struct {
 }
 
 // NewOSSource builds the platform joystick source.
+//
+// It deliberately does NOT probe enumeration here, and therefore fails only
+// when there is genuinely no Source to return (no helper window, no
+// DirectInput). The construction-time `s.Devices()` probe that used to live
+// at the end of this function destroyed the very distinction the manager's
+// health reporting exists to make: main.go drops the manager on a
+// construction error, so sb.joy stayed nil, GetJoystickState returned
+// {Supported:false, Error:""}, and a Windows box whose EnumDevices failed
+// once was byte-identical to macOS's "no backend at all" -- affordance
+// hidden, no banner, and NO RETRY, because the 3s rediscover loop only
+// exists inside a Manager that was never built.
+//
+// Returning a live Source instead hands the enumeration -- and its error --
+// to Manager.New's probe, which records ANY non-ErrUnsupported error in
+// discoverErr while leaving Supported() true. A transient enumeration
+// failure then reads as {Supported:true, Error:"joystick: enumerate
+// devices: ..."}, the banner fires, and the next successful rediscover
+// clears it on its own.
+//
+// This is the same reasoning source_linux.go carries; it is platform
+// INDEPENDENT, so it must hold for every backend (darwin and other never
+// fail construction at all).
 func NewOSSource(log *slog.Logger) (Source, error) {
 	if log == nil {
 		log = slog.Default()
@@ -76,10 +98,6 @@ func NewOSSource(log *slog.Logger) (Source, error) {
 		helper:     helper,
 		devices:    map[trigger.DeviceID]*winDevice{},
 		openFailed: map[trigger.DeviceID]string{},
-	}
-	if _, err := s.Devices(); err != nil {
-		s.Close()
-		return nil, err
 	}
 	return s, nil
 }
