@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"log"
+	"log/slog"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -46,6 +47,26 @@ func main() {
 		JSON:     true,
 		FilePath: logPath, // empty if resolution failed → logger uses its default
 	})
+
+	// Install appLog as the slog default so packages that log through
+	// slog.Default() reach the rotating FILE, not just stderr.
+	//
+	// This is load-bearing, not tidiness. internal/keybinds/store.go destroys
+	// a binding when a config lists more than one keyboard chord for an
+	// action, and justifies that destruction on the grounds that the drop is
+	// diagnosable -- it emits a Warn naming the action and the dropped chord.
+	// Nothing ever called slog.SetDefault in production, so that Warn went to
+	// stderr alone, and a Wails GUI build on Windows has no console: the
+	// warning was discarded outright while its unit test passed, because the
+	// test installs a handler of its own. Same for internal/app/app.go's
+	// slog.Default() fallback and the Windows joystick backend's.
+	//
+	// appLog is logger.New's handler over io.MultiWriter(stderr, lumberjack),
+	// so this adds a route, it does not duplicate one: nothing else bridges
+	// slog.Default() to appLog. It also redirects the standard log package's
+	// output here, which is what carries the log.Fatal at the bottom of main
+	// into the log file instead of a console nobody sees.
+	slog.SetDefault(appLog)
 
 	if logPathErr != nil {
 		appLog.Warn("could not resolve app-data log path; using default location", "err", logPathErr)
