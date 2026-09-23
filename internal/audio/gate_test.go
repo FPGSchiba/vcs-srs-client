@@ -81,12 +81,30 @@ func TestGateVOXHangKeepsGateOpenThroughAPause(t *testing.T) {
 	}
 }
 
-func TestGateMuteOverridesPTTAndVOX(t *testing.T) {
+func TestGateMuteOverridesPTT(t *testing.T) {
+	g := NewGate(testGateConfig()) // zero start delay: PTT opens immediately
+	if !g.Step(GateInput{PTT: true}) {
+		t.Fatal("PTT did not open the gate; mute-override claim is untestable")
+	}
+	if g.Step(GateInput{PTT: true, Muted: true}) {
+		t.Fatal("gate opened while muted with PTT held -- mute must win unconditionally")
+	}
+}
+
+func TestGateMuteOverridesVOX(t *testing.T) {
 	cfg := testGateConfig()
 	cfg.VOXEnabled = true
 	g := NewGate(cfg)
-	if g.Step(GateInput{PTT: true, Level: 0.9, Muted: true}) {
-		t.Fatal("gate opened while muted -- mute must win unconditionally")
+	// Drive VOX genuinely open: 5 frames of sustain are required.
+	var open bool
+	for i := 0; i < 5; i++ {
+		open = g.Step(GateInput{Level: 0.2})
+	}
+	if !open {
+		t.Fatal("VOX did not open after min length; mute-override claim is untestable")
+	}
+	if g.Step(GateInput{Level: 0.9, Muted: true}) {
+		t.Fatal("gate opened while muted with VOX above threshold -- mute must win unconditionally")
 	}
 }
 
@@ -95,6 +113,63 @@ func TestGateVOXDisabledIgnoresLevel(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		if g.Step(GateInput{Level: 0.9}) {
 			t.Fatal("gate opened on level alone with VOX disabled")
+		}
+	}
+}
+
+// TestGateRaisingPTTStartDelayMidTransmissionDoesNotClosetGate reproduces the
+// exact trace from the Finding 1 review: a small start delay opens the gate,
+// then SetConfig raises the delay while PTT is still held. The gate must
+// stay open -- re-deriving pttOpen from the new (larger) threshold against
+// the already-satisfied pttHeld counter must not cut the user off.
+func TestGateRaisingPTTStartDelayMidTransmissionDoesNotCloseGate(t *testing.T) {
+	cfg := testGateConfig()
+	cfg.PTTStartDelayMS = 10 // startDelay = 1 frame
+	g := NewGate(cfg)
+
+	if g.Step(GateInput{PTT: true}) {
+		t.Fatal("frame 1: gate should still be closed (pttHeld=1, startDelay=1)")
+	}
+	if !g.Step(GateInput{PTT: true}) {
+		t.Fatal("frame 2: gate should have opened (pttHeld=2 > startDelay=1)")
+	}
+
+	// Raise the start delay mid-transmission, PTT still held throughout.
+	cfg.PTTStartDelayMS = 50 // startDelay = 5 frames
+	g.SetConfig(cfg)
+
+	for i := 0; i < 5; i++ {
+		if !g.Step(GateInput{PTT: true}) {
+			t.Fatalf("frame %d after SetConfig raised the start delay: gate closed under a held PTT", i+3)
+		}
+	}
+}
+
+// TestGateRaisingVOXMinLengthMidTransmissionDoesNotCloseGate is the VOX
+// equivalent of the PTT case above: VOX opens under the old min length, then
+// SetConfig raises VOXMinLengthMS while the level is still sustained above
+// threshold. The gate must stay open.
+func TestGateRaisingVOXMinLengthMidTransmissionDoesNotCloseGate(t *testing.T) {
+	cfg := testGateConfig()
+	cfg.VOXEnabled = true
+	cfg.VOXMinLengthMS = 50 // voxMinLen = 5 frames
+	g := NewGate(cfg)
+
+	var open bool
+	for i := 0; i < 5; i++ {
+		open = g.Step(GateInput{Level: 0.2})
+	}
+	if !open {
+		t.Fatal("VOX should have opened after 5 sustained frames at the old min length")
+	}
+
+	// Raise the min length mid-transmission, level still sustained above threshold.
+	cfg.VOXMinLengthMS = 100 // voxMinLen = 10 frames
+	g.SetConfig(cfg)
+
+	for i := 0; i < 5; i++ {
+		if !g.Step(GateInput{Level: 0.2}) {
+			t.Fatalf("frame %d after SetConfig raised VOXMinLengthMS: gate closed under sustained level", i+6)
 		}
 	}
 }

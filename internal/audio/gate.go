@@ -43,6 +43,15 @@ type Gate struct {
 	voxSustain  int // consecutive frames above threshold
 	voxHangLeft int
 	open        bool
+
+	// pttLatched and voxLatched remember that a mechanism has already opened
+	// the gate for the transmission in progress. Without them, SetConfig
+	// changing a delay mid-transmission would re-derive pttOpen/voxOpen from
+	// the NEW threshold against counters that already passed the OLD one,
+	// closing the gate out from under a held PTT or a running VOX signal.
+	// See Step for how each latch is set and cleared.
+	pttLatched bool
+	voxLatched bool
 }
 
 func msToFrames(ms int) int {
@@ -59,8 +68,14 @@ func NewGate(cfg GateConfig) *Gate {
 }
 
 // SetConfig re-reads the tunables. Safe to call between frames; it does not
-// reset the running state, so changing a delay mid-transmission does not cut
-// the user off.
+// reset the running state (pttHeld, voxSustain, the latches, or the tail/hang
+// counters). PTT and VOX each latch open once their threshold is first met
+// (see Step), so raising PTTStartDelayMS or VOXMinLengthMS while already
+// transmitting cannot re-close the gate out from under the user -- the new,
+// larger threshold only applies to a mechanism that has not opened yet (or
+// opens again after a release/drop-below-threshold). Without the latch,
+// re-deriving pttOpen/voxOpen from the current threshold against a counter
+// that already satisfied the old one would cut the user off mid-word.
 func (g *Gate) SetConfig(cfg GateConfig) {
 	g.cfg = cfg
 	g.startDelay = msToFrames(cfg.PTTStartDelayMS)
@@ -79,11 +94,19 @@ func (g *Gate) Step(in GateInput) bool {
 		// suppressed (pttHeld == 1, 2, 3) and the fourth (pttHeld == 4)
 		// opens.
 		if g.pttHeld > g.startDelay {
+			g.pttLatched = true
+		}
+		// Once latched, stay open regardless of a later SetConfig raising
+		// startDelay -- only the threshold check above (against the CURRENT
+		// startDelay) can set the latch; nothing re-checks it against a new,
+		// larger threshold once it is already true.
+		if g.pttLatched {
 			pttOpen = true
 			g.tail = g.releaseDelay
 		}
 	} else {
 		g.pttHeld = 0
+		g.pttLatched = false
 		if g.tail > 0 {
 			g.tail--
 			pttOpen = true
@@ -99,11 +122,17 @@ func (g *Gate) Step(in GateInput) bool {
 			// consecutive frame above threshold (voxSustain == 5) is the one
 			// that opens the gate, not the sixth.
 			if g.voxSustain >= g.voxMinLen {
+				g.voxLatched = true
+			}
+			// Once latched, stay open regardless of a later SetConfig
+			// raising voxMinLen -- same reasoning as the PTT latch above.
+			if g.voxLatched {
 				voxOpen = true
 				g.voxHangLeft = g.voxHang
 			}
 		} else {
 			g.voxSustain = 0
+			g.voxLatched = false
 			if g.voxHangLeft > 0 {
 				g.voxHangLeft--
 				voxOpen = true
@@ -112,6 +141,7 @@ func (g *Gate) Step(in GateInput) bool {
 	} else {
 		g.voxSustain = 0
 		g.voxHangLeft = 0
+		g.voxLatched = false
 	}
 
 	// Mute wins unconditionally. A user who hits push-to-mute expects
