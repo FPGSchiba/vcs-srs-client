@@ -57,9 +57,9 @@ func TestSlogDefaultIsInstalled(t *testing.T) {
 	// constructed nearby: the whole point is that the line reaches the log
 	// file a user can send us.
 	setIdx := strings.Index(text, "slog.SetDefault(appLog)")
-	newIdx := strings.Index(text, "appLog := logger.New(")
+	newIdx := strings.Index(text, "appLog, closeLog := logger.New(")
 	if newIdx < 0 || setIdx < 0 || setIdx < newIdx {
-		t.Error("slog.SetDefault(appLog) must come after appLog := logger.New(...)")
+		t.Error("slog.SetDefault(appLog) must come after appLog, closeLog := logger.New(...)")
 	}
 }
 

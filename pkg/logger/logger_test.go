@@ -16,7 +16,7 @@ import (
 
 func TestNewLogger_WritesJSONToWriter(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.Options{Level: slog.LevelInfo, Writer: &buf, JSON: true})
+	l, _ := logger.New(logger.Options{Level: slog.LevelInfo, Writer: &buf, JSON: true})
 	l.Info("hello", "k", "v")
 
 	if buf.Len() == 0 {
@@ -33,7 +33,7 @@ func TestNewLogger_WritesJSONToWriter(t *testing.T) {
 
 func TestNewLogger_FiltersByLevel(t *testing.T) {
 	var buf bytes.Buffer
-	l := logger.New(logger.Options{Level: slog.LevelWarn, Writer: &buf, JSON: true})
+	l, _ := logger.New(logger.Options{Level: slog.LevelWarn, Writer: &buf, JSON: true})
 	l.Info("filtered out")
 	l.Warn("kept")
 
@@ -130,10 +130,20 @@ func TestBestEffortStillSurfacesTheFileWritersError(t *testing.T) {
 
 // TestNewOrdersTheFileSinkAfterStderr pins the wiring: New's default writer
 // must tolerate a dead stderr end to end, not merely have a helper available.
+//
+// It also exercises New's Closer: lumberjack keeps the log file's OS handle
+// open across writes (that's what makes rotation possible), and nothing
+// else in the package ever closes it. On Windows an open handle blocks
+// t.TempDir()'s own cleanup from removing dir -- "The process cannot
+// access the file because it is being used by another process" -- so this
+// test must close it itself before that cleanup runs. defer does that: it
+// fires when this function returns, which is always before t.Cleanup
+// funcs (TempDir's RemoveAll included) run.
 func TestNewOrdersTheFileSinkAfterStderr(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vcs-client.log")
-	l := logger.New(logger.Options{Level: slog.LevelInfo, JSON: true, FilePath: path})
+	l, closer := logger.New(logger.Options{Level: slog.LevelInfo, JSON: true, FilePath: path})
+	defer closer.Close() //nolint:errcheck // best-effort cleanup; the assertions below are what matters
 	l.Info("joystick bind fired")
 
 	b, err := os.ReadFile(path)

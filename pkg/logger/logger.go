@@ -42,15 +42,36 @@ type Options struct {
 	FilePath string    // ignored if Writer is set; default: "log/vcs-client.log"
 }
 
-// New constructs a *slog.Logger using the given options.
-func New(opt Options) *slog.Logger {
+// noopCloser satisfies io.Closer for callers whose sink owns no OS
+// resource (opt.Writer was supplied directly), so New can always return a
+// non-nil Closer regardless of which branch built the writer.
+type noopCloser struct{}
+
+func (noopCloser) Close() error { return nil }
+
+// New constructs a *slog.Logger using the given options. The returned
+// io.Closer releases the underlying sink and must be closed by the caller
+// once logging is done -- most importantly, it closes the rotating log
+// file's OS handle. lumberjack.Logger opens that file lazily on first
+// Write and keeps the handle open across writes (that's what makes
+// rotation possible), and nothing else in this package ever closes it.
+// On Unix that's invisible: an unlinked-but-open file is still fine to
+// remove. On Windows it is not -- the OS refuses to remove, rename, or
+// otherwise touch a file that still has an open handle, so any caller
+// that tears down the log file's directory afterwards (a test using
+// t.TempDir, or a future "clear logs" / config-reload feature) needs a
+// way to release it deterministically first. When opt.Writer is supplied
+// there is no OS handle to release, so Close is a no-op.
+func New(opt Options) (*slog.Logger, io.Closer) {
 	w := opt.Writer
+	var closer io.Closer = noopCloser{}
 	if w == nil {
 		path := opt.FilePath
 		if path == "" {
 			path = "log/vcs-client.log"
 		}
 		file := &lumberjack.Logger{Filename: path, MaxSize: 10, MaxBackups: 3, MaxAge: 180}
+		closer = file
 		// stderr first and best-effort, the file second and unwrapped: a dead
 		// console can then never starve the file, while a broken file still
 		// reports its own error. See BestEffort.
@@ -63,7 +84,7 @@ func New(opt Options) *slog.Logger {
 	} else {
 		handler = slog.NewTextHandler(w, handlerOpts)
 	}
-	return slog.New(handler)
+	return slog.New(handler), closer
 }
 
 // ParseLevel maps a config log-level string to a slog.Level. Matching is

@@ -42,11 +42,12 @@ func main() {
 		}
 	}
 
-	appLog := logger.New(logger.Options{
+	appLog, closeLog := logger.New(logger.Options{
 		Level:    logger.ParseLevel(cfg.LogLevel),
 		JSON:     true,
 		FilePath: logPath, // empty if resolution failed → logger uses its default
 	})
+	defer closeLog.Close() //nolint:errcheck // process is exiting either way; nothing left to report to
 
 	// Install appLog as the slog default so packages that log through
 	// slog.Default() reach the rotating FILE, not just stderr.
