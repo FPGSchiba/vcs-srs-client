@@ -150,6 +150,20 @@ func (r *recordingEmitter) count(name string) int {
 	return n
 }
 
+// payloadsFor returns the payloads of every event emitted under name, in
+// order.
+func (r *recordingEmitter) payloadsFor(name string) []any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []any
+	for i, e := range r.events {
+		if e == name {
+			out = append(out, r.payloads[i])
+		}
+	}
+	return out
+}
+
 // lastHotkeyState returns the payload of the most recent hotkeys:state event.
 func (r *recordingEmitter) lastHotkeyState(t *testing.T) events.HotkeyStatePayload {
 	t.Helper()
@@ -473,6 +487,77 @@ func TestCaptureAutoResumesAfterTimeout(t *testing.T) {
 	}
 }
 
+// TestCaptureTimeoutTellsTheFrontendItsCaptureDied is the JOYSTICK half of
+// the auto-resume timeout, which TestCaptureAutoResumesAfterTimeout above
+// says nothing about.
+//
+// The timeout exists as a crashed-frontend safety net, but a LIVE frontend
+// has to be told too, and it used to be told nothing: capturingId stayed set,
+// the KeyChip stayed mounted, and the row went on saying "Press a key or
+// joystick button -- hold a second button first for a modifier" over a
+// capture that no longer existed with BOTH managers resumed.
+//
+// The keyboard half was self-recovering -- a keypress after the timeout still
+// reached AddTrigger and still bound -- which is why this only became
+// reachable once jm.BeginCapture was armed under the same inherited 10s
+// budget: a joystick capture completes INSIDE the manager and is gone once
+// cancelled. So the scenario this drives is the destructive one: global.ptt
+// already holds the button, the user spends longer than the timeout hunting
+// for it on a 30-button throttle (which the modifier prompt actively
+// encourages), and the press that follows binds NOTHING and instead keys the
+// radio.
+func TestCaptureTimeoutTellsTheFrontendItsCaptureDied(t *testing.T) {
+	a, em, _ := newTestApp(t)
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	btn := trigger.JoyButton{Device: "stick-c3", Button: 5}
+	a.settings.kb.Add(keybinds.ActionID("global.ptt"),
+		trigger.Joy(trigger.JoyBinding{Device: btn.Device, Button: btn.Button}))
+	a.applyHotkeys()
+
+	a.setCaptureTimeout(30 * time.Millisecond)
+	a.BeginCapture("global.push_to_mute")
+	// Never call EndCapture: the user is still hunting for the button.
+	waitUntil(t, time.Second, func() bool { return a.hotkeysResumed() })
+
+	// The row must have been told, and told WHICH row.
+	expired := em.payloadsFor(events.EventCaptureExpired)
+	if len(expired) != 1 {
+		t.Fatalf("got %d %s events, want exactly 1 -- a live frontend that is not told "+
+			"keeps rendering a listening chip over a capture the backend already tore down",
+			len(expired), events.EventCaptureExpired)
+	}
+	p, ok := expired[0].(events.CaptureExpiredPayload)
+	if !ok {
+		t.Fatalf("%s payload has type %T, want events.CaptureExpiredPayload",
+			events.EventCaptureExpired, expired[0])
+	}
+	if p.ActionID != "global.push_to_mute" {
+		t.Errorf("capture-expired action_id = %q, want %q", p.ActionID, "global.push_to_mute")
+	}
+
+	// And the capture really is gone on the joystick side: the press that
+	// follows binds nothing and fires the action that already holds the
+	// button.
+	src.setHeld(btn, true)
+	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyPressed) >= 1 })
+	src.setHeld(btn, false)
+	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyReleased) >= 1 })
+
+	got, _ := a.settings.kb.Get(keybinds.ActionID("global.push_to_mute"))
+	for _, tr := range got {
+		if tr.Kind == trigger.KindJoy {
+			t.Errorf("global.push_to_mute gained joystick trigger %s after the capture expired; "+
+				"an expired capture must bind nothing", tr.String())
+		}
+	}
+}
+
 // TestSupersededCaptureTimeoutDoesNotResume covers the auto-resume timer.
 //
 // Two mechanisms have to hold. BeginCapture stops the previous generation's
@@ -497,7 +582,7 @@ func TestSupersededCaptureTimeoutDoesNotResume(t *testing.T) {
 	}
 
 	// The un-cancellable case: generation 1's callback runs anyway.
-	a.resumeCapture(first)
+	a.resumeCapture(first, true)
 	if a.hotkeysResumed() {
 		t.Fatal("a superseded timer callback that beat Stop() must still be a no-op")
 	}

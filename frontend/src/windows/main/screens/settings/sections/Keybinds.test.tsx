@@ -671,4 +671,45 @@ describe("Keybinds section", () => {
     expect(screen.queryByRole("button", { name: /add binding/i })).not.toBeInTheDocument();
     expect(endCapture).not.toHaveBeenCalled();
   });
+
+  // ---- keybinds:capture_expired -- the backend's auto-resume timeout
+  // reaching a LIVE frontend --------------------------------------------
+
+  it("stops the row listening when the backend reports the capture expired", async () => {
+    renderWithKeybinds([pttRow([])], { supported: true, error: "", devices: [] });
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+    expect(screen.getByText(/joystick button/i)).toBeInTheDocument();
+
+    // 10s passed without an endCapture, so the backend tore the capture down
+    // itself: it cancelled the joystick capture and resumed BOTH managers.
+    // Until this event existed the row was told nothing -- it kept rendering
+    // the prompt over a capture that no longer existed, and the user's next
+    // joystick press bound nothing and instead keyed the radio.
+    emit(EV.captureExpired, { action_id: "global.ptt" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add binding/i })).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/joystick button/i)).not.toBeInTheDocument();
+
+    // The backend has ALREADY resumed this generation. Ending it again would
+    // be a second resume for a capture that is over, so the token is dropped
+    // rather than spent -- including by the onCancel the unmounting KeyChip
+    // fires as the row swaps back to "+".
+    expect(endCapture).not.toHaveBeenCalled();
+  });
+
+  it("ignores a capture-expired event for a row that is not currently capturing", async () => {
+    renderWithKeybinds([pttRow([])], { supported: true, error: "", devices: [] });
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    emit(EV.captureExpired, { action_id: "some.other.action" });
+
+    // Still listening -- a superseded capture's timeout must not close the
+    // capture that replaced it.
+    expect(screen.queryByRole("button", { name: /add binding/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/joystick button/i)).toBeInTheDocument();
+  });
 });

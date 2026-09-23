@@ -259,6 +259,31 @@ export function Keybinds() {
     );
   }, [capturingId]);
 
+  // Stops the row listening when the BACKEND tore the capture down on its own
+  // -- the auto-resume timeout fired because `endCapture` never arrived (see
+  // the doc-comment's property 1 for why it normally does).
+  //
+  // That timeout is a crashed-frontend safety net, but a live frontend has to
+  // be told too. Without this the row kept rendering "Press a key or joystick
+  // button ..." over a capture that no longer existed, with both backend
+  // managers already resumed: the user's next joystick press bound nothing and
+  // instead fired whatever action already held that button -- keying the radio,
+  // with nothing on screen to say why the binding had not taken. The keyboard
+  // half was self-recovering (a keypress still reached `addTrigger`), so this
+  // only bites the joystick half, which completes inside the Go manager and is
+  // gone once cancelled.
+  //
+  // `tokens` is cleared FIRST so the unmount KeyChip performs on the type swap
+  // back to `+` -- which it reports as a cancel -- finds nothing to end: the
+  // backend has already resumed this generation and must not be told again.
+  useEffect(() => {
+    return on<{ action_id: string }>(EV.captureExpired, ({ action_id }) => {
+      if (capturingId !== action_id) return;
+      tokens.current.delete(action_id);
+      setCapturingId((cur) => (cur === action_id ? null : cur));
+    });
+  }, [capturingId]);
+
   // Unsupported (macOS) is not denied -- there is nothing the user can grant
   // -- so the joystick half of the prompt, and any joystick affordance,
   // disappears entirely rather than showing a dead end.

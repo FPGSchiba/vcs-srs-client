@@ -455,7 +455,7 @@ func (a *App) BeginCapture(actionID string) int64 {
 	}
 	// The timer captures its OWN generation, so a timeout belonging to a
 	// superseded capture cannot re-arm hotkeys under a live one.
-	sb.captureTimer = time.AfterFunc(timeout, func() { a.resumeCapture(gen) })
+	sb.captureTimer = time.AfterFunc(timeout, func() { a.resumeCapture(gen, true) })
 	sb.mu.Unlock()
 
 	// Both Suspend calls are OUTSIDE sb.mu, and for the same reason -- see
@@ -544,12 +544,23 @@ func (a *App) onJoystickCaptured(token int64, c joystick.Captured) {
 // in the banner -- treating one bad binding as a failure of the whole
 // operation.
 func (a *App) EndCapture(token int64) {
-	a.resumeCapture(token)
+	a.resumeCapture(token, false)
 }
 
 // resumeCapture is the single gate both EndCapture and the auto-resume timer
 // go through. A stale token is a no-op.
-func (a *App) resumeCapture(token int64) {
+//
+// expired distinguishes the two callers, and it is the whole reason this
+// takes a parameter at all: EndCapture is the frontend telling the backend
+// the capture is over, so the frontend already knows. The TIMER is the
+// backend telling itself, and until keybinds:capture_expired existed it told
+// nobody else. A live frontend went on rendering "Press a key or joystick
+// button ..." over a capture that no longer existed, with both managers
+// resumed -- so the next joystick press bound nothing and instead fired
+// whatever action already held that button, keying the radio with no visible
+// sign that anything had gone wrong. Raising the timeout would only have
+// narrowed that window; telling the UI closes it.
+func (a *App) resumeCapture(token int64, expired bool) {
 	sb := a.settings
 	sb.mu.Lock()
 	if token != sb.captureGen {
@@ -561,12 +572,20 @@ func (a *App) resumeCapture(token int64) {
 		sb.captureTimer = nil
 	}
 	jm := sb.joy
+	actionID := sb.captureAction
 	sb.mu.Unlock()
 
 	_ = sb.hk.Resume() // per-binding failures surface via the event below
 	if jm != nil {
 		jm.CancelCapture()
 		jm.Resume()
+	}
+	// Emitted BEFORE the hotkey-state event and after both managers are back,
+	// so by the time the row stops listening the backend is already in the
+	// state the row is about to reflect. Guarded on a non-empty action id
+	// only because a capture with none has no row to address.
+	if expired && actionID != "" {
+		sb.em.CaptureExpired(actionID)
 	}
 	// Resume is where bindings saved DURING the capture actually hit the OS
 	// (Apply only records the desired set while suspended), so it is the

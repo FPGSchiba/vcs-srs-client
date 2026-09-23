@@ -36,6 +36,10 @@ const (
 	// appeared or cleared. The sibling of EventHotkeysState, and for the same
 	// reason: the UI must not have to re-ask.
 	EventJoystickState = "joystick:state"
+	// EventCaptureExpired is emitted when a capture's auto-resume timeout
+	// fires, i.e. the backend gave up waiting for EndCapture and tore the
+	// capture down itself.
+	EventCaptureExpired = "keybinds:capture_expired"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -193,6 +197,27 @@ func (t *Tagged) JoystickCaptured(actionID string, stolen any) {
 		ActionID: actionID,
 		Stolen:   stolen,
 	})
+}
+
+// CaptureExpiredPayload is the EventCaptureExpired payload.
+type CaptureExpiredPayload struct {
+	ActionID string `json:"action_id"`
+}
+
+// CaptureExpired tells the UI that the capture it started has been torn down
+// by the backend's auto-resume timeout rather than by anything the user did.
+//
+// The timeout exists as a crashed-frontend safety net, but a LIVE frontend
+// has to be told its capture died. Without this event the timeout cancelled
+// the joystick capture and resumed both managers while the row went on
+// rendering "Press a key or joystick button ...": the next button press then
+// fired whatever action it was already bound to -- a live transmission on the
+// radio -- and bound nothing. The keyboard half used to be self-recovering
+// (a keypress after the timeout still reached AddTrigger and still bound), so
+// this only became reachable once the joystick half, which completes INSIDE
+// the manager and is gone once cancelled, was armed under the same budget.
+func (t *Tagged) CaptureExpired(actionID string) {
+	t.em.Emit(EventCaptureExpired, CaptureExpiredPayload{ActionID: actionID})
 }
 
 // JoystickDevicePayload is one attached device, mirroring
