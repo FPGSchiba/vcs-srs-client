@@ -610,6 +610,29 @@ func (m *Manager) joinOrAbandon(name string, done <-chan struct{}) {
 	}
 }
 
+// vuMeterSegments is the number of discrete segments the frontend VU meter
+// renders (frontend/src/shared/components/VU.tsx's default `segs`). It is
+// the resolution EventAudioVU suppression quantizes to -- see
+// quantizeVUSegment.
+const vuMeterSegments = 16
+
+// quantizeVUSegment buckets a normalized 0..1 level into the same discrete
+// segment the frontend VU meter would light for it, so the dspLoop's
+// "emit only when changed" check compares what the user would actually
+// SEE rather than raw floats that are effectively never bit-identical
+// between two intervals of live capture. Pure integer/float arithmetic on
+// its parameter -- no allocation, no logging, no locking -- so it is safe
+// to call from the DSP loop on every tick.
+func quantizeVUSegment(level float32) int32 {
+	clamped := level
+	if clamped < 0 {
+		clamped = 0
+	} else if clamped > 1 {
+		clamped = 1
+	}
+	return int32(clamped * vuMeterSegments)
+}
+
 // peak reports the largest absolute sample value in frame, for VU metering.
 func peak(frame []float32) float32 {
 	var p float32
@@ -675,6 +698,17 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 	var lastCaptureDropped uint64
 	var vuIn, vuOut float32
 	vuLastEmit := time.Now()
+	// lastVUInSeg/lastVUOutSeg are the quantized (see quantizeVUSegment)
+	// buckets of the last EMITTED VU, not the last computed one --
+	// EventAudioVU's doc says the event is suppressed when unchanged, but
+	// nothing enforced that (see Fix 1's report). These are locals of this
+	// goroutine's loop, not Manager fields: the DSP loop must never
+	// allocate, log, block, or take a contended lock, and a shared field
+	// would need synchronisation against OnState/OnDevices callers that
+	// don't otherwise touch dspLoop's state. -1 is not a reachable
+	// quantizeVUSegment result, so the very first tick always emits and
+	// establishes a baseline.
+	lastVUInSeg, lastVUOutSeg := int32(-1), int32(-1)
 
 	ticker := time.NewTicker(FrameDuration)
 	defer ticker.Stop()
@@ -768,7 +802,21 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 
 		if m.opts.OnVU != nil {
 			if now := time.Now(); now.Sub(vuLastEmit) >= m.opts.VUInterval {
-				m.opts.OnVU(VU{Input: vuIn, Output: vuOut})
+				// EventAudioVU's doc promises suppression when unchanged.
+				// An exact float== comparison would almost never suppress
+				// anything against a live mic -- capture noise flickers the
+				// low bits of peak() every interval -- so quantize to the
+				// same 16-segment resolution the frontend VU meter actually
+				// renders (frontend/src/shared/components/VU.tsx) before
+				// comparing: two payloads that would paint the same meter
+				// are "unchanged" even if their raw floats differ in the
+				// noise floor. The emitted payload still carries the raw,
+				// unquantized level.
+				inSeg, outSeg := quantizeVUSegment(vuIn), quantizeVUSegment(vuOut)
+				if inSeg != lastVUInSeg || outSeg != lastVUOutSeg {
+					m.opts.OnVU(VU{Input: vuIn, Output: vuOut})
+					lastVUInSeg, lastVUOutSeg = inSeg, outSeg
+				}
 				vuIn, vuOut = 0, 0
 				vuLastEmit = now
 			}

@@ -651,3 +651,112 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 	}
 	t.Fatal(msg)
 }
+
+// TestManagerSuppressesUnchangedVUButEmitsSilenceTransition proves both
+// halves of EventAudioVU's documented contract (events.go's EventAudioVU
+// doc, and the suppression this implements in dspLoop): a sustained,
+// unchanged level produces exactly one emission (the baseline), and an
+// actual level change -- INCLUDING a drop back to zero -- always produces
+// a fresh one. Without this, an idle/muted mic would push one identical
+// payload to OnVU on every VUInterval tick forever.
+func TestManagerSuppressesUnchangedVUButEmitsSilenceTransition(t *testing.T) {
+	b := NewFakeBackend()
+	b.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", IsDefault: true}},
+	)
+
+	var mu sync.Mutex
+	var received []VU
+	m := NewManager(b, ManagerOptions{
+		PollInterval: time.Hour,
+		VUInterval:   15 * time.Millisecond,
+		OnVU: func(v VU) {
+			mu.Lock()
+			received = append(received, v)
+			mu.Unlock()
+		},
+	})
+	t.Cleanup(m.Stop)
+	if err := m.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	countAndLast := func() (int, VU) {
+		mu.Lock()
+		defer mu.Unlock()
+		n := len(received)
+		if n == 0 {
+			return 0, VU{}
+		}
+		return n, received[n-1]
+	}
+
+	// A feeder goroutine keeps the capture ring continuously fed at
+	// roughly half FrameDuration cadence -- fast enough that dspLoop's
+	// ticker never has to fall back to reading an empty ring (which would
+	// itself look like silence and confound the phases below). amp is
+	// changed by the test between phases via a mutex, not an atomic
+	// field on the Manager -- this is test-side synchronisation, not
+	// anything dspLoop itself needs to worry about.
+	var feedMu sync.Mutex
+	amp := float32(0)
+	stopFeed := make(chan struct{})
+	var feedWG sync.WaitGroup
+	feedWG.Add(1)
+	go func() {
+		defer feedWG.Done()
+		ticker := time.NewTicker(FrameDuration / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopFeed:
+				return
+			case <-ticker.C:
+				feedMu.Lock()
+				a := amp
+				feedMu.Unlock()
+				b.PushFrame(sine(a))
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stopFeed)
+		feedWG.Wait()
+	})
+	setAmp := func(a float32) {
+		feedMu.Lock()
+		amp = a
+		feedMu.Unlock()
+	}
+
+	// Phase 1: silence. Wait for the baseline emission (the very first
+	// tick always emits, quantizeVUSegment's sentinel), then hold silence
+	// across several more VUInterval windows and confirm no further
+	// emission arrives -- the repeated-identical-value half.
+	waitFor(t, func() bool { n, _ := countAndLast(); return n >= 1 }, "no baseline VU emission for silence")
+	time.Sleep(150 * time.Millisecond)
+	if n, last := countAndLast(); n != 1 {
+		t.Fatalf("sustained silence produced %d VU emissions, want exactly 1 (baseline only): last=%+v", n, last)
+	}
+
+	// Phase 2: a loud, unmistakably different signal. This MUST produce a
+	// new emission -- the changed-value half.
+	setAmp(0.9)
+	waitFor(t, func() bool { n, _ := countAndLast(); return n >= 2 }, "a genuine level change produced no additional VU emission")
+	if _, last := countAndLast(); last.Input == 0 {
+		t.Fatalf("VU emitted after raising the level still reports zero input: %+v", last)
+	}
+	// Hold the loud signal steady too, proving suppression isn't just a
+	// silence special case.
+	time.Sleep(150 * time.Millisecond)
+	if n, last := countAndLast(); n != 2 {
+		t.Fatalf("sustained loud signal produced %d VU emissions, want exactly 2 (one change, then suppressed): last=%+v", n, last)
+	}
+
+	// Phase 3: back to silence. "Suppress unchanged" must not mean "never
+	// emit zero" -- the meter must be able to show the user stopped
+	// talking.
+	setAmp(0)
+	waitFor(t, func() bool { n, last := countAndLast(); return n >= 3 && last.Input == 0 }, "transition back to silence was never emitted")
+}
