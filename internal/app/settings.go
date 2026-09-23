@@ -152,14 +152,21 @@ func (a *App) GetJoystickState() JoystickStateDTO {
 	sb.mu.Lock()
 	jm := sb.joy
 	sb.mu.Unlock()
+	// Devices is ALWAYS a non-nil slice. The frontend types it as
+	// JoystickDevice[] and now iterates it to decide whether a bound stick is
+	// attached, and the push path (events.JoystickStatePayload) has always
+	// sent []. Building this one by append on a nil slice marshalled to
+	// `null` whenever nothing was attached, so the two paths disagreed on
+	// shape for the exact state the UI most needs to read.
 	if jm == nil {
-		return JoystickStateDTO{Supported: false}
+		return JoystickStateDTO{Supported: false, Devices: []JoystickDeviceDTO{}}
 	}
-	out := JoystickStateDTO{Supported: jm.Supported()}
+	devs := jm.Devices()
+	out := JoystickStateDTO{Supported: jm.Supported(), Devices: make([]JoystickDeviceDTO, 0, len(devs))}
 	if err := jm.LastErr(); err != nil && jm.Supported() {
 		out.Error = err.Error()
 	}
-	for _, d := range jm.Devices() {
+	for _, d := range devs {
 		out.Devices = append(out.Devices, JoystickDeviceDTO{ID: string(d.ID), Name: d.Name})
 	}
 	return out

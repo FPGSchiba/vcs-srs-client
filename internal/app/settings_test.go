@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -1704,3 +1705,51 @@ func (r *recordingEmitter) lastJoystickState() (events.JoystickStatePayload, boo
 	}
 	return events.JoystickStatePayload{}, false
 }
+
+// TestJoystickStateDevicesMarshalsAsAnArrayNeverNull pins the shape of the
+// pull path against the push path and against the TS type.
+//
+// GetJoystickState built Devices by append on a nil slice, so with no
+// joystick attached -- or no backend at all -- it marshalled to `null`, while
+// the push path (JoystickStatePayload, built with make) always sends `[]` and
+// the TS type declares a non-nullable JoystickDevice[]. Nothing dereferenced
+// it until the trigger chips started deriving connectivity from the live
+// device list, at which point `null.some(...)` is a TypeError on first paint.
+func TestJoystickStateDevicesMarshalsAsAnArrayNeverNull(t *testing.T) {
+	assertArray := func(t *testing.T, got JoystickStateDTO) {
+		t.Helper()
+		if got.Devices == nil {
+			t.Error("Devices is nil; the frontend types it as JoystickDevice[] and iterates it")
+		}
+		b, err := json.Marshal(got)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if !strings.Contains(string(b), `"devices":[`) {
+			t.Errorf("marshalled as %s, want \"devices\" as a JSON array", b)
+		}
+	}
+
+	t.Run("no backend at all", func(t *testing.T) {
+		a, _, _ := newTestApp(t)
+		assertArray(t, a.GetJoystickState())
+	})
+
+	t.Run("backend with no attached device", func(t *testing.T) {
+		a, _, _ := newTestApp(t)
+		jm := joystick.New(emptyJoySource{}, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		a.SetJoystickBackend(jm)
+		defer jm.Close()
+		assertArray(t, a.GetJoystickState())
+	})
+}
+
+// emptyJoySource is a healthy backend with nothing plugged in -- the state
+// that produced a nil Devices slice.
+type emptyJoySource struct{}
+
+func (emptyJoySource) Devices() ([]joystick.Device, error) { return nil, nil }
+func (emptyJoySource) Poll() (joystick.State, error) {
+	return joystick.State{Held: map[trigger.JoyButton]struct{}{}}, nil
+}
+func (emptyJoySource) Close() {}
