@@ -16,10 +16,25 @@ import (
 )
 
 // defaultCaptureTimeout is how long BeginCapture waits before auto-resuming
-// OS hotkey registration if EndCapture never arrives (frontend crash, lost
-// IPC, etc). A spurious re-arm is harmless; a stuck-suspended state is
-// invisible to the user and maddening to diagnose.
-const defaultCaptureTimeout = 10 * time.Second
+// OS hotkey registration and telling the frontend the capture died.
+//
+// THE BUDGET IS SIZED FOR A HUMAN HUNTING A BUTTON, not for a crashed
+// frontend. That is a deliberate re-reading of what this timer is for. It
+// began as an invisible safety net for the case where EndCapture never
+// arrives (frontend crash, lost IPC): a stuck-suspended state is invisible to
+// the user and maddening to diagnose, while a spurious re-arm is harmless, so
+// 10 seconds was ample. Expiry is now a USER-VISIBLE event -- it closes the
+// capturing row -- which makes the timer a deadline the user has to beat, and
+// 10 seconds is a short one for "find the right button among thirty on a
+// throttle you cannot see while looking at the screen". Modifier capture
+// (hold one input, press another) asks for exactly that hunt twice over.
+//
+// 30 seconds is the upper end of the range, because the two failures are not
+// symmetric: overshooting only delays an automatic re-arm in the rare crashed
+// -frontend case, which nothing observes; undershooting closes the row under
+// a user who is mid-hunt, which they DO observe and cannot undo. Do not trim
+// this back toward 10 without a reason that outweighs that asymmetry.
+const defaultCaptureTimeout = 30 * time.Second
 
 // Bounds for the permission re-check that RequestHotkeyPermission arms.
 //

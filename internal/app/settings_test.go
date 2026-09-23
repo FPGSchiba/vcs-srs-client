@@ -499,8 +499,8 @@ func TestCaptureAutoResumesAfterTimeout(t *testing.T) {
 //
 // The keyboard half was self-recovering -- a keypress after the timeout still
 // reached AddTrigger and still bound -- which is why this only became
-// reachable once jm.BeginCapture was armed under the same inherited 10s
-// budget: a joystick capture completes INSIDE the manager and is gone once
+// reachable once jm.BeginCapture was armed under the same inherited capture
+// budget (defaultCaptureTimeout): a joystick capture completes INSIDE the manager and is gone once
 // cancelled. So the scenario this drives is the destructive one: global.ptt
 // already holds the button, the user spends longer than the timeout hunting
 // for it on a 30-button throttle (which the modifier prompt actively
