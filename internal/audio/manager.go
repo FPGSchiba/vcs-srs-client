@@ -176,6 +176,13 @@ type Manager struct {
 	inputRetryAt, outputRetryAt   time.Time
 	inputBackoff, outputBackoff   time.Duration
 
+	// lastState is the last snapshot handed to opts.OnState, so
+	// emitStateIfChanged can suppress identical repeats. Nil until the
+	// first emission; State is all-comparable by construction, so this is
+	// a plain == against a value, not a field-by-field diff that would
+	// silently miss a field added later.
+	lastState *State
+
 	// stopDSP/stopPoll/dspDone/pollDone are written ONLY inside the same mu
 	// critical section that sets running = true in Start, and read only
 	// under mu in Stop -- see Start's doc for why this matters (Fix 1).
@@ -344,9 +351,47 @@ func (m *Manager) Devices() (inputs, outputs []DeviceInfo) {
 	return append([]DeviceInfo(nil), m.lastInputs...), append([]DeviceInfo(nil), m.lastOutputs...)
 }
 
+// emitState pushes the current snapshot unconditionally. Used by Start and
+// Stop, where the transition itself is the news even if the snapshot happens
+// to match the previous one.
 func (m *Manager) emitState() {
-	if m.opts.OnState != nil {
-		m.opts.OnState(m.State())
+	if m.opts.OnState == nil {
+		return
+	}
+	st := m.State()
+	m.mu.Lock()
+	s := st
+	m.lastState = &s
+	m.mu.Unlock()
+	m.opts.OnState(st)
+}
+
+// emitStateIfChanged pushes the current snapshot only when it differs from
+// the last one emitted.
+//
+// This is what makes the health surface reachable at all between Start and
+// Stop. Those two were previously emitState's ONLY call sites besides a
+// device-list change, so a reopen failure, a backoff cycle, a recovery, a
+// device substitution and every Overruns/Underruns movement were all
+// invisible to the frontend -- the counters simply froze at whatever they
+// read when the manager started. Calling this at the end of every poll tick
+// gives all of them a trigger, and the equality check keeps an idle manager
+// from pushing an identical payload every PollInterval forever (the same
+// discipline dspLoop's VU suppression already follows).
+func (m *Manager) emitStateIfChanged() {
+	if m.opts.OnState == nil {
+		return
+	}
+	st := m.State()
+	m.mu.Lock()
+	unchanged := m.lastState != nil && *m.lastState == st
+	if !unchanged {
+		s := st
+		m.lastState = &s
+	}
+	m.mu.Unlock()
+	if !unchanged {
+		m.opts.OnState(st)
 	}
 }
 
@@ -541,12 +586,33 @@ func (m *Manager) Start() error {
 }
 
 // Stop tears the manager down. It is idempotent and orders teardown as:
-// stop DSP goroutine -> stop poll goroutine -> stop streams ->
-// Backend.Close(). The poll goroutine must be joined before the streams
-// are read/stopped: otherwise a concurrent bounded-backoff reopen could
-// store a freshly-opened stream into captureStream/playbackStream after
-// Stop has already snapshotted (and is about to discard) the old one,
-// leaking it.
+// stop DSP goroutine -> stop poll goroutine -> stop streams. The poll
+// goroutine must be joined before the streams are read/stopped: otherwise a
+// concurrent bounded-backoff reopen could store a freshly-opened stream into
+// captureStream/playbackStream after Stop has already snapshotted (and is
+// about to discard) the old one, leaking it.
+//
+// Stop deliberately does NOT call Backend.Close(). The Manager does not OWN
+// its Backend -- it is injected by whoever constructed it (main.go), and
+// that constructor is the only party that knows when the process is really
+// done with it. Closing here was a genuine bug on two levels:
+//
+//   - Backend.Close() is terminal, not a pause. The malgo backend Uninits
+//     and Frees its miniaudio context and nils the pointer
+//     (backend_malgo.go), so a later Start() -> Enumerate() nil-derefs.
+//     Every other part of this type treats Stop/Start as a supported cycle
+//     (the whole epoch/generation machinery exists for exactly that), so a
+//     restart panic was reachable by design, not by misuse.
+//   - It was a fifth instance of the abandoned-generation class the epoch
+//     discipline exists to close. The bounded joins above can ABANDON the
+//     poll goroutine while it is still parked inside
+//     Backend.OpenCapture/OpenPlayback; Freeing the context out from under
+//     a goroutine that is inside ma_device_init on it is a C-level
+//     use-after-free, and the `b.ctx = nil` that followed raced that
+//     goroutine's read of it. Epoch checks guard Manager FIELD write-backs;
+//     the Backend is not a field write, it is the shared resource itself,
+//     so no epoch check could ever have covered it. Not closing a resource
+//     we do not own removes the hazard rather than trying to synchronise it.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	if !m.running {
@@ -598,7 +664,6 @@ func (m *Manager) Stop() {
 	if playStream != nil {
 		playStream.Stop()
 	}
-	m.backend.Close()
 
 	m.emitState()
 }
@@ -914,11 +979,76 @@ func (m *Manager) pollOnce(captureRing, playbackRing *Ring, epoch uint64) {
 
 	now := time.Now()
 	cfg := m.currentConfig()
+	// Must run BEFORE the reopen pair: it is what nils a stream whose
+	// device is no longer the right one, which is the only condition
+	// maybeReopen* acts on.
+	m.closeSupersededStreams(cfg, inputs, outputs, epoch)
 	m.maybeReopenCapture(cfg, inputs, now, captureRing, epoch)
 	m.maybeReopenPlayback(cfg, outputs, now, playbackRing, epoch)
 
-	if changed {
-		m.emitState()
+	m.emitStateIfChanged()
+}
+
+// closeSupersededStreams stops and nils any open stream whose device is no
+// longer the one this generation should be using, leaving the reopen pair
+// below to bring the correct device up on this very same tick.
+//
+// It is the trigger for two behaviours the rest of the machinery could
+// already perform but was never asked to:
+//
+//   - A DEVICE-SELECTION CHANGE (design DoD 18.2, "selecting one takes
+//     effect without restarting the app"). Start() was the only place
+//     cfg.InputDevice/OutputDevice were ever resolved into an open stream,
+//     and maybeReopen* only fires on a nil stream -- so SetConfig stored a
+//     new id and absolutely nothing reopened. Changing the microphone in
+//     Settings did nothing, ever, until the next process launch.
+//   - DEVICE LOSS WHILE OPEN (design spec 8 and 13, DoD 18.3). pollOnce
+//     diffed the enumeration and emitted audio:devices_changed, and that
+//     was all: nothing observed that the OPEN device had vanished from the
+//     list, so there was no fallback and no error -- the device just went
+//     quiet.
+//
+// Both reduce to ONE comparison, which is why they share an implementation:
+// resolveDevice(cfg.X, list) is by construction the id this generation
+// SHOULD be on, and it can only return an id that is currently enumerable.
+// So a user picking a different device and the open device disappearing
+// from the enumeration are the same event seen from two sides -- in either
+// case the resolved id stops matching m.inputID/m.outputID.
+//
+// Epoch discipline matches every other write-back site in this file: the
+// check and the writes happen in ONE mu critical section, so an abandoned
+// generation can never tear down the current generation's streams. The
+// Stop() calls themselves happen after the unlock (Stop can block on the
+// OS) -- safe, because nilling the field under mu already took exclusive
+// ownership of those pointers; nobody else can reach them any more.
+func (m *Manager) closeSupersededStreams(cfg Config, inputs, outputs []DeviceInfo, epoch uint64) {
+	m.mu.Lock()
+	if m.epoch != epoch {
+		m.mu.Unlock()
+		return
+	}
+	var capStream, playStream Stream
+	if m.captureStream != nil && resolveDevice(cfg.InputDevice, inputs) != m.inputID {
+		capStream = m.captureStream
+		m.captureStream = nil
+		// Clear the backoff: this is a fresh target, not a retry of the
+		// failure the current backoff was accumulated for. Without this a
+		// direction that had been failing could sit out its (up to 30s)
+		// backoff before honouring the user's brand-new selection.
+		m.inputBackoff, m.inputRetryAt = 0, time.Time{}
+	}
+	if m.playbackStream != nil && resolveDevice(cfg.OutputDevice, outputs) != m.outputID {
+		playStream = m.playbackStream
+		m.playbackStream = nil
+		m.outputBackoff, m.outputRetryAt = 0, time.Time{}
+	}
+	m.mu.Unlock()
+
+	if capStream != nil {
+		capStream.Stop()
+	}
+	if playStream != nil {
+		playStream.Stop()
 	}
 }
 

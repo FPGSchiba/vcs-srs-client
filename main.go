@@ -180,27 +180,38 @@ func main() {
 			// goroutines can all reach these concurrently).
 			OnDevices: func(inputs, outputs []audio.DeviceInfo) {
 				audioEvents.AudioDevicesChanged(app.AudioDevicesDTO{
-					Inputs:  audioDeviceDTOs(inputs),
-					Outputs: audioDeviceDTOs(outputs),
+					Inputs:  app.AudioDeviceDTOs(inputs),
+					Outputs: app.AudioDeviceDTOs(outputs),
 				})
 			},
 			OnState: func(st audio.State) {
-				audioEvents.AudioState(app.AudioStateDTO{
-					Running:     st.Running,
-					InputError:  st.InputError,
-					OutputError: st.OutputError,
-					Overruns:    st.Overruns,
-					Underruns:   st.Underruns,
-				})
+				// One shared converter with GetAudioState (see
+				// app.AudioStateDTOFrom): a hand-written mapping here is
+				// what silently dropped the device/substitution fields
+				// from the event path while State carried them.
+				audioEvents.AudioState(app.AudioStateDTOFrom(st))
 			},
 			OnVU: func(v audio.VU) {
 				audioEvents.AudioVU(audioVUPayload{Input: v.Input, Output: v.Output})
 			},
 		})
+		// SetAudioBackend BEFORE Start, not after: it is what pushes the
+		// user's PERSISTED audio settings (device ids included) into the
+		// manager. Starting first would resolve both devices against
+		// NewManager's built-in default Config, whose InputDevice/
+		// OutputDevice are "" -- i.e. the saved device selection would be
+		// ignored on every single launch, and only take effect after the
+		// poll loop's next tick noticed the mismatch. Configure, then start.
+		gui.SetAudioBackend(am)
 		if err := am.Start(); err != nil {
 			appLog.Warn("audio engine failed to start; audio features are disabled", "err", err)
 		}
-		gui.SetAudioBackend(am)
+		// Backend ownership lives HERE, with the code that constructed it --
+		// Manager.Stop() deliberately no longer closes it (see Stop's doc:
+		// Close is terminal, so a Stop/Start cycle would have nil-deref'd
+		// the malgo context). Registered before the am.Stop() defer so that
+		// LIFO order runs Stop first and Close second.
+		defer backend.Close()
 		defer am.Stop()
 	}
 
@@ -250,17 +261,11 @@ func main() {
 	}
 }
 
-// audioDeviceDTOs converts the engine's device list into the wire-facing
-// shape, mirroring internal/app's own (unexported) audioDeviceDTOs used by
-// GetAudioDevices -- kept as a small duplicate here rather than exporting
-// that one, since main.go's use is a one-off event payload, not a binding.
-func audioDeviceDTOs(devs []audio.DeviceInfo) []app.AudioDeviceDTO {
-	out := make([]app.AudioDeviceDTO, 0, len(devs))
-	for _, d := range devs {
-		out = append(out, app.AudioDeviceDTO{ID: d.ID, Name: d.Name, IsDefault: d.IsDefault})
-	}
-	return out
-}
+// The device-list and state converters both live in internal/app
+// (AudioDeviceDTOs / AudioStateDTOFrom) rather than being duplicated here.
+// The duplicate this replaced is precisely how the "System Default" sentinel
+// could have reached GetAudioDevices' consumers while the hot-plug event
+// path kept handing out lists without it.
 
 // audioVUPayload is the audio:vu event's wire shape. audio.VU itself carries
 // no json tags (it is an internal engine type, not a wire DTO), so its

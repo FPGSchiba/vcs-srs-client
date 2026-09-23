@@ -1,9 +1,25 @@
 package audio
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
+
+// ErrFakeBackendClosed is what every FakeBackend call returns once Close()
+// has been called.
+//
+// This exists because the fake being MORE FORGIVING than reality hid a
+// deterministic restart panic for the whole of Phase 4: Manager.Stop() used
+// to call Backend.Close(), the malgo backend's Close Uninits/Frees the
+// miniaudio context and nils it (backend_malgo.go), and a subsequent
+// Start() -> Enumerate() would have nil-dereferenced on real hardware --
+// while this fake happily kept serving calls after Close() and every test
+// went green. A fake that accepts calls the real backend would crash on
+// cannot prove anything about the real backend's lifecycle, so it refuses
+// them instead. (Same asymmetry checkDeviceID below already closes for
+// device ids.)
+var ErrFakeBackendClosed = errors.New("audio: fake backend is closed")
 
 // FakeBackend is an in-memory Backend for tests. It is compiled into the
 // package (not a _test.go file) so other packages' tests can build a manager
@@ -78,6 +94,10 @@ func (b *FakeBackend) BlockEnumerate() (unblock func()) {
 
 func (b *FakeBackend) Enumerate() ([]DeviceInfo, []DeviceInfo, error) {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, nil, ErrFakeBackendClosed
+	}
 	gate := b.enumerateGate
 	if b.enumErr != nil {
 		err := b.enumErr
@@ -107,6 +127,10 @@ func (b *FakeBackend) BlockNextOpenCapture() (unblock func()) {
 
 func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, error) {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, ErrFakeBackendClosed
+	}
 	b.captureOpens = append(b.captureOpens, id)
 	gate := b.openCaptureGate
 	b.openCaptureGate = nil // one-shot: only the call that claimed it blocks
@@ -118,6 +142,12 @@ func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, e
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// Re-checked after the gate: a Close() that lands while this call is
+	// parked is precisely the use-after-free the real backend would suffer
+	// (the context Freed out from under an in-flight ma_device_init).
+	if b.closed {
+		return nil, ErrFakeBackendClosed
+	}
 	if err := b.takeFailure(); err != nil {
 		return nil, err
 	}
@@ -131,6 +161,9 @@ func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, e
 func (b *FakeBackend) OpenPlayback(id string, fill func([]float32)) (Stream, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return nil, ErrFakeBackendClosed
+	}
 	b.playbackOpens = append(b.playbackOpens, id)
 	if err := b.takeFailure(); err != nil {
 		return nil, err
@@ -200,10 +233,20 @@ func checkDeviceID(id string, list []DeviceInfo) error {
 	return fmt.Errorf("audio: device %q not found", id)
 }
 
+// Close marks the backend permanently unusable, mirroring the real
+// backend's terminal Uninit/Free. Every subsequent Enumerate/OpenCapture/
+// OpenPlayback returns ErrFakeBackendClosed -- see that var's doc.
 func (b *FakeBackend) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
+}
+
+// Closed reports whether Close has been called.
+func (b *FakeBackend) Closed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closed
 }
 
 // PushFrame delivers one frame to the capture callback, as the OS would.

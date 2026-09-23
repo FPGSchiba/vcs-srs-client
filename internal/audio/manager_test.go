@@ -760,3 +760,172 @@ func TestManagerSuppressesUnchangedVUButEmitsSilenceTransition(t *testing.T) {
 	setAmp(0)
 	waitFor(t, func() bool { n, last := countAndLast(); return n >= 3 && last.Input == 0 }, "transition back to silence was never emitted")
 }
+
+// lastOpen returns the final entry of a CaptureOpens/PlaybackOpens log, or
+// "" when nothing was ever opened.
+func lastOpen(calls []string) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	return calls[len(calls)-1]
+}
+
+// TestManagerDeviceSelectionChangeTakesEffectWithoutRestart is the C1
+// regression: design DoD 18.2 says a user selecting a device "takes effect
+// without restarting the app". Start() used to be the ONLY place
+// cfg.InputDevice/OutputDevice were resolved into an open stream, and the
+// bounded-backoff reopen pair only fires on a NIL stream -- so SetConfig
+// stored a new id and absolutely nothing reopened. Changing the microphone
+// in Settings did nothing, ever.
+//
+// Asserting State().InputDevice alone would not prove it: the assertion
+// that matters is that the BACKEND received an open call for the new id
+// (State could in principle be written without anything being opened), and
+// that no error was recorded for it.
+func TestManagerDeviceSelectionChangeTakesEffectWithoutRestart(t *testing.T) {
+	b := NewFakeBackend()
+	b.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}, {ID: "mic-2", Name: "Mic Two"}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}, {ID: "out-2", Name: "Out Two"}},
+	)
+	var stMu sync.Mutex
+	var states []State
+	m := NewManager(b, ManagerOptions{
+		PollInterval: 5 * time.Millisecond,
+		VUInterval:   time.Hour,
+		OnState: func(s State) {
+			stMu.Lock()
+			states = append(states, s)
+			stMu.Unlock()
+		},
+	})
+	t.Cleanup(m.Stop)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if st := m.State(); st.InputDevice != "mic-1" || st.OutputDevice != "out-1" {
+		t.Fatalf("Start resolved %q/%q, want the defaults mic-1/out-1: %+v", st.InputDevice, st.OutputDevice, st)
+	}
+
+	// The user picks a different microphone AND a different output in
+	// Settings; internal/app pushes the whole config through SetConfig.
+	m.SetConfig(Config{InputDevice: "mic-2", OutputDevice: "out-2"})
+
+	waitFor(t, func() bool {
+		return lastOpen(b.CaptureOpens()) == "mic-2" && lastOpen(b.PlaybackOpens()) == "out-2"
+	}, "changing the configured devices never reached the backend: nothing reopened")
+
+	st := m.State()
+	if st.InputDevice != "mic-2" || st.OutputDevice != "out-2" {
+		t.Fatalf("State reports %q/%q after the selection change, want mic-2/out-2: %+v", st.InputDevice, st.OutputDevice, st)
+	}
+	if st.InputError != "" || st.OutputError != "" {
+		t.Fatalf("reopening onto the newly selected devices recorded an error: %+v", st)
+	}
+	if !b.CaptureCallbackActive() {
+		t.Fatal("no capture callback is registered after the switch: the new stream never came up")
+	}
+	// I2: the health surface must actually move. A reopen that nothing
+	// emits is invisible to the frontend.
+	stMu.Lock()
+	defer stMu.Unlock()
+	sawNew := false
+	for _, s := range states {
+		if s.InputDevice == "mic-2" && s.OutputDevice == "out-2" {
+			sawNew = true
+		}
+	}
+	if !sawNew {
+		t.Fatalf("OnState never carried the new device selection; emissions = %+v", states)
+	}
+}
+
+// TestManagerRecoversWhenTheOpenDeviceDisappears is the I1 regression: the
+// poll loop diffed the enumeration and emitted audio:devices_changed, and
+// that was all. Nothing observed that the currently-OPEN device had
+// vanished from the list, so an unplug produced no fallback, no reopen and
+// no error -- the mic just went silent (design spec 8/13, DoD 18.3).
+//
+// Note this is NOT the same event as the selection change above: the config
+// is untouched here, only the enumeration changes.
+func TestManagerRecoversWhenTheOpenDeviceDisappears(t *testing.T) {
+	b := NewFakeBackend()
+	b.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}, {ID: "mic-2", Name: "Mic Two"}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(b, ManagerOptions{PollInterval: 5 * time.Millisecond, VUInterval: time.Hour})
+	t.Cleanup(m.Stop)
+	m.SetConfig(Config{InputDevice: "mic-2"})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if st := m.State(); st.InputDevice != "mic-2" || st.InputSubstituted {
+		t.Fatalf("Start did not open the saved device mic-2 unsubstituted: %+v", st)
+	}
+
+	// Unplug mic-2 while it is open.
+	b.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+
+	waitFor(t, func() bool {
+		st := m.State()
+		return st.InputDevice == "mic-1" && st.InputSubstituted
+	}, "unplugging the open capture device produced no fallback: State still reports the vanished device")
+
+	if st := m.State(); st.InputError != "" {
+		t.Fatalf("falling back to the surviving default recorded an error: %+v", st)
+	}
+	if lastOpen(b.CaptureOpens()) != "mic-1" {
+		t.Fatalf("backend.OpenCapture calls = %v, want a fallback open for mic-1", b.CaptureOpens())
+	}
+	if !b.CaptureCallbackActive() {
+		t.Fatal("no capture callback registered after the fallback: nothing actually reopened")
+	}
+	// Playback was untouched by the unplug and must NOT have been churned.
+	if calls := b.PlaybackOpens(); len(calls) != 1 {
+		t.Fatalf("backend.OpenPlayback calls = %v, want exactly the one from Start: an unrelated direction was reopened", calls)
+	}
+}
+
+// TestManagerRestartAfterStopReopensDevices is the C3 regression: Stop()
+// used to call Backend.Close(), which on the malgo backend Uninits and Frees
+// the miniaudio context and nils it -- so a later Start() -> Enumerate()
+// nil-dereferenced. A deterministic restart panic, in a type whose entire
+// epoch/generation design treats Stop/Start as a supported cycle.
+//
+// This test can only fail because FakeBackend now REJECTS calls after
+// Close() (ErrFakeBackendClosed). The old, forgiving fake served calls
+// happily after Close while the real backend would have crashed, which is
+// exactly why every existing test stayed green over the bug.
+func TestManagerRestartAfterStopReopensDevices(t *testing.T) {
+	b := NewFakeBackend()
+	m := newTestManager(t, b)
+	if err := m.Start(); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	m.Stop()
+
+	if b.Closed() {
+		t.Fatal("Stop() closed a Backend the Manager does not own; Close is terminal, so no later Start could ever succeed")
+	}
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("second Start after Stop: %v", err)
+	}
+	st := m.State()
+	if !st.Running {
+		t.Fatalf("not running after restart: %+v", st)
+	}
+	if st.InputError != "" || st.OutputError != "" {
+		t.Fatalf("restart left a device error, i.e. the backend could not serve the second Start: %+v", st)
+	}
+	if calls := b.CaptureOpens(); len(calls) != 2 || calls[1] != "mic-1" {
+		t.Fatalf("backend.OpenCapture calls = %v, want a second open for mic-1 after the restart", calls)
+	}
+	if calls := b.PlaybackOpens(); len(calls) != 2 || calls[1] != "out-1" {
+		t.Fatalf("backend.OpenPlayback calls = %v, want a second open for out-1 after the restart", calls)
+	}
+}
