@@ -39,6 +39,69 @@ func (f *fakeJoySource) Poll() (joystick.State, error) {
 
 func (f *fakeJoySource) Close() {}
 
+// controllableJoySource is a joystick.Source whose held-button state the test
+// goroutine can flip at will, so a REAL joystick.Manager's own poll loop
+// drives Pressed/Released edges deterministically instead of the test faking
+// them directly.
+type controllableJoySource struct {
+	device joystick.Device
+
+	mu   sync.Mutex
+	held map[trigger.JoyButton]struct{}
+}
+
+func newControllableJoySource(deviceID trigger.DeviceID) *controllableJoySource {
+	return &controllableJoySource{
+		device: joystick.Device{ID: deviceID, Name: "Fake Stick", Buttons: 16, Hats: 1},
+		held:   map[trigger.JoyButton]struct{}{},
+	}
+}
+
+func (s *controllableJoySource) Devices() ([]joystick.Device, error) {
+	return []joystick.Device{s.device}, nil
+}
+
+func (s *controllableJoySource) Poll() (joystick.State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held := make(map[trigger.JoyButton]struct{}, len(s.held))
+	for b := range s.held {
+		held[b] = struct{}{}
+	}
+	return joystick.State{Held: held}, nil
+}
+
+func (s *controllableJoySource) Close() {}
+
+// setHeld sets whether b is held, as the NEXT Poll will report it.
+func (s *controllableJoySource) setHeld(b trigger.JoyButton, held bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if held {
+		s.held[b] = struct{}{}
+	} else {
+		delete(s.held, b)
+	}
+}
+
+// waitUntil polls cond, sleeping briefly between attempts, until it returns
+// true or timeout elapses. Used to synchronise with a real
+// joystick.Manager's own poll-loop goroutine without a fixed sleep, so the
+// assertion that follows is not a race against that goroutine's timing.
+func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", timeout)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // recordingEmitter records every emitted event name and payload. Guarded by
 // a mutex because emits now also originate off the caller's goroutine (the
 // capture auto-resume timer, and the state-store radio observer).
@@ -977,5 +1040,105 @@ func TestBeginCaptureSuspendsBothManagers(t *testing.T) {
 	a.EndCapture(token)
 	if jm.IsSuspendedForTest() {
 		t.Error("joystick manager still suspended after EndCapture")
+	}
+}
+
+// TestApplyHotkeysDuringRebindDoesNotSwallowARelease is the regression guard
+// for the applyHotkeys reset-ordering bug: sb.presses.reset() used to run
+// BEFORE sb.hk.Apply/jm.Apply, so the synchronous Released those calls emit
+// for EVERY currently-held action -- not just the one whose binding actually
+// changed, see joystick.Manager.Apply's takeActiveLocked and
+// hotkeys/dispatch.go's clear() -- landed on an already-zeroed refcount and
+// was swallowed by presses.release(). The next poll tick then saw the button
+// still physically down and fired a second, UNPAIRED HotkeyPressed:
+// "doubled Pressed, dropped Released".
+//
+// global.ptt is bound to a joystick button and held continuously. An
+// UNRELATED action (global.mute_toggle) is then bound, which reapplies both
+// managers and, as a side effect, releases and re-presses global.ptt even
+// though nothing about ITS OWN binding changed. Correct behaviour after the
+// fix is noisier than ideal but self-consistent: Pressed, Released (from the
+// reapply), Pressed again (the next tick re-observes the still-held button)
+// -- exactly one more Pressed than Released, never two Presseds in a row
+// with no Released between them.
+func TestApplyHotkeysDuringRebindDoesNotSwallowARelease(t *testing.T) {
+	a, em, _ := newTestApp(t)
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	btn := trigger.JoyButton{Device: "stick-c3", Button: 0}
+	a.settings.kb.Add(keybinds.ActionID("global.ptt"), trigger.Joy(trigger.JoyBinding{Device: btn.Device, Button: btn.Button}))
+	a.applyHotkeys()
+
+	src.setHeld(btn, true)
+	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyPressed) >= 1 })
+
+	if _, err := a.AddTrigger("global.mute_toggle", CaptureDTO{Code: "F2"}); err != nil {
+		t.Fatalf("AddTrigger: %v", err)
+	}
+
+	// The reapply's Released is synchronous with AddTrigger; this waits for
+	// the FOLLOWING re-press, which only the poll loop can produce, so the
+	// assertion below is not racing that goroutine.
+	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyPressed) >= 2 })
+	time.Sleep(20 * time.Millisecond) // settle: nothing further should fire while still held
+
+	pressed := em.count(events.EventHotkeyPressed)
+	released := em.count(events.EventHotkeyReleased)
+	if pressed != released+1 {
+		t.Errorf("Pressed=%d Released=%d after an unrelated rebind with the button still held; "+
+			"want Pressed == Released+1 (down, up from the reapply, down again) -- "+
+			"got an unpaired press or a swallowed release", pressed, released)
+	}
+}
+
+// TestApplyHotkeysDuringRebindDoesNotStrandAHeldAction is the "permanently
+// stuck pressed" half of the same regression. If the physical release lands
+// in the SAME window as an unrelated rebind -- after Apply has already
+// cleared the manager's own active-tracking for the action, before the next
+// poll tick can sample the now-released button -- the old reset-before-Apply
+// ordering left NOTHING able to ever emit the matching Released:
+// HotkeyPressed=1, HotkeyReleased=0, forever, with the user's PTT/mic
+// indicator believing the action is still held.
+func TestApplyHotkeysDuringRebindDoesNotStrandAHeldAction(t *testing.T) {
+	a, em, _ := newTestApp(t)
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	btn := trigger.JoyButton{Device: "stick-c3", Button: 0}
+	a.settings.kb.Add(keybinds.ActionID("global.ptt"), trigger.Joy(trigger.JoyBinding{Device: btn.Device, Button: btn.Button}))
+	a.applyHotkeys()
+
+	src.setHeld(btn, true)
+	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyPressed) >= 1 })
+
+	if _, err := a.AddTrigger("global.mute_toggle", CaptureDTO{Code: "F2"}); err != nil {
+		t.Fatalf("AddTrigger: %v", err)
+	}
+	// The physical release lands immediately after the rebind's synchronous
+	// Apply, before the next poll tick can observe it -- the exact window
+	// the bug depended on: Apply's own active-tracking is already cleared by
+	// the time this runs, so a tick that sampled the release itself would
+	// find nothing to release either.
+	src.setHeld(btn, false)
+
+	waitUntil(t, 500*time.Millisecond, func() bool {
+		return em.count(events.EventHotkeyPressed) == em.count(events.EventHotkeyReleased)
+	})
+	time.Sleep(20 * time.Millisecond) // settle: no further edges should follow
+
+	pressed := em.count(events.EventHotkeyPressed)
+	released := em.count(events.EventHotkeyReleased)
+	if pressed != released {
+		t.Errorf("Pressed=%d Released=%d after releasing during the rebind window; "+
+			"want them equal -- the action must not be left permanently \"held\"", pressed, released)
 	}
 }

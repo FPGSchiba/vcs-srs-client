@@ -1028,16 +1028,30 @@ func (a *App) applyHotkeys() {
 	jm := sb.joy
 	sb.mu.Unlock()
 
-	// A rebind drops whatever was held, and both managers emit the releases
-	// they owe. Clearing the refcount here as well means a release that got
-	// lost in the shuffle cannot leave an action permanently "held" and
-	// therefore permanently silent.
-	sb.presses.reset()
-
+	// A rebind drops WHATEVER WAS HELD on each manager -- not just an action
+	// whose own binding changed: hk.Apply always tears down and re-registers
+	// through dispatcher.clear(), and jm.Apply always calls
+	// takeActiveLocked(), and both release every currently-latched hold
+	// action as a side effect. Those synchronous Released calls must run
+	// FIRST and go through Pressed/Released -> presses.release() so each one
+	// properly balances the refcount (and is forwarded to the UI). Only
+	// AFTER both Apply calls is it safe to sweep the refcount with a blanket
+	// reset: by then every genuine release the managers owed has already
+	// been applied, so reset only clears entries nothing released (e.g. a
+	// press-kind action, which is never counted in the first place).
+	//
+	// Resetting BEFORE Apply (the original order) zeroed the count first, so
+	// those synchronous releases landed on an already-empty entry and
+	// presses.release() swallowed them: HotkeyReleased never reached the UI
+	// for an action that was, at that instant, still genuinely held -- and
+	// on unlucky timing (the physical key came up in the same window) it
+	// could never be closed by a later event either, since the manager's own
+	// active/latch tracking had already been cleared too.
 	_ = sb.hk.Apply(kbBinds) // failures surface via the event below
 	if jm != nil {
 		_ = jm.Apply(joyBinds)
 	}
+	sb.presses.reset()
 	// Without this the hotkeys:state event had no production emitter at all:
 	// a binding the OS refuses (Numpad7 and friends) saved cleanly, was
 	// recorded in Manager.Failed(), and never reached the UI, so the row
