@@ -78,19 +78,20 @@ type winDevice struct {
 //
 // This is the same reasoning source_linux.go carries; it is platform
 // INDEPENDENT, so it must hold for every backend (darwin and other never
-// fail construction at all).
+// fail construction at all) -- INCLUDING the two setup calls below, which is
+// why they return a stub Source rather than an error. See winInitFailed.
 func NewOSSource(log *slog.Logger) (Source, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 	helper, err := newHelperWindow()
 	if err != nil {
-		return nil, err
+		return winInitFailed(log, err), nil
 	}
 	dinput, err := di8.Create(di8.HINSTANCE(helper.inst))
 	if err != nil {
 		helper.Close()
-		return nil, fmt.Errorf("joystick: create DirectInput: %w", err)
+		return winInitFailed(log, fmt.Errorf("joystick: create DirectInput: %w", err)), nil
 	}
 	s := &winSource{
 		log:        log,
@@ -101,6 +102,43 @@ func NewOSSource(log *slog.Logger) (Source, error) {
 	}
 	return s, nil
 }
+
+// winInitFailed returns a Source that reports err from Devices() forever,
+// instead of failing construction.
+//
+// Returning an error from NewOSSource is what the previous wave's fix set out
+// to remove, and newHelperWindow/di8.Create were the half it missed: main.go
+// drops the manager on a construction error, so sb.joy stayed nil,
+// GetJoystickState returned {Supported:false, Error:""} -- byte-identical to
+// macOS's "no backend at all" -- and the user got no banner, no explanation
+// and NO RETRY, because the 3s rediscover loop only exists inside a Manager
+// that was never built.
+//
+// The error is deliberately NOT ErrUnsupported: Manager.New records any other
+// error in discoverErr while leaving Supported() true, so the failure reads as
+// {Supported:true, Error:"joystick: create helper window: ..."}, the Keybinds
+// banner fires on supported && error, and the rediscover loop keeps retrying.
+// That retry can genuinely succeed -- a CreateWindowEx or DirectInput8Create
+// failure this early is usually resource pressure during startup -- but even
+// when it cannot, a named cause beats silence.
+//
+// Poll returns an empty state and no error on purpose. Nothing can be held
+// when nothing is open, and reporting a poll error every 10ms would hand
+// lastErrLocked's poll-wins precedence a permanent, less useful message than
+// the enumeration one that names the actual failed call.
+func winInitFailed(log *slog.Logger, err error) Source {
+	log.Warn("joystick backend could not start; keyboard binds are unaffected "+
+		"and the client will keep retrying", "err", err)
+	return winInitFailedSource{err: err}
+}
+
+type winInitFailedSource struct{ err error }
+
+func (s winInitFailedSource) Devices() ([]Device, error) { return nil, s.err }
+func (winInitFailedSource) Poll() (State, error) {
+	return State{Held: map[trigger.JoyButton]struct{}{}}, nil
+}
+func (winInitFailedSource) Close() {}
 
 // sanitiseID reduces a GUID string to a legal trigger.DeviceID. Global
 // constraint 7: the id must never contain ':' or '+', which are the
