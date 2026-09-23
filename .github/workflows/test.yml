@@ -10,8 +10,19 @@ permissions:
 
 jobs:
   backend:
-    name: Backend (Go)
-    runs-on: ubuntu-latest
+    name: Backend (Go) · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # fail-fast: false so one platform's toolchain problem does not hide
+      # the other two. The whole point of this job is per-OS signal.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        # Windows runners default to pwsh; bash keeps one command form for
+        # all three platforms (git-bash ships on the Windows runner).
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
@@ -24,7 +35,9 @@ jobs:
       # Wails v3 (alpha.96) links against GTK4 + WebKitGTK 6.0 on Linux. The
       # race-enabled `go test ./...` and `go build` compile the main package,
       # which imports the Wails application (cgo), so these dev headers must be
-      # present or pkg-config fails on gtk4 / webkitgtk-6.0.
+      # present or pkg-config fails on gtk4 / webkitgtk-6.0. macOS and Windows
+      # need neither -- their Wails backends are system frameworks (Cocoa /
+      # WebView2), not pkg-config'd Linux libraries.
       #
       # internal/hotkeys needs NOTHING here: -tags purego selects gohook's
       # pure-Go X11 backend, so none of libxtst/libxcb/libxkbcommon is
@@ -38,6 +51,7 @@ jobs:
       # would leave the keyboard hotkey OS layer with no CI coverage at all --
       # the one place a regression is both silent and user-facing.
       - name: Install Linux GUI deps
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev xvfb
@@ -50,7 +64,8 @@ jobs:
 
       # main.go has `//go:embed all:frontend/dist`. The real bundle is produced
       # by the frontend job; here we only need any file present so the Go
-      # packages compile for vet/test/build.
+      # packages compile for vet/test/build. True on all three platforms --
+      # the embed directive doesn't care which OS is compiling it.
       - name: Provide embed placeholder for frontend/dist
         run: |
           mkdir -p frontend/dist
@@ -61,18 +76,31 @@ jobs:
       # application instead of being consumed. It must be on EVERY Go
       # invocation -- see the note at the top of Taskfile.yml. Without it
       # these steps would compile and test a binary that behaves differently
-      # from the one we ship.
+      # from the one we ship. Also true on all three platforms: purego picks
+      # the pure-Go backend per-OS (X11 on Linux, no equivalent flag needed
+      # on macOS/Windows, but the tag must still be passed uniformly).
       - name: Go vet
         run: go vet -tags purego ./...
 
       # xvfb-run -a picks a free display number; without it, internal/hotkeys'
       # registrar tests cannot open one. -race stays on: the hotkey dispatcher
-      # and the joystick poll loop are both concurrent.
-      - name: Go test (race)
+      # and the joystick poll loop are both concurrent. xvfb-run only exists
+      # on Linux; macOS and Windows have no headless-display gap to fill here
+      # (their hotkey backends don't need an X11-style virtual display), so
+      # elsewhere the tests just run bare.
+      - name: Go test (race) · Linux
+        if: matrix.os == 'ubuntu-latest'
         run: xvfb-run -a go test -tags purego -race ./...
 
+      - name: Go test (race) · macOS / Windows
+        if: matrix.os != 'ubuntu-latest'
+        run: go test -tags purego -race ./...
+
+      # Relative output: /tmp is not a meaningful path on the Windows runner,
+      # and this binary is a build-succeeds check, not a build artifact
+      # consumed by a later step, so a repo-relative path works uniformly.
       - name: Go build
-        run: go build -tags purego -o /tmp/vcs-client .
+        run: go build -tags purego -o ./vcs-client-ci .
 
   frontend:
     name: Frontend (React)
