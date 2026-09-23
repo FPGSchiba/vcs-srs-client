@@ -3,6 +3,7 @@ package keybinds
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -68,9 +69,18 @@ func isPerRadioID(id string) bool {
 // why). Load is the boundary where a hand-edited or version-skewed
 // config.toml enters, so it enforces the same invariant defensively: only
 // the FIRST KindKey trigger in an action's list survives, in the same
-// silent, per-entry-drop spirit as an unparseable trigger. The file's order
-// is the user's order, so keeping the first is stable and predictable.
+// per-entry-drop spirit as an unparseable trigger. The file's order is the
+// user's order, so keeping the first is stable and predictable.
 // Joystick triggers are unaffected -- there is no limit on those.
+//
+// The drop is NOT silent. It is destructive on the next write: the store is
+// snapshotted back out on every Save, so a hand-edited
+// `"global.push_to_mute" = ["V", "Ctrl+B"]` is rewritten as
+// `"global.push_to_mute" = "V"` and the user's second chord is gone from
+// their file for good. Dropping it still beats keeping a binding that is
+// silently dead at dispatch (internal/hotkeys registers one chord per action
+// ID), but the destruction has to be diagnosable, so each dropped chord gets
+// a Warn naming the action and the chord.
 func (s *Store) Load(raw map[string][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -83,17 +93,25 @@ func (s *Store) Load(raw map[string][]string) {
 			continue
 		}
 		var out []trigger.Trigger
-		haveKey := false
+		keptKey := "" // the one surviving chord, for the drop warning below
 		for _, str := range list {
 			t, err := trigger.Parse(str)
 			if err != nil {
 				continue // malformed trigger: drop this entry, keep the rest
 			}
 			if t.Kind == trigger.KindKey {
-				if haveKey {
-					continue // at most one keyboard trigger per action: drop extras, first wins
+				if keptKey != "" {
+					// At most one keyboard trigger per action: drop extras,
+					// first wins. Logged because the next Save erases it
+					// from the user's config.toml. keptKey rather than
+					// out[0] -- a joystick trigger listed before the chord
+					// would otherwise be reported as the survivor.
+					slog.Default().Warn("keybind config has more than one keyboard chord for an action; "+
+						"only the first is kept and the rest are dropped from the file on the next save",
+						"action", id, "kept", keptKey, "dropped", t.String())
+					continue
 				}
-				haveKey = true
+				keptKey = t.String()
 			}
 			out = append(out, t)
 		}

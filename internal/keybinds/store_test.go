@@ -1,6 +1,9 @@
 package keybinds_test
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
@@ -204,5 +207,69 @@ func TestClearRemovesEveryTrigger(t *testing.T) {
 	s.Clear("global.ptt")
 	if got, ok := s.Get("global.ptt"); ok && len(got) != 0 {
 		t.Errorf("after Clear = %+v, want empty", got)
+	}
+}
+
+// TestLoadWarnsAboutTheDroppedKeyboardChord pins the diagnosability half of
+// the one-keyboard-trigger rule.
+//
+// The rule itself is right, but enforcing it silently means a hand-edited
+// `"global.push_to_mute" = ["V", "Ctrl+B"]` loads as V and the very next
+// Save rewrites that line as `"global.push_to_mute" = "V"` -- the user's
+// second chord destroyed on disk with no trace anywhere. Dropping it is
+// still better than a binding that is silently dead at dispatch, but the
+// destruction has to be diagnosable, so Load names the action and the chord
+// it threw away.
+func TestLoadWarnsAboutTheDroppedKeyboardChord(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	// The chord is listed AFTER a joystick trigger on purpose: the survivor
+	// reported in the warning must be the kept CHORD, not merely the first
+	// surviving trigger of any kind.
+	s.Load(map[string][]string{
+		"global.push_to_mute": {"joy:stick-c3:btn12", "V", "Ctrl+B"},
+	})
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("Load dropped a second keyboard chord silently; the next Save rewrites " +
+			"the user's file without it and nothing anywhere records why")
+	}
+	if !strings.Contains(out, "global.push_to_mute") {
+		t.Errorf("warning does not name the action: %q", out)
+	}
+	if !strings.Contains(out, "Ctrl+B") {
+		t.Errorf("warning does not name the dropped chord: %q", out)
+	}
+	if !strings.Contains(out, "dropped=Ctrl+B") {
+		t.Errorf("warning does not attribute Ctrl+B to the DROPPED slot: %q", out)
+	}
+	if !strings.Contains(out, "kept=V") {
+		t.Errorf("warning does not name V as the survivor: %q", out)
+	}
+}
+
+// TestLoadDoesNotWarnForAJoystickTriggerAlongsideAChord guards the other
+// direction: joystick triggers are unlimited, so a key + several buttons is
+// the ordinary case and must produce no warning at all.
+func TestLoadDoesNotWarnForAJoystickTriggerAlongsideAChord(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt": {"F1", "joy:stick-c3:btn12", "joy:stick-c3:btn3"},
+	})
+	if got := buf.String(); got != "" {
+		t.Errorf("Load warned about a perfectly legal binding list: %q", got)
+	}
+	if got, _ := s.Get("global.ptt"); len(got) != 3 {
+		t.Fatalf("Get = %+v, want all three triggers", got)
 	}
 }
