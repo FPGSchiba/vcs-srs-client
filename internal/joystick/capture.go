@@ -48,12 +48,26 @@ type captureState struct {
 // button comes up while still armed.
 func (m *Manager) BeginCapture(done func(Captured)) {
 	// BeginCapture never touches Source, unconditionally -- not even before
-	// Start() has been called. Source may ONLY ever be called from the poll
-	// loop's own goroutine: see the Source doc comment. The real backends
-	// Tasks 8/9 add (vendored DirectInput COM objects, evdev file handles)
-	// are not merely "not safe for concurrent calls" -- some require the
-	// SAME goroutine/thread on every call (COM apartment threading), which
-	// no amount of mutual exclusion from a second goroutine can satisfy.
+	// Start() has been called. Source is documented as not safe for
+	// concurrent use, and the real backends (vendored DirectInput COM
+	// objects, evdev file handles) have no internal lock of their own: two
+	// goroutines inside Poll() at once is undefined behaviour there, not
+	// merely slow.
+	//
+	// WHAT THIS ACTUALLY GUARANTEES, precisely, because an earlier draft of
+	// this comment claimed more: once the loop is running, every Source call
+	// happens from the poll goroutine, so no two calls ever OVERLAP. It does
+	// NOT guarantee thread affinity. Manager.New's probe calls Devices() on
+	// whichever goroutine built the Manager, Close() calls Source.Close() on
+	// whichever goroutine closed it, and newHelperWindow runs on the
+	// constructing goroutine too -- and there is no runtime.LockOSThread
+	// anywhere in this package, so even the poll loop may migrate between OS
+	// threads between calls. DI8 device-state retrieval is free-threaded in
+	// practice, which is why this has never bitten; a backend that genuinely
+	// required an apartment-affine thread would need LockOSThread added
+	// deliberately, which is a design change and not something to infer from
+	// this comment. The hardware checklist has a row to confirm the current
+	// arrangement works on real DirectInput.
 	//
 	// So capture arms with a PENDING baseline (nil), and the first
 	// feedCapture call for it -- which only ever runs on the poll goroutine,

@@ -94,13 +94,48 @@ evidence the cooperative level is not what it should be.
 - [ ] Press Escape mid-capture. Confirm keyboard hotkeys still work
       afterwards.
 
-## 10. Linux (if available)
+## 10. Threading and the helper window (Windows)
+
+`internal/joystick` calls DirectInput from more than one goroutine over the
+life of the process, and **there is no `runtime.LockOSThread` anywhere** —
+`Manager.New`'s probe enumerates on the constructing goroutine, `Manager.Close`
+closes on the closing one, `newHelperWindow` runs on the constructing one, and
+the poll loop may migrate between OS threads between ticks. DI8 device-state
+retrieval is free-threaded in practice, which is why this has never bitten, but
+it is asserted rather than proven. These rows prove it on real hardware.
+
+- [ ] Confirm enumeration works: the stick appears in the device list at
+      startup (that call runs on the goroutine that built the Manager, not the
+      poll loop).
+- [ ] Confirm polling works: a bound button fires (that call runs on the poll
+      loop's goroutine).
+- [ ] Leave the app running for **several minutes** with the stick attached and
+      confirm the bindings keep firing — a thread-affinity problem typically
+      shows as input dying after the Go runtime migrates the poll goroutine,
+      not immediately.
+- [ ] Hide to tray, wait a minute, restore, and confirm the stick still fires:
+      the helper window must survive the main window being hidden.
+- [ ] Quit cleanly and confirm no hang and no crash on exit (`Close` unacquires
+      and releases every device, and destroys the helper window, from a
+      different goroutine again).
+
+## 11. Backend start-up failure (Windows, hard to force)
+
+If `CreateWindowEx` or `DirectInput8Create` ever fails, the client must stay
+usable and say so rather than going silently dead.
+
+- [ ] If you can induce it (heavy resource pressure at launch, or a temporary
+      local patch), confirm the Keybinds section shows the **error banner** with
+      the failing call named, that keyboard binds still work, and that the
+      affordance is NOT hidden the way it is on macOS.
+
+## 12. Linux (if available)
 
 - [ ] Run as a user NOT in the `input` group. Confirm the error names the
       group and does not mention Accessibility.
 - [ ] Add the user to `input`, re-login, confirm devices appear.
 
-## 11. macOS
+## 13. macOS
 
 - [ ] Confirm the app builds and runs.
 - [ ] Confirm the Keybinds section offers no joystick affordance and shows

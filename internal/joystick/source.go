@@ -58,7 +58,17 @@ func (s State) IsHeld(b trigger.JoyButton) bool {
 }
 
 // Source is the OS seam. Implementations are not required to be safe for
-// concurrent use: Manager serialises every call.
+// concurrent use: Manager serialises every call, so no two are ever in
+// flight at once.
+//
+// SERIALISED, NOT THREAD-AFFINE. Manager makes no promise about WHICH
+// goroutine or OS thread a call arrives on, and deliberately does not: New's
+// probe calls Devices() on the constructing goroutine, Close() calls Close()
+// on the closing one, and the rest come from the poll loop, which itself may
+// migrate between OS threads because nothing here calls
+// runtime.LockOSThread. An implementation that needs a fixed thread (a COM
+// apartment-threaded API, say) must arrange that itself, or LockOSThread has
+// to be added here deliberately.
 type Source interface {
 	// Devices enumerates what is attached. Called on a slow timer for
 	// hot-plug, and by the capture UI.

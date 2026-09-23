@@ -76,6 +76,20 @@ type Manager struct {
 	// discoverErr and pollErr are the most recent failure from each of the
 	// two Source calls, kept SEPARATELY rather than in one lastErr slot.
 	//
+	// pollErr IS DEFENCE IN DEPTH, NOT A LIVE PATH. No backend shipped today
+	// can populate it: winSource.Poll and linuxSource.Poll both swallow
+	// per-device failures (re-Acquire and continue, or skip the device) and
+	// unconditionally `return st, nil`, and the three stub sources either
+	// return ErrUnsupported before the loop ever starts or return an empty
+	// state. So pollErr, lastErrLocked's poll-wins precedence and tick()'s
+	// release-everything branch are all unreachable in the current binary.
+	// They are kept because Source is a seam a future backend plugs into,
+	// and a backend whose Poll CAN fail must not have to rediscover that a
+	// failed poll means "we can no longer prove anything is down". Do not
+	// read the sentences below as descriptions of observable runtime
+	// behaviour; they describe what the machinery would do if a Poll ever
+	// failed.
+	//
 	// Both halves matter. Each is CLEARED by its own call succeeding, which
 	// is what stops a single transient failure from pinning "Joystick
 	// unavailable -- ..." in the UI for the life of the process. And neither
@@ -154,8 +168,12 @@ func (m *Manager) LastErr() error {
 }
 
 // lastErrLocked derives the single error the UI reports from the two slots. A
-// poll failure wins: it is both more recent and more specific than an
+// poll failure would win: it is both more recent and more specific than an
 // enumeration failure. Caller holds m.mu.
+//
+// That precedence is defensive and currently unexercised -- no shipped
+// backend's Poll returns a non-nil error, so this function always falls
+// through to discoverErr in practice. See the pollErr field doc.
 func (m *Manager) lastErrLocked() error {
 	if m.pollErr != nil {
 		return m.pollErr
@@ -466,9 +484,12 @@ func (m *Manager) tick() {
 	defer m.notifyMu.Unlock()
 
 	if err != nil {
-		// A failing poll means we can no longer prove anything is down.
-		// Release everything: a stuck-open microphone is the worst outcome
-		// available here.
+		// DEFENSIVE BRANCH: no shipped backend's Poll returns an error (see
+		// the pollErr field doc), so this is unreachable in the current
+		// binary and is kept for the next backend rather than for today.
+		// The rule it encodes: a failing poll means we can no longer prove
+		// anything is down, so release everything -- a stuck-open microphone
+		// is the worst outcome available here.
 		m.mu.Lock()
 		release := m.takeActiveLocked() // m.pollErr was already recorded above
 		m.mu.Unlock()
