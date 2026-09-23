@@ -1133,7 +1133,9 @@ func (a *App) applyHotkeys() {
 	//
 	// With the union in place through both Applies, each manager balances
 	// its own edges and there is nothing left over -- which is why there is
-	// no blanket sb.presses.reset() here any more. That sweep was itself the
+	// no blanket press-count sweep here any more (pressCount.reset has since
+	// been deleted outright, so there is nothing left to call). That sweep
+	// was itself the
 	// residual stuck-PTT race: jm.Apply releases notifyMu on return, so a
 	// 100Hz tick landing before the reset re-pressed the still-held button
 	// (count 0 -> 1, HotkeyPressed emitted), the reset then zeroed the count

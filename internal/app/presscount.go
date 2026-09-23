@@ -51,10 +51,3 @@ func (p *pressCount) release(actionID string) bool {
 	}
 	return false
 }
-
-// reset drops every held count.
-func (p *pressCount) reset() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.n = map[string]int{}
-}

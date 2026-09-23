@@ -130,17 +130,6 @@ func (s *Store) Get(id ActionID) ([]trigger.Trigger, bool) {
 	return append([]trigger.Trigger(nil), list...), ok
 }
 
-// All returns a copy of the live bindings.
-func (s *Store) All() map[ActionID][]trigger.Trigger {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make(map[ActionID][]trigger.Trigger, len(s.binds))
-	for k, v := range s.binds {
-		out[k] = append([]trigger.Trigger(nil), v...)
-	}
-	return out
-}
-
 // Add appends t to id's trigger list. If another action already holds t, that
 // action loses just that one trigger and it is returned as Stolen -- its
 // other bindings survive, which is the point of the additive model. Adding a
