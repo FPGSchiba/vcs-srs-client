@@ -10,6 +10,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
+	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/session"
 	"github.com/FPGSchiba/vcs-srs-client/internal/version"
@@ -94,6 +95,19 @@ func main() {
 	kb := keybinds.New()
 	hk := hotkeys.New(hotkeys.NewOSRegistrar(), gui)
 	gui.SetSettingsBackend(cfg, cfgPath, kb, hk, emitter)
+
+	// Joystick/gamepad input. A failure here is never fatal: the client is a
+	// voice-comms app first, and keyboard binds must keep working on a
+	// machine with no joystick, no permission to read one, or no backend at
+	// all (macOS). The manager reports "unsupported" and the UI hides the
+	// affordance.
+	if joySrc, err := joystick.NewOSSource(); err != nil {
+		appLog.Warn("joystick input unavailable; keyboard binds are unaffected", "err", err)
+	} else {
+		jm := joystick.New(joySrc, gui, appLog)
+		gui.SetJoystickBackend(jm)
+		defer jm.Close()
+	}
 
 	// Main window: frameless + transparent, fixed 1440x900, loads the main entry.
 	// Named so the tray (internal/app/tray.go) can resolve it back out of the
