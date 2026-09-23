@@ -395,6 +395,66 @@ func TestSaveLoadRoundTripsAControlCharacterInAnUnknownKeybind(t *testing.T) {
 	}
 }
 
+func TestDefaultAudioMatchesTheSpec(t *testing.T) {
+	a := config.Default().Audio
+	if a.Levels.Master != 0.75 || a.Levels.Voice != 1.0 || a.Levels.SFX != 0.8 || a.Levels.Notification != 0.8 {
+		t.Fatalf("default levels = %+v", a.Levels)
+	}
+	if !a.AGC || !a.NoiseSuppression {
+		t.Fatal("AGC and noise suppression must default on")
+	}
+	if a.VOX {
+		t.Fatal("VOX must default off")
+	}
+	if a.PTTReleaseDelayMS != 120 {
+		t.Fatalf("ptt_release_delay_ms = %d, want 120", a.PTTReleaseDelayMS)
+	}
+	if a.Effects != nil {
+		t.Fatal("Effects must default nil, not an empty map -- see the KeybindDevices comment")
+	}
+}
+
+func TestLoadConfigWithoutAudioTableGetsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// A pre-Phase-4 config file.
+	if err := os.WriteFile(path, []byte("log_level = \"INFO\"\nserver_url = \"\"\nping_interval_seconds = 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audio.Levels.Master != 0.75 {
+		t.Fatalf("missing [audio] did not fall back to defaults: %+v", cfg.Audio)
+	}
+}
+
+func TestAudioRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	in := config.Default()
+	in.Audio.InputDevice = "mic-7"
+	in.Audio.InputDeviceName = "Procyon Headset"
+	in.Audio.VOX = true
+	in.Audio.VOXThreshold = 0.42
+	in.Audio.Levels.SFX = 0.5
+	in.Audio.Effects = map[string]config.AudioEffect{"tx_start": {Enabled: false, File: "custom.wav"}}
+	if err := config.Save(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Audio.InputDevice != "mic-7" || out.Audio.VOXThreshold != 0.42 || out.Audio.Levels.SFX != 0.5 {
+		t.Fatalf("round trip lost values: %+v", out.Audio)
+	}
+	if e := out.Audio.Effects["tx_start"]; e.Enabled || e.File != "custom.wav" {
+		t.Fatalf("effect round trip = %+v", e)
+	}
+}
+
 // TestRewritingAKeyboardOnlyConfigIsByteIdentical is the M1 guard.
 //
 // Default() used to initialise KeybindDevices to an empty, non-nil map. The
