@@ -154,6 +154,7 @@ func (m *Manager) feedCapture(s State) (func(Captured), Captured, bool) {
 		}
 		fresh = append(fresh, b)
 	}
+	fresh = suppressDiagonalCardinals(fresh, s.Held)
 	sort.Slice(fresh, func(i, j int) bool {
 		if fresh[i].Device != fresh[j].Device {
 			return fresh[i].Device < fresh[j].Device
@@ -186,4 +187,63 @@ func (m *Manager) feedCapture(s State) (func(Captured), Captured, bool) {
 	done := c.done
 	m.capture = nil
 	return done, Captured{Binding: binding}, true
+}
+
+// suppressDiagonalCardinals drops, from one sample's freshly-held inputs, the
+// two adjacent cardinals of any hat diagonal present in that same sample.
+//
+// DISPATCH and CAPTURE want opposite things from a diagonal. Dispatch wants
+// all three directions held, so a PTT bound to hat1.up is not cut when the
+// user nudges the hat off-axis (expandHatDirection in hat.go has the whole
+// argument). Capture wants ONE binding, because the user physically pressed
+// one thing: without this, a diagonal arrives as three inputs in a single
+// poll, the (Device, Button) tie-break sorts hat1.up (128) below hat1.up_right
+// (129), and the captured binding is the nonsense
+// `joy:dev:hat1.up+dev:hat1.right` -- a modifier pair the user never pressed
+// and cannot press deliberately.
+//
+// The drop set is derived from everything HELD this sample, not just from
+// fresh. Deriving it from fresh alone would only defer the bug by one tick:
+// the diagonal joins c.seen on the sample it arrives, so on the NEXT sample it
+// is no longer fresh, no diagonal would be found, and the still-held cardinals
+// -- never committed, therefore still fresh -- would be admitted after all.
+//
+// It filters the fresh set and never touches c.order, so a cardinal already
+// committed by an EARLIER sample keeps its place: a user who genuinely holds
+// hat1.up first and then rolls to up-right has expressed two presses over
+// time, and rewriting committed history to guess otherwise is worse than
+// honouring what was seen.
+//
+// Returns fresh unchanged (not a copy) when no diagonal is held, which is
+// every sample that does not involve a hat.
+func suppressDiagonalCardinals(
+	fresh []trigger.JoyButton, held map[trigger.JoyButton]struct{},
+) []trigger.JoyButton {
+	var drop map[trigger.JoyButton]struct{}
+	for b := range held {
+		if !b.Button.IsHat() {
+			continue
+		}
+		hat, dir := b.Button.Hat()
+		if dir%2 == 0 {
+			continue // a cardinal claims nothing
+		}
+		if drop == nil {
+			drop = map[trigger.JoyButton]struct{}{}
+		}
+		for _, adj := range expandHatDirection(dir)[1:] {
+			drop[trigger.JoyButton{Device: b.Device, Button: trigger.HatButton(hat, adj)}] = struct{}{}
+		}
+	}
+	if drop == nil {
+		return fresh
+	}
+	out := make([]trigger.JoyButton, 0, len(fresh))
+	for _, b := range fresh {
+		if _, skip := drop[b]; skip {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }

@@ -255,14 +255,15 @@ func (s *winSource) Poll() (State, error) {
 			if hat >= trigger.HatCount {
 				break
 			}
-			dir, ok := povDirection(angle)
-			if !ok {
-				continue
+			// povDirections, not povDirection: a diagonal reports its two
+			// adjacent cardinals as well, so a PTT bound to hat1.up is not
+			// cut by a nudge to up-right. See expandHatDirection in hat.go.
+			for _, dir := range povDirections(angle) {
+				st.Held[trigger.JoyButton{
+					Device: id,
+					Button: trigger.HatButton(hat, dir),
+				}] = struct{}{}
 			}
-			st.Held[trigger.JoyButton{
-				Device: id,
-				Button: trigger.HatButton(hat, dir),
-			}] = struct{}{}
 		}
 	}
 	return st, nil

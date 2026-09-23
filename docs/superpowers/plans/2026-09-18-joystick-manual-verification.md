@@ -38,6 +38,16 @@ evidence the cooperative level is not what it should be.
 
 - [ ] Bind a plain button. Fires.
 - [ ] Bind a hat direction. Fires, and only in that direction.
+- [ ] **Diagonal must not cut a held PTT.** Bind Global PTT to `Hat 1 ↑`.
+      Start transmitting, and while transmitting roll the hat to up-right and
+      back. Confirm transmission **does not cut** at any point, on Windows and
+      on Linux. (Spec §8 hat rule: a diagonal reports the diagonal plus both
+      adjacent cardinals. Before that rule, Windows cut the mic here and Linux
+      did not — the two backends disagreed on identical hardware.)
+- [ ] Bind a diagonal directly (`Hat 1 ↗`). Capture must produce ONE chip
+      reading `Hat 1 ↗` — **not** a modifier pair such as
+      `Hat 1 ↑ + Hat 1 →`. Confirm it fires on the diagonal and not on a
+      straight up or straight right press.
 - [ ] Bind a modifier combo: hold button A, press button B, release both.
       Confirm the chip shows "A + B" and that it fires only with A held.
 - [ ] Bind a **cross-device** modifier: hold a throttle button, press a stick

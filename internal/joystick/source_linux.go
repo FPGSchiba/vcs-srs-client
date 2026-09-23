@@ -410,38 +410,50 @@ func (s *linuxSource) Poll() (State, error) {
 		if err != nil {
 			continue
 		}
+		// The X and Y axes of one hat MUST be read together, not mapped
+		// independently. evdev reports them as two separate absolute axes,
+		// and the old code turned each into its own direction -- which made
+		// a diagonal indistinguishable from two cardinals held at once and
+		// left the four diagonal grammar values unreachable on Linux, while
+		// Windows reported the diagonal alone. Pairing them here and routing
+		// through hatAxisDirections is what makes the two backends agree.
+		// See expandHatDirection in hat.go.
+		type hatXY struct{ x, y int32 }
+		pairs := map[int]*hatXY{}
 		for code, hat := range d.hatAxes {
 			info, ok := absInfos[code]
-			if !ok || info.Value == 0 {
-				continue
-			}
-			dir, ok := hatDirection(code, info.Value)
 			if !ok {
 				continue
 			}
-			st.Held[trigger.JoyButton{Device: id, Button: trigger.HatButton(hat, dir)}] = struct{}{}
+			p := pairs[hat]
+			if p == nil {
+				p = &hatXY{}
+				pairs[hat] = p
+			}
+			if isHatXAxis(code) {
+				p.x = info.Value
+			} else {
+				p.y = info.Value
+			}
+		}
+		for hat, p := range pairs {
+			for _, dir := range hatAxisDirections(p.x, p.y) {
+				st.Held[trigger.JoyButton{Device: id, Button: trigger.HatButton(hat, dir)}] = struct{}{}
+			}
 		}
 	}
 	return st, nil
 }
 
-// hatDirection maps one hat axis deflection to a direction index. Diagonals
-// are not represented: evdev reports X and Y separately, so a diagonal press
-// registers as two directions held at once, which is the behaviour a user
-// binding "hat up" expects anyway.
-func hatDirection(code evdev.EvCode, value int32) (int, bool) {
-	isX := (code-evdev.ABS_HAT0X)%2 == 0
-	switch {
-	case isX && value > 0:
-		return 2, true // right
-	case isX && value < 0:
-		return 6, true // left
-	case !isX && value < 0:
-		return 0, true // up
-	case !isX && value > 0:
-		return 4, true // down
-	}
-	return 0, false
+// isHatXAxis reports whether an ABS_HAT* code is the X half of its hat pair.
+// evdev lays them out as ABS_HAT0X, ABS_HAT0Y, ABS_HAT1X, ... so the X axes
+// are the even offsets from ABS_HAT0X.
+//
+// This is all that remains of the old hatDirection: the DIRECTION decision
+// moved to hatAxisDirection in hat.go, where it is shared with the Windows
+// backend and testable without this file's build tag.
+func isHatXAxis(code evdev.EvCode) bool {
+	return (code-evdev.ABS_HAT0X)%2 == 0
 }
 
 func (s *linuxSource) Close() {

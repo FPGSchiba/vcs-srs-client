@@ -242,9 +242,33 @@ Cooperative level is **`SCL_NONEXCLUSIVE | SCL_BACKGROUND`** — the combination
 
 POV values arrive in centidegrees (`0..35999`, `-1`/`0xFFFF` centered); they map to the 8 directions by rounding to the nearest 45°.
 
+### Hat directions — a diagonal reports THREE directions
+
+**Decided 2026-09-23, fourth review wave.** This was a spec gap, not a code slip: §8 said only "round to the nearest 45°", and the two backends resolved the silence in opposite directions.
+
+- Windows rounded the POV angle to one of 8 points and emitted **the diagonal alone**.
+- Linux mapped `ABS_HAT*X` and `ABS_HAT*Y` independently, so it could only ever emit the **4 cardinals** and never a diagonal.
+
+That produced three defects. The one that matters: bind `global.ptt` to `hat1.up` — the canonical HOTAS PTT placement — transmit, and nudge the hat to up-right, which is trivially easy on a 4-contact 8-way hat. On Windows `Held` lost button 128 and gained 129, `Active()` stopped matching, the refcount fell 1→0 and **the mic closed with the hat still deflected**. Linux was tolerant of the identical input, so the two backends behaved oppositely on the same hardware. Separately, the four diagonal grammar values (`up_right`, `down_right`, `down_left`, `up_left`) parsed, round-tripped and rendered while being unreachable on Linux, so a Windows-authored config was silently inert there.
+
+**The rule, on BOTH backends:** a physical deflection to a diagonal reports the **diagonal AND both adjacent cardinals** held. Up-right yields `hat1.up_right`, `hat1.up` and `hat1.right`. A cardinal reports itself alone.
+
+Why this over the alternatives:
+
+- A user who binds "Hat ↑ = PTT" keeps transmitting through a diagonal nudge — the failure that matters most.
+- A user who deliberately binds `hat1.up_right` still gets a precise binding.
+- No grammar value is dead on either platform.
+- The two backends become identical, which was the actual defect.
+
+**Accepted cost:** a diagonal activates three buttons rather than one, so a user who binds both `hat1.up_right` and `hat1.up` fires both on a diagonal. `Active()`'s specificity pass (§5) only suppresses a bare binding when an active **modifier** binding claims the same button, and neither of those is a modifier binding, so no suppression applies. That is the intended reading: the hat really is deflected up.
+
+**Capture is the exception.** Three inputs arriving in one poll sample would hit the §9 `(DeviceID, Button)` tie-break and bind `joy:dev:hat1.up+dev:hat1.right` — a modifier pair the user never pressed and cannot press deliberately. So **when a hat diagonal is held, its two adjacent cardinals are suppressed from that capture**: the user physically pressed one thing and gets one binding.
+
+The decision lives in one place, `internal/joystick/hat.go`, which carries **no build tag** so both backends route through it and it is unit-testable on any host. `povDirections` (Windows) and `hatAxisDirections` (Linux) are both `expandHatDirection` composed with a platform-specific reading of the hardware, and a test asserts the two agree on all 8 points.
+
 ### Linux
 
-`holoplot/go-evdev`, reading `EV_KEY` for buttons and `EV_ABS` `ABS_HAT*` for hats. Devices are filtered to those declaring joystick-like capabilities so keyboards are never opened — we must not become an input sniffer.
+`holoplot/go-evdev`, reading `EV_KEY` for buttons and `EV_ABS` `ABS_HAT*` for hats. The X and Y axes of one hat are read **as a pair**, never mapped independently — see the hat-direction rule above. Devices are filtered to those declaring joystick-like capabilities so keyboards are never opened — we must not become an input sniffer.
 
 `/dev/input/event*` is typically `0600 root:root`. Access failure is reported as a distinct, actionable error naming the `input` group. In practice a Linux user already running SC under Proton has working access, since Steam ships the udev rules.
 
