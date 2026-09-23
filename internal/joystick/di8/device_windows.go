@@ -30,6 +30,16 @@ type deviceVtbl struct {
 	GetDeviceInfo        uintptr
 	RunControlPanel      uintptr
 	Initialize           uintptr
+
+	CreateEffect             uintptr // 18 — fields 18-24 are unused here but
+	EnumEffects              uintptr // 19   MUST be present, in this exact
+	GetEffectInfo            uintptr // 20   order, or Poll lands at the wrong
+	GetForceFeedbackState    uintptr // 21   vtable offset.
+	SendForceFeedbackCommand uintptr // 22
+	EnumCreatedEffectObjects uintptr // 23
+	Escape                   uintptr // 24
+
+	Poll uintptr // 25 — the one actually needed
 }
 
 // AddRef increments the reference count for an interface on an object. This
@@ -71,6 +81,13 @@ func (obj *Device) Unacquire() Error {
 		obj.vtbl.Unacquire,
 		uintptr(unsafe.Pointer(obj)),
 	)
+	return toErr(ret)
+}
+
+// Poll retrieves data from polled objects on the device. Devices that do not
+// require polling return DIERR_UNSUPPORTED, which callers may ignore.
+func (obj *Device) Poll() Error {
+	ret, _, _ := syscall.SyscallN(obj.vtbl.Poll, uintptr(unsafe.Pointer(obj)))
 	return toErr(ret)
 }
 

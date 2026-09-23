@@ -155,11 +155,15 @@ func (s *winSource) Poll() (State, error) {
 	}
 	for id, d := range s.devices {
 		var raw di8.JOYSTATE2
-		// The vendored di8 package does not expose IDirectInputDevice8::Poll
-		// (its own doc.go documents GetDeviceState as the whole read path for
-		// immediate-mode access, with no Poll step), so we read state
-		// directly. A lost device is reacquired below and simply reports
-		// nothing held until then, which releases anything held on it.
+		// Poll gives polling-model devices a chance to refresh their state
+		// before we read it; on the interrupt-driven devices that make up
+		// the overwhelming majority of modern HOTAS hardware it is a
+		// documented no-op that returns DIERR_UNSUPPORTED, which is exactly
+		// why the error is discarded here rather than swallowed silently --
+		// it is not an error condition, it is the expected outcome for a
+		// device that never needed this call. Skipping Poll entirely would
+		// instead risk a polling-model device silently never updating.
+		_ = d.dev.Poll()
 		if err := d.dev.GetDeviceState(&raw); err != nil {
 			_ = d.dev.Acquire()
 			continue
