@@ -7,34 +7,6 @@ import { api } from "../../../../../shared/api/client";
 import { useSettings } from "../../../../../shared/store/settings";
 import type { AudioEffect, AudioSettings } from "../../../../../shared/store/settings";
 
-interface SampleSlot {
-  id: string;
-  label: string;
-}
-
-/**
- * The seven sample-backed Radio Effects slots, mirroring
- * internal/audio/assets/manifest.toml's slot ids and labels one for one.
- *
- * `AudioEffectDTO.Label` from the backend is a placeholder today -- it
- * echoes the slot id verbatim (see audioSettingsDTO's doc comment in
- * internal/app/audio.go), because Manager exposes no accessor for the SFX
- * manifest's real label yet and this task is scoped to frontend/src only.
- * Rendering that would show "tx_start" instead of "TX Start", so these
- * labels are hardcoded here from the manifest instead of read off the DTO.
- * A future task that adds the Manager accessor mentioned in that doc should
- * source these from the backend and delete this list.
- */
-const SAMPLE_SLOTS: SampleSlot[] = [
-  { id: "tx_start", label: "TX Start" },
-  { id: "tx_end", label: "TX End" },
-  { id: "rx_start", label: "RX Start" },
-  { id: "rx_end", label: "RX End" },
-  { id: "intercom_start", label: "Intercom Start" },
-  { id: "intercom_end", label: "Intercom End" },
-  { id: "encryption_beep", label: "Encryption Beep" },
-];
-
 /**
  * `audio.effects` is nil/empty until the backend or a user touches a slot
  * (see config.Default's doc for why it starts nil). A slot missing from the
@@ -43,47 +15,23 @@ const SAMPLE_SLOTS: SampleSlot[] = [
  */
 const EMPTY_EFFECT: AudioEffect = { enabled: false, file: "", label: "", available: false };
 
-interface Preset {
-  value: string;
-  label: string;
-}
-
-/**
- * voice_effect / clipping_effect are BUILT-IN NAMED DSP CONFIGURATIONS, not
- * sample files -- see internal/audio/effect.go's `Effect` doc (spec D12).
- * The design prototype writes them with `.preset` extensions, but there is
- * no preset file format or parser: the "filename" is just an identifier.
- *
- * Task 17 is scoped to frontend/src only, so there is no bound accessor for
- * internal/audio's `VoicePresets()` / `ClippingPresets()`. These lists are
- * hardcoded here and must mirror those functions one-for-one -- update both
- * places if a preset is ever added, renamed, or removed.
- */
-const VOICE_PRESETS: Preset[] = [
-  { value: "", label: "Off" },
-  { value: "comms_filter_low", label: "Comms Filter (Low)" },
-  { value: "comms_filter_mid", label: "Comms Filter (Mid)" },
-  { value: "comms_filter_high", label: "Comms Filter (High)" },
-];
-
-const CLIPPING_PRESETS: Preset[] = [
-  { value: "", label: "Off" },
-  { value: "soft_limit", label: "Soft Limit" },
-  { value: "saturated_overdrive", label: "Saturated Overdrive" },
-];
-
 /**
  * Effects renders Settings -> "Radio Effects", replacing the `Deferred`
  * stub. Nine rows, two kinds -- conflating them would be wrong in a way
  * that looks right:
  *
- * - Seven SAMPLE slots (this file's `SAMPLE_SLOTS`), each a label + sample
- *   select + PREVIEW button + enable toggle, mapping to
- *   `audio.effects[id]`.
+ * - The manifest's SAMPLE slots (`settings.audio.effect_order`, one
+ *   `SettingRow` per id), each a label + sample select + PREVIEW button +
+ *   enable toggle, mapping to `audio.effects[id]`. The id set, display
+ *   order, and label all come from the backend's SFX manifest (see
+ *   `AudioSettingsDTO.EffectOrder`'s Go doc) -- this file has no hardcoded
+ *   copy of internal/audio/assets/manifest.toml to keep in sync.
  * - Two DSP PRESET rows (`voice_effect`, `clipping_effect`), each a select
- *   of preset NAMES (not filenames), mapping to the matching top-level
- *   `AudioSettings` string field. No file, no PREVIEW -- there is nothing
- *   to play, only a processing chain to toggle.
+ *   of preset NAMES (not filenames) sourced from `getAudioEffectPresets()`
+ *   (the store's `audioEffectPresets`, hydrated once by useSettingsSync),
+ *   mapping to the matching top-level `AudioSettings` string field. No
+ *   file, no PREVIEW -- there is nothing to play, only a processing chain
+ *   to toggle.
  *
  * Same single-source-of-truth flow as Audio.tsx and General.tsx: every
  * control calls `api.setSettings` with the full struct (audio patched in)
@@ -103,6 +51,7 @@ const CLIPPING_PRESETS: Preset[] = [
  */
 export function Effects() {
   const settings = useSettings((s) => s.settings);
+  const presets = useSettings((s) => s.audioEffectPresets);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
 
   if (!settings) return null;
@@ -128,20 +77,21 @@ export function Effects() {
 
   return (
     <Panel title="RADIO EFFECTS">
-      {SAMPLE_SLOTS.map((slot) => {
-        const effect = audio.effects[slot.id] ?? EMPTY_EFFECT;
+      {audio.effect_order.map((id) => {
+        const effect = audio.effects[id] ?? EMPTY_EFFECT;
+        const label = effect.label || id;
         return (
           <SettingRow
-            key={slot.id}
-            label={slot.label}
+            key={id}
+            label={label}
             control={
               <div className="row gap-3 acenter">
                 <select
-                  aria-label={`${slot.label} sample`}
+                  aria-label={`${label} sample`}
                   className="input mono"
                   style={{ width: 200 }}
                   value={effect.file}
-                  onChange={(e) => updateEffect(slot.id, { file: e.target.value })}
+                  onChange={(e) => updateEffect(id, { file: e.target.value })}
                 >
                   <option value={effect.file}>{effect.file || "No sample"}</option>
                 </select>
@@ -149,15 +99,15 @@ export function Effects() {
                   className="btn btn-sm"
                   type="button"
                   disabled={!effect.available}
-                  aria-label={`Preview ${slot.label}`}
-                  onClick={() => void preview(slot.id)}
+                  aria-label={`Preview ${label}`}
+                  onClick={() => void preview(id)}
                 >
-                  <Icon name="volume" size={11} /> {previewingId === slot.id ? "..." : "PREVIEW"}
+                  <Icon name="volume" size={11} /> {previewingId === id ? "..." : "PREVIEW"}
                 </button>
                 <Toggle
                   on={effect.enabled}
-                  onChange={(v) => updateEffect(slot.id, { enabled: v })}
-                  aria-label={`Enable ${slot.label}`}
+                  onChange={(v) => updateEffect(id, { enabled: v })}
+                  aria-label={`Enable ${label}`}
                 />
               </div>
             }
@@ -175,7 +125,7 @@ export function Effects() {
             value={audio.voice_effect}
             onChange={(e) => update({ voice_effect: e.target.value })}
           >
-            {VOICE_PRESETS.map((p) => (
+            {presets.voice.map((p) => (
               <option key={p.value} value={p.value}>
                 {p.label}
               </option>
@@ -194,7 +144,7 @@ export function Effects() {
             value={audio.clipping_effect}
             onChange={(e) => update({ clipping_effect: e.target.value })}
           >
-            {CLIPPING_PRESETS.map((p) => (
+            {presets.clipping.map((p) => (
               <option key={p.value} value={p.value}>
                 {p.label}
               </option>

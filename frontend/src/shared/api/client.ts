@@ -9,6 +9,7 @@ import type {
   JoystickState,
   AudioDevices,
   AudioState,
+  AudioEffectPresets,
 } from "../store/settings";
 
 export interface RadioDTO {
@@ -95,4 +96,6 @@ export const api = {
   startMicTest: (): Promise<void> => App.StartMicTest() as Promise<void>,
   stopMicTest: (): Promise<void> => App.StopMicTest() as Promise<void>,
   previewEffect: (id: string): Promise<void> => App.PreviewEffect(id) as Promise<void>,
+  getAudioEffectPresets: (): Promise<AudioEffectPresets> =>
+    App.GetAudioEffectPresets() as Promise<AudioEffectPresets>,
 };

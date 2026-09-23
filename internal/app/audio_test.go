@@ -232,10 +232,20 @@ func TestGetSettingsSourcesEffectCatalogFromTheManifest(t *testing.T) {
 	m := newTestAudioManager(t)
 	a.SetAudioBackend(m)
 
-	got := a.GetSettings().Audio.Effects
+	settingsDTO := a.GetSettings().Audio
+	got := settingsDTO.Effects
 	wantIDs := m.EffectIDs()
 	if len(got) != len(wantIDs) {
 		t.Fatalf("Effects has %d entries, want %d (one per manifest slot): %+v", len(got), len(wantIDs), got)
+	}
+	if gotOrder := settingsDTO.EffectOrder; len(gotOrder) != len(wantIDs) {
+		t.Fatalf("EffectOrder = %v, want %v (Manager.EffectIDs' order)", gotOrder, wantIDs)
+	} else {
+		for i := range wantIDs {
+			if gotOrder[i] != wantIDs[i] {
+				t.Fatalf("EffectOrder = %v, want %v in that exact order", gotOrder, wantIDs)
+			}
+		}
 	}
 	for _, id := range wantIDs {
 		e, ok := got[id]

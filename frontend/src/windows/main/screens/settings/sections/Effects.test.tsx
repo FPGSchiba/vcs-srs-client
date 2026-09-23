@@ -14,14 +14,20 @@ vi.mock("../../../../../shared/api/client", () => ({
   },
 }));
 
-// Mirrors internal/audio/assets/manifest.toml's seven slot ids. `available:
-// false` on every entry is the DEFAULT case exercised here on purpose --
-// it's the state the app genuinely ships in until the SFX sample pack
-// (internal/audio/assets/, currently just a manifest + README) lands. See
-// AudioEffectDTO's Go doc.
-function unavailableEffect(file: string): AudioEffect {
-  return { enabled: true, file, label: "", available: false };
+// Mirrors internal/audio/assets/manifest.toml's seven slot ids and labels,
+// and effect_order mirrors the manifest's `order` field -- see
+// AudioSettingsDTO.EffectOrder's Go doc for why order travels as its own
+// array rather than object key order. `available: false` on every entry is
+// the DEFAULT case exercised here on purpose -- it's the state the app
+// genuinely ships in until the SFX sample pack (internal/audio/assets/,
+// currently just a manifest + README) lands. See AudioEffectDTO's Go doc.
+function unavailableEffect(label: string, file: string): AudioEffect {
+  return { enabled: true, file, label, available: false };
 }
+
+const EFFECT_ORDER = [
+  "tx_start", "tx_end", "rx_start", "rx_end", "intercom_start", "intercom_end", "encryption_beep",
+];
 
 function seed() {
   useSettings.setState({
@@ -35,18 +41,32 @@ function seed() {
         vox_noise_cancel: true, ptt_start_delay_ms: 0, ptt_release_delay_ms: 120,
         voice_effect: "comms_filter_mid", clipping_effect: "",
         levels: { master: 0.75, voice: 1, sfx: 0.8, notification: 0.8 },
+        effect_order: EFFECT_ORDER,
         effects: {
-          tx_start: unavailableEffect("transmit_open.wav"),
-          tx_end: unavailableEffect("transmit_close.wav"),
-          rx_start: unavailableEffect("receive_open.wav"),
-          rx_end: unavailableEffect("receive_close.wav"),
-          intercom_start: unavailableEffect("intercom_open.wav"),
-          intercom_end: unavailableEffect("intercom_close.wav"),
-          encryption_beep: unavailableEffect("crypto_handshake.wav"),
+          tx_start: unavailableEffect("TX Start", "transmit_open.wav"),
+          tx_end: unavailableEffect("TX End", "transmit_close.wav"),
+          rx_start: unavailableEffect("RX Start", "receive_open.wav"),
+          rx_end: unavailableEffect("RX End", "receive_close.wav"),
+          intercom_start: unavailableEffect("Intercom Start", "intercom_open.wav"),
+          intercom_end: unavailableEffect("Intercom End", "intercom_close.wav"),
+          encryption_beep: unavailableEffect("Encryption Beep", "crypto_handshake.wav"),
         },
       },
     },
     audioDevices: { inputs: [], outputs: [] },
+    audioEffectPresets: {
+      voice: [
+        { value: "", label: "Off" },
+        { value: "comms_filter_low", label: "Comms Filter (Low)" },
+        { value: "comms_filter_mid", label: "Comms Filter (Mid)" },
+        { value: "comms_filter_high", label: "Comms Filter (High)" },
+      ],
+      clipping: [
+        { value: "", label: "Off" },
+        { value: "soft_limit", label: "Soft Limit" },
+        { value: "saturated_overdrive", label: "Saturated Overdrive" },
+      ],
+    },
   });
 }
 

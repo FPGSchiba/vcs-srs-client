@@ -291,7 +291,8 @@ func audioSettingsDTO(ac config.Audio, m *audio.Manager) AudioSettingsDTO {
 			SFX:          ac.Levels.SFX,
 			Notification: ac.Levels.Notification,
 		},
-		Effects: effects,
+		Effects:     effects,
+		EffectOrder: ids,
 	}
 }
 

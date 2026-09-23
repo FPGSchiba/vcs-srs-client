@@ -81,6 +81,16 @@ export function useSettingsSync(): void {
         // place with nothing but this line to explain why.
         console.error("getAudioState failed; audio health is unknown", err);
       });
+    // Static data (internal/audio's own preset tables), not per-Manager
+    // state -- fetched once here, not re-pushed on any event, unlike
+    // audioDevices/audioState above.
+    api
+      .getAudioEffectPresets()
+      .then((p) => useSettings.getState().setAudioEffectPresets(p))
+      .catch(() => {
+        /* not available yet -- the store's empty-lists default already
+         * renders no preset options */
+      });
 
     const offs = [
       on<Settings>(EV.settingsChanged, (s) => useSettings.getState().setSettings(s)),

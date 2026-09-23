@@ -12,6 +12,7 @@ const blank = {
     voice_effect: "", clipping_effect: "",
     levels: { master: 0.75, voice: 1, sfx: 0.8, notification: 0.8 },
     effects: {},
+    effect_order: [],
   },
 };
 

@@ -12,13 +12,32 @@ export interface AudioLevels {
 }
 
 /** One Radio Effects slot's persisted state, mirroring Go's
- * `app.AudioEffectDTO`. `available` is a placeholder today -- see the Go
- * type's doc for why. */
+ * `app.AudioEffectDTO`. `label` and `available` are read fresh off the
+ * backend's SFX manifest on every settings sync, not persisted -- see the
+ * Go type's doc. `available` is false for every slot until the SFX sample
+ * pack lands (internal/audio/assets/README.md); that is the honest current
+ * answer, not a placeholder. */
 export interface AudioEffect {
   enabled: boolean;
   file: string;
   label: string;
   available: boolean;
+}
+
+/** One selectable DSP preset (a Voice Effect or Clipping Effect dropdown
+ * option), mirroring Go's `app.AudioEffectPresetDTO`. `value` is what
+ * persists into `AudioSettings.voice_effect` / `.clipping_effect`. */
+export interface AudioEffectPreset {
+  value: string;
+  label: string;
+}
+
+/** Both built-in DSP preset lists, mirroring Go's
+ * `app.AudioEffectPresetsDTO`. Static data -- fetched once, not pushed on
+ * an event, unlike `audioDevices`/`audioState`. */
+export interface AudioEffectPresets {
+  voice: AudioEffectPreset[];
+  clipping: AudioEffectPreset[];
 }
 
 /** Persisted audio configuration, mirroring Go's `app.AudioSettingsDTO`
@@ -44,6 +63,12 @@ export interface AudioSettings {
   clipping_effect: string;
   levels: AudioLevels;
   effects: Record<string, AudioEffect>;
+  /** `effects`' keys, in the manifest's display order. A JSON object's key
+   * order is not guaranteed (and Go's encoding/json sorts map keys
+   * alphabetically), so a stable render order travels as its own array --
+   * see Go's `AudioSettingsDTO.EffectOrder` doc. Derived, like `label`/
+   * `available`: never written back through `setSettings`. */
+  effect_order: string[];
 }
 
 export interface Settings {
@@ -173,6 +198,7 @@ interface SettingsState {
   joystick: JoystickState;
   audioDevices: AudioDevices;
   audioState: AudioState;
+  audioEffectPresets: AudioEffectPresets;
   vu: AudioVU;
   micMuted: boolean;
   setSettings: (s: Settings) => void;
@@ -181,6 +207,7 @@ interface SettingsState {
   setJoystickState: (j: JoystickState) => void;
   setAudioDevices: (d: AudioDevices) => void;
   setAudioState: (a: AudioState) => void;
+  setAudioEffectPresets: (p: AudioEffectPresets) => void;
   setVU: (v: AudioVU) => void;
   setMicMuted: (m: boolean) => void;
 }
@@ -197,6 +224,9 @@ export const useSettings = create<SettingsState>((set) => ({
   // confirmed, rather than optimistically claiming health up front the way
   // `hotkeys.registered` does for a subsystem that mostly works.
   audioState: { running: false, input_error: "", output_error: "", overruns: 0, underruns: 0 },
+  // Empty until getAudioEffectPresets() resolves. Effects.tsx renders no
+  // preset options in that brief window rather than a stale/guessed list.
+  audioEffectPresets: { voice: [], clipping: [] },
   vu: { input: 0, output: 0 },
   micMuted: false,
   // `registered: true` is the optimistic default on purpose. The Keybinds
@@ -220,6 +250,7 @@ export const useSettings = create<SettingsState>((set) => ({
   setJoystickState: (joystick) => set({ joystick }),
   setAudioDevices: (audioDevices) => set({ audioDevices }),
   setAudioState: (audioState) => set({ audioState }),
+  setAudioEffectPresets: (audioEffectPresets) => set({ audioEffectPresets }),
   setVU: (vu) => set({ vu }),
   setMicMuted: (micMuted) => set({ micMuted }),
 }));

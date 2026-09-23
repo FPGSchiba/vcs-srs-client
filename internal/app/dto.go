@@ -123,6 +123,13 @@ type AudioSettingsDTO struct {
 	ClippingEffect    string                    `json:"clipping_effect"`
 	Levels            AudioLevelsDTO            `json:"levels"`
 	Effects           map[string]AudioEffectDTO `json:"effects"`
+	// EffectOrder is Effects' keys in the manifest's display order (see
+	// audio.SFX.EffectIDs' doc) -- a JSON object's key order is not
+	// guaranteed (and encoding/json sorts map keys alphabetically in
+	// practice), so a stable render order for the frontend's Radio Effects
+	// panel has to travel as its own array. Derived and read-only, like
+	// Label/Available: not persisted, and configAudioFromDTO ignores it.
+	EffectOrder []string `json:"effect_order"`
 }
 
 // AudioLevelsDTO holds the four mixer bus positions, 0-1.

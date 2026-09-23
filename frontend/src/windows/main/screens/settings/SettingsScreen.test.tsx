@@ -14,7 +14,14 @@ const audio = vi.hoisted(() => ({
   vox_noise_cancel: true, ptt_start_delay_ms: 0, ptt_release_delay_ms: 120,
   voice_effect: "", clipping_effect: "",
   levels: { master: 0.75, voice: 1, sfx: 0.8, notification: 0.8 },
-  effects: {},
+  // Mirrors internal/audio/assets/manifest.toml's TX Start slot -- enough
+  // for this file's "Radio Effects renders the live section" assertion to
+  // prove a real backend-labeled row renders, without repeating the full
+  // seven-slot fixture Effects.test.tsx already owns.
+  effects: {
+    tx_start: { enabled: false, file: "", label: "TX Start", available: false },
+  },
+  effect_order: ["tx_start"],
 }));
 
 vi.mock("../../../../shared/api/client", () => ({
