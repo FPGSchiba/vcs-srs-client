@@ -56,15 +56,28 @@ func (m *Manager) BeginCapture(done func(Captured)) {
 	//
 	// WHAT THIS ACTUALLY GUARANTEES, precisely, because an earlier draft of
 	// this comment claimed more: once the loop is running, every Source call
-	// happens from the poll goroutine, so no two calls ever OVERLAP. It does
-	// NOT guarantee thread affinity. Manager.New's probe calls Devices() on
-	// whichever goroutine built the Manager, Close() calls Source.Close() on
-	// whichever goroutine closed it, and newHelperWindow runs on the
-	// constructing goroutine too -- and there is no runtime.LockOSThread
-	// anywhere in this package, so even the poll loop may migrate between OS
-	// threads between calls. DI8 device-state retrieval is free-threaded in
-	// practice, which is why this has never bitten; a backend that genuinely
-	// required an apartment-affine thread would need LockOSThread added
+	// happens from the poll goroutine, so no two calls ever OVERLAP. This
+	// PACKAGE guarantees no thread affinity on top of that -- Manager.New's
+	// probe calls Devices() on whichever goroutine built the Manager, Close()
+	// calls Source.Close() on whichever goroutine closed it, and nothing here
+	// calls runtime.LockOSThread, so even the poll loop may migrate between
+	// OS threads between calls.
+	//
+	// The one place affinity genuinely matters is already covered, by the
+	// wiring rather than by this package: CreateWindowEx and DestroyWindow
+	// must run on the same thread, and both do. Wails pins the main goroutine
+	// to the main OS thread for the process lifetime
+	// (pkg/application/init_desktop.go, build tag !ios, calls
+	// runtime.LockOSThread from an init), and main.go calls
+	// joystick.NewOSSource -- hence newHelperWindow -- from main(), with
+	// `defer jm.Close()` running src.Close() synchronously on that same
+	// goroutine. See the Source doc comment in source.go for the full
+	// argument.
+	//
+	// Everything else stays as stated: DI8 device-state retrieval is
+	// free-threaded in practice, which is why polling from an unlocked
+	// goroutine has never bitten; a backend that genuinely required an
+	// apartment-affine thread for its POLL path would need LockOSThread added
 	// deliberately, which is a design change and not something to infer from
 	// this comment. The hardware checklist has a row to confirm the current
 	// arrangement works on real DirectInput.

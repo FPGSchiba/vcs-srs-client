@@ -95,10 +95,28 @@ func (s State) IsHeld(b trigger.JoyButton) bool {
 // goroutine or OS thread a call arrives on, and deliberately does not: New's
 // probe calls Devices() on the constructing goroutine, Close() calls Close()
 // on the closing one, and the rest come from the poll loop, which itself may
-// migrate between OS threads because nothing here calls
+// migrate between OS threads because nothing in THIS package calls
 // runtime.LockOSThread. An implementation that needs a fixed thread (a COM
 // apartment-threaded API, say) must arrange that itself, or LockOSThread has
 // to be added here deliberately.
+//
+// What the PRODUCTION wiring happens to guarantee is narrower and worth
+// naming, because the Windows backend's one genuine affinity requirement
+// falls inside it. Wails locks the main goroutine to the main OS thread for
+// the life of the process -- `pkg/application/init_desktop.go` (build tag
+// `!ios`) calls runtime.LockOSThread() from an `init`, which runs on the main
+// goroutine before main() does -- and main.go both CONSTRUCTS the source
+// (joystick.NewOSSource, hence newHelperWindow -> CreateWindowEx) and closes
+// it (`defer jm.Close()`, whose Manager.Close calls src.Close() synchronously
+// on the caller's goroutine, hence DestroyWindow) from main() itself. Both
+// halves of the CreateWindowEx/DestroyWindow same-thread rule are therefore
+// satisfied by construction, not by luck.
+//
+// That guarantee does NOT extend to anything else: the poll goroutine is
+// unlocked, so DI8 device-state retrieval (free-threaded in practice) is the
+// only reason Poll() is safe there, and a test that builds a Source outside
+// main() has no affinity at all because nothing in a test binary imports the
+// Wails application package.
 type Source interface {
 	// Devices enumerates what is attached. Called on a slow timer for
 	// hot-plug, and by the capture UI.

@@ -270,7 +270,7 @@ The decision lives in one place, `internal/joystick/hat.go`, which carries **no 
 
 `holoplot/go-evdev`, reading `EV_KEY` for buttons and `EV_ABS` `ABS_HAT*` for hats. The X and Y axes of one hat are read **as a pair**, never mapped independently — see the hat-direction rule above. Devices are filtered to those declaring joystick-like capabilities so keyboards are never opened — we must not become an input sniffer.
 
-`/dev/input/event*` is typically `0600 root:root`. Access failure is reported as a distinct, actionable error naming the `input` group. In practice a Linux user already running SC under Proton has working access, since Steam ships the udev rules.
+`/dev/input/event*` is typically `0660 root:input` — group-readable, not root-only, which is exactly why **`input`-group membership** is the remedy the error names. (An earlier draft of this section said `0600 root:root`; that would make group membership useless and the remedy message wrong. `internal/joystick/source_linux.go`'s `permissionError` has always been right.) Access failure is reported as a distinct, actionable error naming the `input` group. In practice a Linux user already running SC under Proton has working access, since Steam ships the udev rules.
 
 ### macOS
 
