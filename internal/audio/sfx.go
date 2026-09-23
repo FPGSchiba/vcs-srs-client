@@ -31,24 +31,48 @@ type voice struct {
 //
 // A missing asset is a first-class, expected state: the sample pack is
 // supplied separately (spec D11) and the client must work fully without it.
+//
+// Concurrency (Fix 4): order/slots/samples are populated once in NewSFX and
+// never mutated afterward, so any goroutine may read them without a lock --
+// construction happens-before every use via the *SFX returned to the
+// caller. mu guards ONLY the pending queue below and is never held while
+// mixing:
+//
+//   - Play (any goroutine, off the realtime path) appends the requested id
+//     to pending under mu. That's fine -- it isn't the audio thread.
+//   - MixInto (DSP goroutine only, called every FrameDuration) uses
+//     TryLock to drain pending into voices -- a pool owned exclusively by
+//     the DSP goroutine from that point on -- then mixes with NO LOCK HELD
+//     AT ALL. If TryLock fails (a Play is mid-append on another goroutine),
+//     MixInto skips the drain for this tick: the effect starts up to one
+//     frame (10ms) later, which is inaudible, and the realtime path never
+//     blocks on a contended lock.
 type SFX struct {
-	mu sync.Mutex
-
 	order   []string
 	slots   map[string]effectSlot
 	samples map[string][]float32
-	voices  []voice
 
-	warnedOnce map[string]bool
-	log        *slog.Logger
+	mu      sync.Mutex
+	pending []string
+
+	// voices is a fixed-capacity ring, indexed mod maxVoices, touched by
+	// exactly one goroutine -- whichever calls MixInto -- so it needs no
+	// synchronisation of its own. head is the oldest active slot; count is
+	// how many of the maxVoices slots (starting at head) are live. Fixed
+	// capacity means no slice growth/reallocation ever, unlike the
+	// evict-front-then-append pattern this replaces (Task 9 finding).
+	voices [maxVoices]voice
+	head   int
+	count  int
+
+	log *slog.Logger
 }
 
 func NewSFX() *SFX {
 	s := &SFX{
-		slots:      map[string]effectSlot{},
-		samples:    map[string][]float32{},
-		warnedOnce: map[string]bool{},
-		log:        slog.Default(),
+		slots:   map[string]effectSlot{},
+		samples: map[string][]float32{},
+		log:     slog.Default(),
 	}
 	if err := s.loadManifest(); err != nil {
 		s.log.Error("audio: sfx manifest unreadable; all effects silent", "err", err)
@@ -106,46 +130,74 @@ func (s *SFX) Label(id string) string {
 	return id
 }
 
-// Available reports whether a slot has a decoded sample behind it.
+// Available reports whether a slot has a decoded sample behind it. samples
+// is immutable after construction (see the SFX doc), so this needs no lock.
 func (s *SFX) Available(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	return len(s.samples[id]) > 0
 }
 
-// Play starts a one-shot. Unknown or absent ids are silently ignored.
+// Play queues a one-shot to start on the DSP goroutine's next MixInto call.
+// Unknown or absent ids are silently ignored. Safe from any goroutine; this
+// is off the realtime path -- mu here is never contended by MixInto's mix
+// step, only by its brief, best-effort pending drain.
 func (s *SFX) Play(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	samples := s.samples[id]
-	if len(samples) == 0 {
+	if len(s.samples[id]) == 0 {
 		return
 	}
-	if len(s.voices) >= maxVoices {
-		s.voices = s.voices[1:] // evict oldest
+	s.mu.Lock()
+	s.pending = append(s.pending, id)
+	s.mu.Unlock()
+}
+
+// addVoice inserts samples into the fixed ring, evicting the oldest active
+// voice if the pool is already full so the newest event is always audible.
+// DSP-goroutine-only; no lock (see the SFX doc).
+func (s *SFX) addVoice(samples []float32) {
+	if s.count < maxVoices {
+		idx := (s.head + s.count) % maxVoices
+		s.voices[idx] = voice{samples: samples}
+		s.count++
+		return
 	}
-	s.voices = append(s.voices, voice{samples: samples})
+	s.voices[s.head] = voice{samples: samples}
+	s.head = (s.head + 1) % maxVoices
 }
 
 // MixInto sums every active voice into dst and retires finished ones.
-// Called from the DSP goroutine.
+// Called from the DSP goroutine only, every FrameDuration. Takes no lock on
+// its mixing path -- see the SFX doc for why that's safe (Fix 4).
 func (s *SFX) MixInto(dst []float32) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	live := s.voices[:0]
-	for _, v := range s.voices {
-		remaining := len(v.samples) - v.pos
-		count := len(dst)
-		if remaining < count {
-			count = remaining
-		}
-		for i := 0; i < count; i++ {
-			dst[i] += v.samples[v.pos+i]
-		}
-		v.pos += count
-		if v.pos < len(v.samples) {
-			live = append(live, v)
+	if s.mu.TryLock() {
+		pending := s.pending
+		s.pending = nil
+		s.mu.Unlock()
+		for _, id := range pending {
+			if samples := s.samples[id]; len(samples) > 0 {
+				s.addVoice(samples)
+			}
 		}
 	}
-	s.voices = live
+	// Past this point nothing touches s.mu: voices/head/count are owned
+	// solely by this goroutine, so the rest of this call is lock-free.
+
+	write := 0
+	for i := 0; i < s.count; i++ {
+		v := s.voices[(s.head+i)%maxVoices]
+
+		remaining := len(v.samples) - v.pos
+		n := len(dst)
+		if remaining < n {
+			n = remaining
+		}
+		for j := 0; j < n; j++ {
+			dst[j] += v.samples[v.pos+j]
+		}
+		v.pos += n
+
+		if v.pos < len(v.samples) {
+			s.voices[(s.head+write)%maxVoices] = v
+			write++
+		}
+	}
+	s.count = write
 }
