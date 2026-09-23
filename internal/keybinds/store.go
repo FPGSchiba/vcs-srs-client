@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 
@@ -83,13 +84,54 @@ func isPerRadioID(id string) bool {
 // silently dead at dispatch (internal/hotkeys registers one chord per action
 // ID), but the destruction has to be diagnosable, so each dropped chord gets
 // a Warn naming the action and the chord.
+//
+// A trigger belongs to AT MOST ONE action, and Load enforces that too: a
+// trigger already claimed by an earlier action is dropped from the later one,
+// with the same Warn treatment. Without this, a hand-edited or merged config
+// with the same button under `global.ptt` and `global.push_to_mute` loaded
+// happily and one press opened PTT *and* push-to-mute, with nothing in the UI
+// indicating the collision -- Add refuses to create that state, so nothing
+// downstream is written to cope with it.
+//
+// Action IDs are therefore visited in SORTED order, not map order. Which
+// action keeps a contested trigger has to be stable: with map iteration the
+// same file would load differently on different launches, so the user would
+// see the binding move between two rows at random and, worse, the next Save
+// would persist whichever way that run happened to go.
 func (s *Store) Load(raw map[string][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.binds = map[ActionID][]trigger.Trigger{}
 	s.unknown = map[string][]string{}
 	known := knownIDs()
-	for id, list := range raw {
+
+	ids := make([]string, 0, len(raw))
+	for id := range raw {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	// claimed records every trigger already taken and by whom. A slice
+	// scanned with trigger.Equal rather than a map keyed by String(): Equal
+	// is the definition of collision everywhere else in this file (Add uses
+	// it), and the action count is a few dozen, so an exact answer costs
+	// nothing.
+	type claim struct {
+		t     trigger.Trigger
+		owner string
+	}
+	var claimed []claim
+	claimant := func(t trigger.Trigger) (string, bool) {
+		for _, c := range claimed {
+			if c.t.Equal(t) {
+				return c.owner, true
+			}
+		}
+		return "", false
+	}
+
+	for _, id := range ids {
+		list := raw[id]
 		if !known[ActionID(id)] && !isPerRadioID(id) {
 			s.unknown[id] = append([]string(nil), list...)
 			continue
@@ -108,6 +150,23 @@ func (s *Store) Load(raw map[string][]string) {
 					"action", id, "dropped", str, "err", err)
 				continue
 			}
+			// Checked BEFORE the one-chord-per-action rule, deliberately: a
+			// chord an earlier action already owns must not also consume
+			// this action's single chord slot. `global.ptt = ["F1"]` with
+			// `global.push_to_mute = ["F1", "F2"]` leaves push_to_mute bound
+			// to F2, which is what the file asked for once F1 is off the
+			// table; the other order would leave it bound to nothing.
+			if owner, taken := claimant(t); taken {
+				// Already bound to an earlier action. Dropped rather than
+				// duplicated, because a duplicate is not a richer binding --
+				// it is one press firing two actions with no way to see why.
+				// Logged like the other two drops: the next Save erases it
+				// from the user's config.toml, so it has to be diagnosable.
+				slog.Default().Warn("keybind config binds one trigger to more than one action; "+
+					"it is kept on the first action only and dropped from the file on the next save",
+					"action", id, "dropped", t.String(), "kept_on", owner)
+				continue
+			}
 			if t.Kind == trigger.KindKey {
 				if keptKey != "" {
 					// At most one keyboard trigger per action: drop extras,
@@ -122,6 +181,7 @@ func (s *Store) Load(raw map[string][]string) {
 				}
 				keptKey = t.String()
 			}
+			claimed = append(claimed, claim{t: t, owner: id})
 			out = append(out, t)
 		}
 		if len(out) > 0 {
@@ -165,6 +225,17 @@ func (s *Store) Get(id ActionID) ([]trigger.Trigger, bool) {
 // Keyboard and joystick triggers can never collide because trigger.Equal
 // compares Kind first, so the two kinds are separate conflict namespaces
 // without a special case here.
+//
+// The steal loop breaks after the FIRST victim, and that is exact rather
+// than approximate: a trigger belongs to at most one action, and the
+// invariant is inductive over every mutator. Load establishes it (it drops a
+// trigger an earlier action already claimed), Add preserves it (it takes the
+// one holder's copy before adding its own), and RemoveAt/Clear only ever
+// remove. So there is never a second victim to find, and Stolen -- which
+// names exactly one action, all the way out to StolenDTO and the UI's
+// "taken from ..." line -- can stay a single value. Sweeping the whole map
+// anyway would not report any more than this does; it would only hide a
+// broken invariant instead of letting it surface.
 //
 // An action holds AT MOST ONE keyboard trigger: adding a second chord
 // replaces the first. internal/hotkeys registers one chord per action ID

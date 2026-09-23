@@ -2,6 +2,7 @@ package keybinds_test
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -311,5 +312,108 @@ func TestLoadWarnsAboutAnUnparseableTrigger(t *testing.T) {
 	}
 	if got, _ := s.Get("global.ptt"); len(got) != 1 {
 		t.Fatalf("Get = %+v, want the one parseable trigger kept", got)
+	}
+}
+
+// TestLoadDropsATriggerAlreadyClaimedByAnotherAction pins cross-action
+// uniqueness, the third invariant Load is the boundary for.
+//
+// Load used to enforce "at most one keyboard chord per action" but never
+// checked whether the same trigger appeared under TWO action IDs. A
+// hand-edited or merged config with one button under both global.ptt and
+// global.push_to_mute loaded happily, and a single press then opened PTT
+// *and* push-to-mute with nothing in the UI indicating the collision -- Add
+// refuses to create that state, so nothing downstream is written to survive
+// it.
+func TestLoadDropsATriggerAlreadyClaimedByAnotherAction(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt":          {"joy:stick-c3:btn5"},
+		"global.push_to_mute": {"joy:stick-c3:btn5"},
+	})
+
+	ptt, _ := s.Get("global.ptt")
+	if len(ptt) != 1 || !ptt[0].Equal(joy("stick-c3", 4)) {
+		t.Fatalf("global.ptt = %+v, want the contested trigger kept on the first action", ptt)
+	}
+	if got, ok := s.Get("global.push_to_mute"); ok && len(got) != 0 {
+		t.Errorf("global.push_to_mute = %+v, want nothing -- one press must not fire two actions", got)
+	}
+
+	// Destructive on the next Save, exactly like the other two drops, so it
+	// has to be diagnosable.
+	out := buf.String()
+	if out == "" {
+		t.Fatal("Load dropped a doubly-claimed trigger silently; the next Save rewrites " +
+			"the user's file without it and nothing anywhere records why")
+	}
+	if !strings.Contains(out, "global.push_to_mute") {
+		t.Errorf("warning does not name the action that lost the trigger: %q", out)
+	}
+	if !strings.Contains(out, "kept_on=global.ptt") {
+		t.Errorf("warning does not name the action that kept it: %q", out)
+	}
+}
+
+// TestLoadResolvesACollisionTheSameWayEveryTime is the half that map
+// iteration cannot deliver.
+//
+// Which action keeps a contested trigger has to be stable across launches.
+// With map-order iteration the same file loads differently each run, so the
+// binding appears to hop between two rows at random -- and the next Save
+// persists whichever way that particular run happened to go. Ordering by
+// action ID makes it a property of the FILE, not of the run.
+func TestLoadResolvesACollisionTheSameWayEveryTime(t *testing.T) {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	raw := map[string][]string{
+		"global.ptt":          {"joy:stick-c3:btn5"},
+		"global.push_to_mute": {"joy:stick-c3:btn5"},
+		"global.mute_toggle":  {"joy:stick-c3:btn5"},
+	}
+	// Enough runs that map iteration order would almost certainly have
+	// varied at least once if it were still in play.
+	for i := 0; i < 50; i++ {
+		s := keybinds.New()
+		s.Load(raw)
+		if got, _ := s.Get("global.mute_toggle"); len(got) != 1 {
+			t.Fatalf("run %d: global.mute_toggle = %+v, want the trigger -- the "+
+				"lowest action ID must win every time", i, got)
+		}
+		if got, ok := s.Get("global.ptt"); ok && len(got) != 0 {
+			t.Fatalf("run %d: global.ptt = %+v, want nothing", i, got)
+		}
+		if got, ok := s.Get("global.push_to_mute"); ok && len(got) != 0 {
+			t.Fatalf("run %d: global.push_to_mute = %+v, want nothing", i, got)
+		}
+	}
+}
+
+// TestLoadDoesNotSpendTheChordSlotOnAStolenChord guards the ordering of the
+// two rules inside Load. A chord an earlier action already owns must not
+// also consume this action's single keyboard slot, or the file's second
+// chord -- the only one that could still be honoured -- is dropped too and
+// the action ends up bound to nothing.
+func TestLoadDoesNotSpendTheChordSlotOnAStolenChord(t *testing.T) {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := keybinds.New()
+	s.Load(map[string][]string{
+		"global.ptt":          {"F1"},
+		"global.push_to_mute": {"F1", "F2"},
+	})
+	got, _ := s.Get("global.push_to_mute")
+	if len(got) != 1 || !got[0].Equal(key(t, "F2")) {
+		t.Errorf("global.push_to_mute = %+v, want F2 -- F1 was already taken, "+
+			"so it must not also consume the one chord slot", got)
 	}
 }
