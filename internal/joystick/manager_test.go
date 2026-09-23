@@ -429,3 +429,59 @@ func TestConcurrentSuspendNeverReordersReleaseBeforePress(t *testing.T) {
 
 	assertNeverReleasedBeforePressed(t, rec.snapshot())
 }
+
+// TestPressKindDoesNotReFireAcrossAnApplyWhileHeld is the I2 guard.
+//
+// takeActiveLocked used to empty ALL of m.active while returning only the
+// hold actions that owe a Released. A press-kind action bound to a button
+// that was still physically down therefore looked newly active on the very
+// next tick and fired a SECOND Pressed with no Released between them.
+//
+// Apply is not a rare event: any server radio-list update reaches
+// App.RefreshKeybinds -> applyHotkeys -> jm.Apply. So a mute-toggle on a
+// HOTAS button, held while routine server traffic lands, toggled twice and
+// did nothing -- "my mute button did nothing". The keyboard path cannot do
+// this at all (it is event-driven and never re-presses), so it was a pure
+// source asymmetry.
+func TestPressKindDoesNotReFireAcrossAnApplyWhileHeld(t *testing.T) {
+	m, src, rec := testManager(t)
+	binds := map[string][]Binding{"global.mute_toggle": {pressBind(4)}}
+	m.Apply(binds)
+
+	src.hold(tbtn(4))
+	m.tick()
+	eq(t, rec.events(), []string{"down:global.mute_toggle"})
+
+	// An unrelated reapply -- the server added a radio -- while the button is
+	// still down.
+	m.Apply(binds)
+	m.tick()
+	m.tick()
+	eq(t, rec.events(), []string{"down:global.mute_toggle"})
+
+	// The button is still genuinely latched: releasing and pressing again is
+	// a new toggle, and must still fire.
+	src.release(tbtn(4))
+	m.tick()
+	src.hold(tbtn(4))
+	m.tick()
+	eq(t, rec.events(), []string{"down:global.mute_toggle", "down:global.mute_toggle"})
+}
+
+// TestPressKindDoesNotReFireAcrossASuspendWhileHeld is the Suspend half of
+// I2: Suspend shares takeActiveLocked with Apply, so a capture opened and
+// closed while a press-kind button is held used to fire the action a second
+// time on resume.
+func TestPressKindDoesNotReFireAcrossASuspendWhileHeld(t *testing.T) {
+	m, src, rec := testManager(t)
+	m.Apply(map[string][]Binding{"global.mute_toggle": {pressBind(4)}})
+
+	src.hold(tbtn(4))
+	m.tick()
+	eq(t, rec.events(), []string{"down:global.mute_toggle"})
+
+	m.Suspend()
+	m.Resume()
+	m.tick()
+	eq(t, rec.events(), []string{"down:global.mute_toggle"})
+}

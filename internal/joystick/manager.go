@@ -406,14 +406,33 @@ func (m *Manager) tick() {
 	}
 }
 
-// takeActiveLocked empties the active set and returns the HOLD actions that
-// owe a Released. Caller holds m.mu.
+// takeActiveLocked releases the HOLD actions that owe a Released, removing
+// only those from the active set, and returns them. Caller holds m.mu.
+//
+// PRESS-KIND ACTIONS STAY LATCHED, deliberately. They never owe a Released,
+// so there is no edge to emit for them here -- and clearing them anyway made
+// the next tick see a button that is still physically down as newly active
+// and fire a SECOND Pressed with no Released between. Apply is not rare (any
+// server radio-list update reaches it via App.RefreshKeybinds), so a
+// mute-toggle held on a HOTAS button toggled twice and netted a no-op.
+//
+// Latching them is the simpler of the two available fixes -- the alternative,
+// re-deriving the press set afterwards, needs the NEW hold map at a point
+// where Apply still has to judge releases against the OLD one. Keeping them
+// latched leaves the edge accounting exactly as it was for hold actions and
+// changes nothing for press actions except the spurious repeat: a latched
+// press id is cleared by the first tick that observes its button up (no
+// Released is emitted, which is correct for press kind), and a press action
+// rebound onto some OTHER already-held button stays quiet until the user
+// lets go -- which is the right side to err on for an action that toggles
+// something.
 func (m *Manager) takeActiveLocked() []string {
 	var out []string
 	for id := range m.active {
-		if m.hold[id] {
-			out = append(out, id)
+		if !m.hold[id] {
+			continue
 		}
+		out = append(out, id)
 		delete(m.active, id)
 	}
 	return out
