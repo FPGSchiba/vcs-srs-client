@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1753,3 +1754,95 @@ func (emptyJoySource) Poll() (joystick.State, error) {
 	return joystick.State{Held: map[trigger.JoyButton]struct{}{}}, nil
 }
 func (emptyJoySource) Close() {}
+
+// hotkeyActions returns the action IDs carried by every recorded event of the
+// given name, in order. The hotkey payloads are anonymous structs, so this
+// reads the field reflectively rather than re-declaring the shape here.
+func (r *recordingEmitter) hotkeyActions(name string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for i, e := range r.events {
+		if e != name {
+			continue
+		}
+		f := reflect.ValueOf(r.payloads[i]).FieldByName("ActionID")
+		if f.IsValid() && f.Kind() == reflect.String {
+			out = append(out, f.String())
+		}
+	}
+	return out
+}
+
+// TestJoystickCaptureBoundButtonThenFires is the other half of the C1 guard.
+//
+// TestJoystickCaptureBindsEndToEnd stops at "the trigger was STORED", and
+// "the binding exists but nothing happens" is precisely the class of bug that
+// has already shipped on this branch once: both halves individually correct,
+// the seam between them dead. Capture suspends the joystick manager and hands
+// the button to the capture sink; if the binding is applied while suspended
+// and nothing re-arms dispatch on EndCapture, the freshly captured button is
+// inert for the rest of the session and every unit test still passes.
+//
+// So this drives the WHOLE user journey -- BeginCapture, baseline poll, hold,
+// release, EndCapture, then press the captured button for real -- and asserts
+// hotkey:pressed and hotkey:released actually fire for the action that was
+// bound.
+func TestJoystickCaptureBoundButtonThenFires(t *testing.T) {
+	a, em, _ := newTestApp(t)
+
+	src := newControllableJoySource("stick-c3")
+	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm.PollInterval = 2 * time.Millisecond
+	a.SetJoystickBackend(jm)
+	defer jm.Close()
+
+	token := a.BeginCapture("global.ptt")
+	if token == 0 {
+		t.Fatal("BeginCapture returned no token")
+	}
+
+	// One full poll after arming establishes the capture baseline, so the
+	// press below is seen as a delta rather than as an already-down button.
+	base := src.pollCount()
+	waitFor(t, 2*time.Second, "the poll loop never sampled the source after arming a capture",
+		func() bool { return src.pollCount() > base+1 })
+
+	btn := trigger.JoyButton{Device: "stick-c3", Button: 4}
+	src.setHeld(btn, true)
+	held := src.pollCount()
+	waitFor(t, 2*time.Second, "the poll loop stopped sampling while the button was held",
+		func() bool { return src.pollCount() > held+1 })
+	src.setHeld(btn, false)
+
+	waitFor(t, 2*time.Second, "global.ptt gained no joystick trigger from the capture",
+		func() bool { return joyTriggerCount(a, "global.ptt") == 1 })
+
+	// Capture only ever emits releases, never presses: nothing may have
+	// transmitted while the user was binding.
+	if got := em.count(events.EventHotkeyPressed); got != 0 {
+		t.Fatalf("hotkey:pressed fired %d times DURING capture; binding a button must not transmit", got)
+	}
+
+	a.EndCapture(token)
+
+	// The journey's point: press the button that was just captured.
+	src.setHeld(btn, true)
+	waitFor(t, 2*time.Second,
+		"the captured button fired nothing when pressed: the binding was stored but is inert, "+
+			"which is exactly the 'it exists and nothing happens' failure capture is meant to end",
+		func() bool { return em.count(events.EventHotkeyPressed) >= 1 })
+
+	src.setHeld(btn, false)
+	waitFor(t, 2*time.Second,
+		"the captured button emitted a press but never a release; global.ptt is a hold action, "+
+			"so this is a stuck transmission",
+		func() bool { return em.count(events.EventHotkeyReleased) >= 1 })
+
+	if got := em.hotkeyActions(events.EventHotkeyPressed); len(got) != 1 || got[0] != "global.ptt" {
+		t.Errorf("hotkey:pressed actions = %v, want exactly [global.ptt]", got)
+	}
+	if got := em.hotkeyActions(events.EventHotkeyReleased); len(got) != 1 || got[0] != "global.ptt" {
+		t.Errorf("hotkey:released actions = %v, want exactly [global.ptt]", got)
+	}
+}
