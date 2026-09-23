@@ -73,9 +73,18 @@ describe("useSettingsSync", () => {
   it("keeps the store live via keybinds:changed", async () => {
     render(<Probe />);
     emit(EV.keybindsChanged, [
-      { action_id: "global.ptt", label: "Global PTT", desc: "", category: "global", kind: "hold", chord: "F9" },
+      {
+        action_id: "global.ptt",
+        label: "Global PTT",
+        desc: "",
+        category: "global",
+        kind: "hold",
+        triggers: [
+          { kind: "key", chord: "F9", device: "", device_name: "", label: "F9", connected: true },
+        ],
+      },
     ]);
-    expect(useSettings.getState().keybinds[0].chord).toBe("F9");
+    expect(useSettings.getState().keybinds[0].triggers[0].chord).toBe("F9");
   });
 
   it("keeps the store live via hotkeys:state", async () => {

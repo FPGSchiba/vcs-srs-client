@@ -22,16 +22,19 @@ describe("settings store", () => {
   });
 
   it("replaces the whole keybind list rather than merging", () => {
+    const trigger = (chord: string) => [
+      { kind: "key" as const, chord, device: "", device_name: "", label: chord, connected: true },
+    ];
     useSettings.getState().setKeybinds([
-      { action_id: "a", label: "A", desc: "", category: "global", kind: "press", chord: "F1" },
-      { action_id: "b", label: "B", desc: "", category: "global", kind: "press", chord: "F2" },
+      { action_id: "a", label: "A", desc: "", category: "global", kind: "press", triggers: trigger("F1") },
+      { action_id: "b", label: "B", desc: "", category: "global", kind: "press", triggers: trigger("F2") },
     ]);
     useSettings.getState().setKeybinds([
-      { action_id: "a", label: "A", desc: "", category: "global", kind: "press", chord: "F3" },
+      { action_id: "a", label: "A", desc: "", category: "global", kind: "press", triggers: trigger("F3") },
     ]);
     const kb = useSettings.getState().keybinds;
     expect(kb).toHaveLength(1);
-    expect(kb[0].chord).toBe("F3");
+    expect(kb[0].triggers[0].chord).toBe("F3");
   });
 
   it("stores hotkey registration state", () => {

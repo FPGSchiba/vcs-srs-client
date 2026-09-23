@@ -75,8 +75,17 @@ describe("CommsApp settings sync", () => {
   it("applies a keybind change made in the main window, without reopening", async () => {
     render(<CommsApp />);
     emit(EV.keybindsChanged, [
-      { action_id: "radio.1.ptt", label: "R01 (PTT)", desc: "", category: "per_radio", kind: "hold", chord: "F7" },
+      {
+        action_id: "radio.1.ptt",
+        label: "R01 (PTT)",
+        desc: "",
+        category: "per_radio",
+        kind: "hold",
+        triggers: [
+          { kind: "key", chord: "F7", device: "", device_name: "", label: "F7", connected: true },
+        ],
+      },
     ]);
-    expect(useSettings.getState().keybinds[0].chord).toBe("F7");
+    expect(useSettings.getState().keybinds[0].triggers[0].chord).toBe("F7");
   });
 });

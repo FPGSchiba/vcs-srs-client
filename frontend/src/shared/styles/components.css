@@ -1196,6 +1196,28 @@ input:focus, select:focus, textarea:focus {
 }
 .kbd-row .plus { color: var(--tx-4); font-family: var(--ff-mono); font-size: 9px; }
 
+/* ========== Trigger chip (multi-trigger keybind rows) ========== */
+.trigger-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.trigger-chip .kbd { cursor: default; }
+.kbd.disconnected { opacity: 0.5; color: var(--tx-4); }
+.trigger-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--tx-4);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.trigger-remove:hover { color: var(--ac-alert); }
+
 /* ========== Tooltip-like helpers ========== */
 .sep-v {
   width: 1px;

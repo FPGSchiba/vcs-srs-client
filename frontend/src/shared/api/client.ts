@@ -6,6 +6,7 @@ import type {
   HotkeyPermissionResult,
   Capture,
   SetKeybindResult,
+  JoystickState,
 } from "../store/settings";
 
 export interface RadioDTO {
@@ -53,17 +54,26 @@ export const api = {
   getSettings: (): Promise<Settings> => App.GetSettings() as Promise<Settings>,
   setSettings: (s: Settings): Promise<void> => App.SetSettings(s) as Promise<void>,
   getKeybinds: (): Promise<Keybind[]> => App.GetKeybinds() as Promise<Keybind[]>,
-  setKeybind: (actionId: string, cap: Capture): Promise<SetKeybindResult> =>
-    App.SetKeybind(actionId, cap) as Promise<SetKeybindResult>,
+  addTrigger: (actionId: string, cap: Capture): Promise<SetKeybindResult> =>
+    App.AddTrigger(actionId, cap) as Promise<SetKeybindResult>,
+  removeTrigger: (actionId: string, index: number): Promise<void> =>
+    App.RemoveTrigger(actionId, index) as Promise<void>,
   clearKeybind: (actionId: string): Promise<void> =>
     App.ClearKeybind(actionId) as Promise<void>,
   // beginCapture returns a CAPTURE TOKEN that must be handed back to
   // endCapture. The backend only re-arms OS hotkeys for the token of the
   // capture that is still current, which is what makes switching rows
   // mid-capture safe without the frontend ordering two IPC calls.
-  beginCapture: (): Promise<number> => App.BeginCapture() as Promise<number>,
+  //
+  // Takes the action id because a completed joystick capture is bound by the
+  // backend itself, which therefore has to know which action it belongs to
+  // (unlike a keyboard chord, which still round-trips through addTrigger).
+  beginCapture: (actionId: string): Promise<number> =>
+    App.BeginCapture(actionId) as Promise<number>,
   endCapture: (token: number): Promise<void> => App.EndCapture(token) as Promise<void>,
   getHotkeyState: (): Promise<HotkeyState> => App.GetHotkeyState() as Promise<HotkeyState>,
+  getJoystickState: (): Promise<JoystickState> =>
+    App.GetJoystickState() as Promise<JoystickState>,
   // requestHotkeyPermission fires the OS prompt for global hotkey capture
   // (macOS Accessibility trust). The resolved `prompted` is NOT a grant signal
   // -- see HotkeyPermissionResult. A grant arrives later on hotkeys:state,
