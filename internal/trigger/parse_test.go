@@ -52,18 +52,18 @@ func TestParseRoundTrip(t *testing.T) {
 
 func TestParseRejects(t *testing.T) {
 	bad := []string{
-		"",                              // empty
-		"joy:",                          // no ref
-		"joy:stick-c3",                  // no input
-		"joy:stick-c3:btn0",             // buttons are 1-indexed in text
-		"joy:stick-c3:btn129",           // above 128
-		"joy:stick-c3:btn",              // no number
-		"joy:stick-c3:hat0.up",          // hats are 1-indexed in text
-		"joy:stick-c3:hat5.up",          // above HatCount
-		"joy:stick-c3:hat1.sideways",    // not a direction
-		"joy:stick c3:btn1",             // space is not a legal device id char
-		"joy:a:btn1+b:btn2+c:btn3",      // only one modifier is supported
-		"joy:stick-c3:wheel3",           // unknown input kind
+		"",                           // empty
+		"joy:",                       // no ref
+		"joy:stick-c3",               // no input
+		"joy:stick-c3:btn0",          // buttons are 1-indexed in text
+		"joy:stick-c3:btn129",        // above 128
+		"joy:stick-c3:btn",           // no number
+		"joy:stick-c3:hat0.up",       // hats are 1-indexed in text
+		"joy:stick-c3:hat5.up",       // above HatCount
+		"joy:stick-c3:hat1.sideways", // not a direction
+		"joy:stick c3:btn1",          // space is not a legal device id char
+		"joy:a:btn1+b:btn2+c:btn3",   // only one modifier is supported
+		"joy:stick-c3:wheel3",        // unknown input kind
 	}
 	for _, s := range bad {
 		if got, err := trigger.Parse(s); err == nil {

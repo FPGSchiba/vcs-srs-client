@@ -56,7 +56,7 @@ func TestButtonLabel(t *testing.T) {
 		b    trigger.Button
 		want string
 	}{
-		{0, "Btn 1"},   // 0-indexed internally, 1-indexed for humans
+		{0, "Btn 1"}, // 0-indexed internally, 1-indexed for humans
 		{11, "Btn 12"},
 		{127, "Btn 128"},
 		{trigger.HatButton(0, 0), "Hat 1 ↑"},
