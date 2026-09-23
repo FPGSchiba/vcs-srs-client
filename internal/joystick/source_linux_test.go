@@ -82,3 +82,23 @@ func TestIsDigitiserButton(t *testing.T) {
 		}
 	}
 }
+
+// TestNewOSSourceDoesNotFailOnEnumeration is the I3 guard on the Linux side.
+//
+// NewOSSource used to enumerate eagerly and return the error, which on Linux
+// meant a permission denial destroyed the manager before it existed --
+// collapsing "denied, here is the fix" into the same {Supported:false,
+// Error:""} macOS reports for "no backend at all". The enumeration error now
+// belongs to Manager.New's probe, which keeps Supported() true and surfaces
+// the message. Construction must therefore succeed whatever /dev/input says.
+func TestNewOSSourceDoesNotFailOnEnumeration(t *testing.T) {
+	src, err := NewOSSource()
+	if err != nil {
+		t.Fatalf("NewOSSource() error = %v, want nil -- an enumeration or permission "+
+			"failure must reach the UI through Manager.lastErr, not delete the manager", err)
+	}
+	if src == nil {
+		t.Fatal("NewOSSource() returned a nil Source")
+	}
+	src.Close()
+}

@@ -1340,3 +1340,76 @@ func TestApplyHotkeysBalancesEdgesWhenAPerRadioActionDisappears(t *testing.T) {
 
 	waitUntil(t, time.Second, func() bool { return em.count(events.EventHotkeyPressed) >= 2 })
 }
+
+// deniedJoySource is a Source whose enumeration fails the way the Linux
+// backend's does for a user who is not in the 'input' group: a real,
+// actionable error that is NOT ErrUnsupported.
+type deniedJoySource struct{}
+
+func (deniedJoySource) Devices() ([]joystick.Device, error) {
+	return nil, errors.New("joystick: cannot read /dev/input (add your user to the 'input' group, then log out and back in)")
+}
+func (deniedJoySource) Poll() (joystick.State, error) { return joystick.State{}, errors.New("denied") }
+func (deniedJoySource) Close()                        {}
+
+// unsupportedJoySource is the macOS/other-platform stub: no backend exists,
+// and there is nothing the user can do about it.
+type unsupportedJoySource struct{}
+
+func (unsupportedJoySource) Devices() ([]joystick.Device, error) { return nil, joystick.ErrUnsupported }
+func (unsupportedJoySource) Poll() (joystick.State, error) {
+	return joystick.State{}, joystick.ErrUnsupported
+}
+func (unsupportedJoySource) Close() {}
+
+// TestJoystickStateDistinguishesDeniedFromUnsupported is the I3 guard.
+//
+// A permission denial and "this platform has no backend" used to arrive at
+// the UI as the same {Supported:false, Error:""}: NewOSSource returned the
+// permission error, main.go logged it and never built the manager, so sb.joy
+// stayed nil. Keybinds.tsx gates its banner on supported && error, so the
+// carefully-worded "add your user to the 'input' group" message could not
+// reach the user by any path -- spec section 8 unmet end to end, and section
+// 11's "unsupported is informational, not an error" collapsed into it.
+//
+// Denied must be Supported:true with a non-empty Error (the banner fires);
+// unsupported must be Supported:false with no Error (the affordance is
+// hidden and nothing is reported as broken).
+func TestJoystickStateDistinguishesDeniedFromUnsupported(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("denied", func(t *testing.T) {
+		a, _, _ := newTestApp(t)
+		jm := joystick.New(deniedJoySource{}, a, discard)
+		a.SetJoystickBackend(jm)
+		defer jm.Close()
+
+		got := a.GetJoystickState()
+		if !got.Supported {
+			t.Error("Supported must stay true for a permission denial: the user CAN fix it, " +
+				"and the UI must offer the banner rather than hiding the whole feature")
+		}
+		if got.Error == "" {
+			t.Fatal("Error must carry the actionable message for a permission denial")
+		}
+		if !strings.Contains(got.Error, "input") {
+			t.Errorf("Error = %q, want it to name the 'input' group remedy", got.Error)
+		}
+	})
+
+	t.Run("unsupported", func(t *testing.T) {
+		a, _, _ := newTestApp(t)
+		jm := joystick.New(unsupportedJoySource{}, a, discard)
+		a.SetJoystickBackend(jm)
+		defer jm.Close()
+
+		got := a.GetJoystickState()
+		if got.Supported {
+			t.Error("Supported must be false when the platform has no backend")
+		}
+		if got.Error != "" {
+			t.Errorf("Error = %q, want empty: unsupported is informational, not a failure "+
+				"the user can act on", got.Error)
+		}
+	})
+}

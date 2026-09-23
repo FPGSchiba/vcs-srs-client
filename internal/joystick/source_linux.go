@@ -46,12 +46,25 @@ type linuxDevice struct {
 const inputDevDir = "/dev/input"
 
 // NewOSSource builds the platform joystick source.
+//
+// It deliberately does NOT enumerate here, and therefore never fails. On
+// Linux the only way construction could fail was the permission path -- a
+// user not in the 'input' group -- and failing for it destroyed the very
+// distinction permissionError exists to make: main.go drops the manager on a
+// construction error, so sb.joy stayed nil, GetJoystickState returned
+// {Supported:false, Error:""}, and a denied Linux box was byte-identical to
+// macOS's "no backend at all". The actionable message ("add your user to the
+// 'input' group") only ever reached the log file, and Keybinds.tsx gates its
+// banner on supported && error, which that state can never satisfy.
+//
+// Returning a live Source instead hands the enumeration -- and its error --
+// to Manager.New's probe, which records ANY non-ErrUnsupported error in
+// lastErr while leaving Supported() true. Denied then reads as
+// {Supported:true, Error:"...input group..."} and the banner fires, while
+// ErrUnsupported (macOS, source_other.go) still reads as
+// {Supported:false, Error:""}. That split is spec sections 8 and 11.
 func NewOSSource() (Source, error) {
-	s := &linuxSource{devices: map[trigger.DeviceID]*linuxDevice{}}
-	if _, err := s.Devices(); err != nil {
-		return nil, err
-	}
-	return s, nil
+	return &linuxSource{devices: map[trigger.DeviceID]*linuxDevice{}}, nil
 }
 
 // isJoystickButton reports whether c is one of the EV_KEY codes the Linux
