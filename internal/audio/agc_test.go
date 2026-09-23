@@ -2,6 +2,7 @@ package audio
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 )
 
@@ -10,6 +11,16 @@ func sine(amp float32) []float32 {
 	f := make([]float32, FrameSamples)
 	for i := range f {
 		f[i] = amp * float32(math.Sin(2*math.Pi*float64(i)/float64(FrameSamples)*10))
+	}
+	return f
+}
+
+// whiteNoise fills a frame with deterministic pseudo-random noise.
+func whiteNoise(amp float32, seed int64) []float32 {
+	r := rand.New(rand.NewSource(seed))
+	f := make([]float32, FrameSamples)
+	for i := range f {
+		f[i] = amp * float32(r.Float64()*2-1)
 	}
 	return f
 }
