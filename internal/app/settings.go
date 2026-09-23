@@ -1040,6 +1040,38 @@ func (a *App) applyHotkeys() {
 
 	sb.mu.Lock()
 	jm := sb.joy
+	// The UNION of the old and the new hold sets is what is live across both
+	// Apply calls below. Neither map alone is safe there, because both
+	// directions of change are in flight at once:
+	//
+	//   - An action LEAVING the registry (the server removed radio 3 while
+	//     radio.3.ptt was held) is absent from the new map, so judging the
+	//     synchronous Released that Apply emits against it would make
+	//     isHold() false, skip presses.release(), and leak the refcount at 1
+	//     -- deadening the action for the session.
+	//   - An action ARRIVING in this apply (the server ADDED radio 3, already
+	//     bound to a joystick button in config.toml) is absent from the old
+	//     map, so a press landing between jm.Apply returning and the new map
+	//     being installed would skip presses.press(); its later Released then
+	//     hits presses.release() with n <= 0 and is swallowed. Stuck
+	//     transmission.
+	//
+	// The union answers both correctly: an id is treated as owing a Released
+	// if EITHER view says so, which is the conservative side -- an unmatched
+	// increment is reconciled by the release that follows, whereas a missed
+	// one is not recoverable.
+	union := make(map[string]bool, len(holds)+len(sb.holds))
+	for id, hold := range sb.holds {
+		if hold {
+			union[id] = true
+		}
+	}
+	for id, hold := range holds {
+		if hold {
+			union[id] = true
+		}
+	}
+	sb.holds = union
 	sb.mu.Unlock()
 
 	// A rebind drops WHATEVER WAS HELD on each manager -- not just an action
@@ -1050,16 +1082,17 @@ func (a *App) applyHotkeys() {
 	// goroutine, from inside Apply, and each one goes back through
 	// a.Released -> isHold() -> presses.release().
 	//
-	// So sb.holds must still be the map that was live when those actions
-	// were PRESSED, which is why it is assigned below rather than here. An
-	// action that has just disappeared from the registry -- the server
-	// removed radio 3 while radio.3.ptt was held -- is absent from the new
-	// map, so judging its release against it would make isHold() false,
-	// skip presses.release() entirely, and leak the refcount at 1: the
-	// action is then permanently deadened, because the next genuine press
-	// counts 1 -> 2 and is swallowed as "already held by another source".
+	// So sb.holds must still cover every action that was live when those
+	// actions were PRESSED, which is why the UNION is installed above and
+	// the new map only below. An action that has just disappeared from the
+	// registry -- the server removed radio 3 while radio.3.ptt was held --
+	// is absent from the new map, so judging its release against that map
+	// alone would make isHold() false, skip presses.release() entirely, and
+	// leak the refcount at 1: the action is then permanently deadened,
+	// because the next genuine press counts 1 -> 2 and is swallowed as
+	// "already held by another source".
 	//
-	// With the old map in place through both Applies, each manager balances
+	// With the union in place through both Applies, each manager balances
 	// its own edges and there is nothing left over -- which is why there is
 	// no blanket sb.presses.reset() here any more. That sweep was itself the
 	// residual stuck-PTT race: jm.Apply releases notifyMu on return, so a

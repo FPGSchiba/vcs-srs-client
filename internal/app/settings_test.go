@@ -1492,3 +1492,87 @@ func TestJoystickCaptureBindsEndToEnd(t *testing.T) {
 		"global.ptt gained no joystick trigger after a full press/release during capture",
 		func() bool { return joyTriggerCount(a, "global.ptt") == 1 })
 }
+
+// probingRegistrar runs a probe from inside Register -- that is, from inside
+// sb.hk.Apply, which is the window applyHotkeys opens between computing the
+// new holds map and installing it. It is the only deterministic seam into
+// that window, which is otherwise microseconds wide.
+type probingRegistrar struct {
+	mu    sync.Mutex
+	probe func()
+}
+
+func (p *probingRegistrar) setProbe(fn func()) {
+	p.mu.Lock()
+	p.probe = fn
+	p.mu.Unlock()
+}
+
+func (p *probingRegistrar) Register(string, chord.Chord, bool, hotkeys.Handler) error {
+	p.mu.Lock()
+	probe := p.probe
+	p.mu.Unlock()
+	if probe != nil {
+		probe()
+	}
+	return nil
+}
+
+func (p *probingRegistrar) UnregisterAll() {}
+
+// TestApplyHotkeysTreatsANewHoldActionAsHoldInsideTheApplyWindow is the M1
+// guard.
+//
+// sb.holds is assigned AFTER both Apply calls, which is what keeps a
+// DISAPPEARING action's release judged against the map that was live when it
+// was pressed. The symmetric case is an action APPEARING in this apply -- a
+// per-radio action for a radio the server just added, already bound in
+// config.toml -- that gets pressed inside the same window: isHold() then
+// reads the OLD map, returns false, skips presses.press(), and the eventual
+// Released hits presses.release() with n <= 0 and is swallowed. Stuck
+// transmission, the exact failure mode the previous wave removed on the
+// other side.
+//
+// The fix is to install the UNION of old and new holds before the Applies and
+// the new map after, so both directions are covered. This pins it by probing
+// isHold from inside sb.hk.Apply.
+func TestApplyHotkeysTreatsANewHoldActionAsHoldInsideTheApplyWindow(t *testing.T) {
+	st := state.New()
+	reg := &probingRegistrar{}
+	a, _ := newTestAppOn(t, st, reg)
+
+	c, err := chord.FromCode("F7", false, false, false, false)
+	if err != nil {
+		t.Fatalf("chord.FromCode: %v", err)
+	}
+	// Bound on disk before the radio exists -- exactly what loading
+	// config.toml at startup produces.
+	a.settings.kb.Add(keybinds.ActionID("radio.3.ptt"), trigger.Key(c))
+
+	var mu sync.Mutex
+	var seen []bool
+	reg.setProbe(func() {
+		mu.Lock()
+		seen = append(seen, a.isHold("radio.3.ptt"))
+		mu.Unlock()
+	})
+
+	st.SetSelf("me", &srspb.ClientInfo{Name: "me"})
+	st.SetRadios("me", &srspb.RadioInfo{Radios: []*srspb.Radio{{Id: 3, Name: "RADIO"}}})
+
+	waitFor(t, time.Second, "radio.3.ptt never reached the registrar", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen) > 0
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i, hold := range seen {
+		if !hold {
+			t.Fatalf("isHold(radio.3.ptt) = false on probe %d, inside the Apply window; "+
+				"a press landing here skips presses.press() and its Released is later "+
+				"swallowed with n <= 0 -- a stuck transmission", i)
+		}
+	}
+}
