@@ -76,9 +76,12 @@ jobs:
       # application instead of being consumed. It must be on EVERY Go
       # invocation -- see the note at the top of Taskfile.yml. Without it
       # these steps would compile and test a binary that behaves differently
-      # from the one we ship. Also true on all three platforms: purego picks
-      # the pure-Go backend per-OS (X11 on Linux, no equivalent flag needed
-      # on macOS/Windows, but the tag must still be passed uniformly).
+      # from the one we ship. This is a real per-OS concern, not just a Linux
+      # one: gohook's build tags route darwin && purego to darwin.go,
+      # windows && purego to windows.go, and linux && purego (sans wayland) to
+      # x11.go -- if the tag is absent (or dropped from just one platform's
+      # step), that platform falls through to hook_cgo.go instead, so all
+      # three need it for the same reason.
       - name: Go vet
         run: go vet -tags purego ./...
 
