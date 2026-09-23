@@ -281,7 +281,11 @@ func (s *linuxSource) Devices() ([]Device, error) {
 			dev.Close()
 			continue
 		}
+		// Sanitised at the boundary: an evdev name is a raw char name[80]
+		// with no encoding guarantee, and it is PERSISTED to config.toml.
+		// See sanitiseDeviceName for what an invalid byte costs there.
 		name, _ := dev.Name()
+		name = sanitiseDeviceName(name)
 		id := stableID(p, name)
 		if seen[id] {
 			dev.Close()

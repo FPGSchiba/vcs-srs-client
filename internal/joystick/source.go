@@ -11,6 +11,7 @@ package joystick
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
@@ -34,8 +35,37 @@ type Device struct {
 	// trigger.DeviceID -- backends sanitise.
 	ID trigger.DeviceID
 	// Name is the human-readable product name, shown in the UI and persisted
-	// as display metadata so an absent device is still nameable.
+	// as display metadata so an absent device is still nameable. Always
+	// valid UTF-8 -- backends sanitise, see sanitiseDeviceName.
 	Name string
+}
+
+// sanitiseDeviceName makes an OS-supplied product name safe to PERSIST.
+//
+// Name is written to config.toml under [keybind_devices], and the TOML
+// encoder writes an invalid UTF-8 byte out raw. The next Load then fails with
+// "invalid UTF-8 byte: 0xff", main.go falls back to config.Default() with
+// cfgPath still set, and the first subsequent Save rewrites the file -- every
+// setting and keybind the user had, gone. That is the exact hazard
+// config.quoteTOML was written for; quoteTOML only covers KeybindValue, and
+// the device name is the other string this package puts in that file.
+//
+// Fixing it HERE rather than in the encoder is deliberate: the invariant is
+// "a Device.Name is valid UTF-8", and it belongs at the boundary where
+// untrusted OS data arrives, not at the last layer that happens to notice.
+//
+// Only the Linux backend needs it in practice -- Windows names come from
+// utf16.Decode via di8's toString and cannot be invalid -- but an evdev
+// device name is a raw char name[80] the kernel copies from the device (or
+// from whatever a uinput client set: virtual-HOTAS tools and remappers write
+// that field freely), with no encoding guarantee of any kind. It lives in
+// this platform-neutral file so it is testable without a Linux host.
+//
+// U+FFFD, not a drop: a name that came back as garbage should LOOK like
+// garbage in the UI rather than silently shortening to something that reads
+// like a real product name.
+func sanitiseDeviceName(s string) string {
+	return strings.ToValidUTF8(s, "�")
 }
 
 // State is a snapshot of every held input across all connected devices.
