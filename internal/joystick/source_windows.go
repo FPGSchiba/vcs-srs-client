@@ -126,9 +126,17 @@ func NewOSSource(log *slog.Logger) (Source, error) {
 // when nothing is open, and reporting a poll error every 10ms would hand
 // lastErrLocked's poll-wins precedence a permanent, less useful message than
 // the enumeration one that names the actual failed call.
+// The stub reports the SAME error for the life of the process: it holds no
+// helper window and no DirectInput object, and nothing re-invokes
+// newHelperWindow/di8.Create, which run only from NewOSSource at startup. So
+// the 3s rediscover loop keeps the banner honest and current, but it cannot
+// heal this -- only restarting the app re-attempts construction. Say that,
+// rather than promising a recovery that cannot happen: a log line claiming
+// "still retrying" would send whoever reads it looking for a recovery path
+// that does not exist.
 func winInitFailed(log *slog.Logger, err error) Source {
-	log.Warn("joystick backend could not start; keyboard binds are unaffected "+
-		"and the client will keep retrying", "err", err)
+	log.Warn("joystick backend could not start; keyboard binds are unaffected. "+
+		"This will not recover until the app is restarted", "err", err)
 	return winInitFailedSource{err: err}
 }
 
