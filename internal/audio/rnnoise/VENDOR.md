@@ -128,6 +128,40 @@ the wrapper's `#cgo CFLAGS` rather than carried over as a harmless-but-meaningle
 define, since a future reader would otherwise reasonably go looking for what it does
 in code that never references it.
 
+## Linux needs an explicit `-lm` (fix round 1, confirmed by live CI)
+
+CI at commit `1521aee` came back **macOS PASS, Windows PASS, Linux FAIL** — the
+opposite of the a-priori worry recorded below (which expected Windows to be the
+risky leg). The Linux failure was a link error, not a compile error:
+
+```
+/internal/audio/rnnoise/denoise.c:173: undefined reference to `sin'
+/internal/audio/rnnoise/kiss_fft.c:417: undefined reference to `sincos'
+/internal/audio/rnnoise/pitch.c:415: undefined reference to `sqrt'
+collect2: error: ld returned 1 exit status
+```
+
+Root cause: glibc splits the math functions into a separate `libm`, which must be
+linked explicitly with `-lm`; glibc does **not** fold them into `libc` the way macOS's
+libSystem and mingw-w64's msvcrt-based libc both do. That is exactly why the macOS
+and Windows legs linked cleanly with no LDFLAGS at all, and only the Linux leg needed
+one — this is not a portability gap in the vendored C itself (`sin`/`cos`/`sqrt`/
+`log10`/`sincos` are all standard C, called correctly), it is purely a Linux-specific
+linker requirement.
+
+Fix: added a GOOS-scoped directive to `internal/audio/rnnoise/rnnoise.go`'s cgo
+preamble —
+
+```
+#cgo linux LDFLAGS: -lm
+```
+
+— rather than an unscoped `-lm`, since macOS and Windows/mingw need nothing extra and
+a scoped directive documents *why* precisely at the platform boundary where it
+matters. Verified locally (macOS): `go build`/`go test -race`/`CGO_ENABLED=0 go
+build` all still pass unchanged with this directive present, confirming it is inert
+on a non-Linux GOOS as intended.
+
 ## Cross-platform compilation reasoning (no CI run performed by this task; see report)
 
 - **Linux (ubuntu-latest):** native gcc, already required for the existing Wails

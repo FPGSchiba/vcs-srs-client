@@ -17,6 +17,7 @@ package rnnoise
 
 /*
 #cgo CFLAGS: -I${SRCDIR} -I${SRCDIR}/include -O2
+#cgo linux LDFLAGS: -lm
 #include <stdlib.h>
 #include "rnnoise.h"
 */
