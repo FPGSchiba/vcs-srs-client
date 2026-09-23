@@ -4,6 +4,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { Keybinds } from "./Keybinds";
 import { useSettings } from "../../../../../shared/store/settings";
 import type { Keybind, Trigger, JoystickState } from "../../../../../shared/store/settings";
+import { EV } from "../../../../../shared/api/events";
 
 /** The store's untouched default hotkey state, read before any test mutates it. */
 const initialHotkeyState = () => useSettings.getInitialState().hotkeys;
@@ -28,6 +29,28 @@ vi.mock("../../../../../shared/api/client", () => ({
     recheckHotkeyPermission: () => recheckHotkeyPermission(),
   },
 }));
+
+/** Minimal stand-in for the Wails event bus (mirrors the same pattern in
+ * useSettingsSync.test.tsx and CommsApp.test.tsx): `on` registers a handler
+ * and returns its unsubscribe, and `emit` drives it from the test. Without
+ * this mock, Keybinds.tsx's `on(EV.joystickCaptured, ...)` subscribes to the
+ * REAL (unmocked) event bus, which nothing in a test ever emits through --
+ * that subscription would silently never fire. */
+const handlers = new Map<string, Set<(d: unknown) => void>>();
+const emit = (name: string, data: unknown) => handlers.get(name)?.forEach((h) => h(data));
+
+vi.mock("../../../../../shared/api/events", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../../shared/api/events")>();
+  return {
+    EV: actual.EV,
+    on: (name: string, cb: (d: unknown) => void) => {
+      const set = handlers.get(name) ?? new Set();
+      set.add(cb);
+      handlers.set(name, set);
+      return () => set.delete(cb);
+    },
+  };
+});
 
 /** Mirrors the backend's capture-token generation counter: every
  * BeginCapture hands out a new, strictly increasing token, and only the
@@ -76,6 +99,7 @@ function renderWithKeybinds(keybinds: Keybind[], joystick: JoystickState = DEFAU
 
 describe("Keybinds section", () => {
   beforeEach(() => {
+    handlers.clear();
     addTrigger.mockReset().mockResolvedValue({ stolen: null });
     removeTrigger.mockReset().mockResolvedValue(undefined);
     nextToken = 0;
@@ -561,5 +585,47 @@ describe("Keybinds section", () => {
     });
     expect(screen.getByText(/input' group/)).toBeInTheDocument();
     expect(screen.queryByText(/accessibility/i)).not.toBeInTheDocument();
+  });
+
+  // ---- keybinds:joy_captured -- the joystick half of "one capture,
+  // either input" terminating -----------------------------------------
+
+  it("closes the listening chip and ends its capture exactly once when the backend completes a joystick capture", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    // The backend bound the trigger itself (over the joystick channel) and
+    // tells the frontend only which row to close.
+    emit(EV.joystickCaptured, { action_id: "global.ptt" });
+
+    // The row returns to showing its "+" -- the listening KeyChip, and the
+    // window keydown listener that came with it, is gone.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /add binding/i })).toBeInTheDocument(),
+    );
+
+    // The capture is genuinely ended on the backend, not just visually
+    // closed -- this is what re-arms every OS hotkey. Closing the row also
+    // unmounts the auto-listening KeyChip, which fires its OWN onCancel --
+    // a second call into the same close path for the same row. That second
+    // call must be a no-op: the token was already deleted by the first,
+    // real end, so endCapture is called exactly once, not twice.
+    await waitFor(() => expect(endCapture).toHaveBeenCalledTimes(1));
+    expect(endCapture).toHaveBeenCalledWith(1);
+  });
+
+  it("ignores a joystick capture event for a row that is not currently capturing", async () => {
+    renderWithKeybinds([pttRow([])]);
+    fireEvent.click(screen.getByRole("button", { name: /add binding/i }));
+    await waitFor(() => expect(beginCapture).toHaveBeenCalledWith("global.ptt"));
+
+    // A stale or unrelated event naming some other action must not touch
+    // this row's live capture.
+    emit(EV.joystickCaptured, { action_id: "some.other.action" });
+
+    // Still listening -- the "+" has not come back -- and nothing was ended.
+    expect(screen.queryByRole("button", { name: /add binding/i })).not.toBeInTheDocument();
+    expect(endCapture).not.toHaveBeenCalled();
   });
 });

@@ -69,15 +69,18 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    if `addTrigger` throws and the capture is never ended, every global
  *    hotkey stays dead until the backend's own timeout.
  *
- * 2. Only one chip may listen at a time. `capturingId` tracks which
- *    action_id is currently allowed to listen; clicking a different chip
- *    bumps that other chip's `epoch`, which changes its KeyChip `key` and
- *    forces React to unmount the old (listening) instance. KeyChip already
- *    treats "unmount while listening" as a cancel path (see its own
- *    doc-comment), so the forced remount routes through that existing
- *    safety net instead of duplicating it here -- without this, two
- *    mounted chips would both hold a window keydown listener and a single
- *    keypress would fire `addTrigger` twice.
+ * 2. Only one chip may listen at a time, by construction. `capturingId` is a
+ *    single string, and each row's capture affordance is a straight type
+ *    swap on it: `capturingId === kb.action_id` renders that row's KeyChip,
+ *    anything else renders its `+` button. Clicking a different row's `+`
+ *    therefore does not just start a new capture; it also flips the
+ *    PREVIOUS row's element from KeyChip back to a button, a type change
+ *    React unmounts regardless of any `key`. KeyChip already treats
+ *    "unmount while listening" as a cancel path (see its own doc-comment),
+ *    so that existing safety net closes the superseded capture without this
+ *    file having to orchestrate it directly -- without it, two mounted
+ *    chips would both hold a window keydown listener and a single keypress
+ *    would fire `addTrigger` twice.
  *
  *    That forced unmount arrives AFTER React commits, so the superseded
  *    chip's cancel reaches the backend after the new chip's
@@ -89,6 +92,12 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    keeps its hotkeys suspended. The same inversion happens when the user
  *    clicks a new chip while the previous row's `addTrigger` is still in
  *    flight, and the token covers that too.
+ *
+ *    (An earlier revision of this file forced that unmount itself, via a
+ *    per-row `epoch` counter bumped into a KeyChip `key`. That machinery is
+ *    gone: once idle-vs-capturing became a type swap instead of one KeyChip
+ *    always mounted per row, the swap itself already unmounts the old
+ *    instance, and the extra remount trigger had nothing left to do.)
  *
  * 3. Per-row failures: `internal/chord` accepts keys the OS layer can't
  *    register (Numpad, F21-F24, punctuation, navigation), so a chord can
@@ -126,7 +135,6 @@ export function Keybinds() {
   const joystick = useSettings((s) => s.joystick);
 
   const [capturingId, setCapturingId] = useState<string | null>(null);
-  const [epoch, setEpoch] = useState<Record<string, number>>({});
   const [stolen, setStolen] = useState<StolenInfo | null>(null);
 
   // Permission-banner state. `requested` unlocks RE-CHECK; `promptSpent`
@@ -142,9 +150,6 @@ export function Keybinds() {
   // another row's capture, and it must never trigger a re-render.
   const tokens = useRef<Map<string, Promise<number>>>(new Map());
 
-  const bumpEpoch = (actionId: string) =>
-    setEpoch((e) => ({ ...e, [actionId]: (e[actionId] ?? 0) + 1 }));
-
   const handleChipClick = (actionId: string) => {
     if (capturingId === actionId) {
       // Re-clicking the chip that's already listening is itself a cancel;
@@ -152,7 +157,6 @@ export function Keybinds() {
       return;
     }
     setStolen(null);
-    if (capturingId) bumpEpoch(capturingId);
     setCapturingId(actionId);
     tokens.current.set(
       actionId,
@@ -242,8 +246,6 @@ export function Keybinds() {
     });
   }, [capturingId]);
 
-  const captureKey = (actionId: string) => `capture-${actionId}-${epoch[actionId] ?? 0}`;
-
   // Unsupported (macOS) is not denied -- there is nothing the user can grant
   // -- so the joystick half of the prompt, and any joystick affordance,
   // disappears entirely rather than showing a dead end.
@@ -262,7 +264,6 @@ export function Keybinds() {
       ))}
       {capturingId === kb.action_id ? (
         <KeyChip
-          key={captureKey(kb.action_id)}
           binding=""
           autoListen
           onCapture={handleCapture(kb.action_id)}
