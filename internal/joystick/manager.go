@@ -289,10 +289,16 @@ func (m *Manager) tick() {
 	state, err := m.src.Poll()
 
 	// A capture owns the device while it is armed: pressing a button to bind
-	// it must never also fire the action being bound. This is checked here,
-	// on a successful poll, rather than via Suspend, so the app layer can
-	// arm a capture without having to remember to suspend and un-suspend
-	// around it.
+	// it must never also fire the action being bound. The app layer is still
+	// expected to call Suspend() around a capture session, per spec section
+	// 9 -- that is what stops OTHER, already-suspended actions from
+	// transmitting elsewhere while the dialog is open. This check, and the
+	// force-release BeginCapture does on arming (see capture.go), are
+	// defence in depth on top of that, not a replacement for it: they make
+	// capture itself correct -- no suppressed dispatch stranding an action
+	// mid-hold, no suppressed dispatch swallowing the action being bound --
+	// even in the window before Suspend() is called or if the app layer
+	// forgets it entirely.
 	//
 	// This runs BEFORE notifyMu is acquired below, and returns without ever
 	// touching notifyMu. That is deliberate, not merely "not yet needed":

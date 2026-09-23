@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,20 @@ type fakeSource struct {
 	held    map[trigger.JoyButton]struct{}
 	pollErr error
 	closed  int
+
+	// pollDelay, inFlight and maxInFlight instrument concurrent-access
+	// detection for TestBeginCaptureNeverCallsSourceWhileTheLoopIsRunning.
+	// They are zero-value/no-op for every other test in this file.
+	//
+	// inFlight/maxInFlight are updated OUTSIDE mu, deliberately: mu would
+	// itself serialise overlapping Poll() calls and hide the exact bug this
+	// exists to catch (two goroutines both inside Poll() at once). A real
+	// backend -- vendored DirectInput COM objects, evdev file handles -- has
+	// no such internal mutex, so two concurrent callers there is undefined
+	// behaviour, not just slow.
+	pollDelay   time.Duration
+	inFlight    int32
+	maxInFlight int32
 }
 
 func newFakeSource() *fakeSource {
@@ -61,6 +76,21 @@ func (f *fakeSource) Devices() ([]Device, error) {
 }
 
 func (f *fakeSource) Poll() (State, error) {
+	n := atomic.AddInt32(&f.inFlight, 1)
+	defer atomic.AddInt32(&f.inFlight, -1)
+	for {
+		prev := atomic.LoadInt32(&f.maxInFlight)
+		if n <= prev {
+			break
+		}
+		if atomic.CompareAndSwapInt32(&f.maxInFlight, prev, n) {
+			break
+		}
+	}
+	if f.pollDelay > 0 {
+		time.Sleep(f.pollDelay)
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.pollErr != nil {
