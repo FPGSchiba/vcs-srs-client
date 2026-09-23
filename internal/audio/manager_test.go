@@ -319,6 +319,94 @@ func (s *blockingSink) wasEntered() bool {
 	}
 }
 
+// spyStream records whether Stop was called on it -- used to confirm a
+// discarded reopen result is properly stopped rather than leaked.
+type spyStream struct {
+	mu      sync.Mutex
+	stopped bool
+}
+
+func (s *spyStream) Stop() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = true
+	return nil
+}
+func (s *spyStream) wasStopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped
+}
+
+// TestManagerDiscardsLateReopenFromAStaleGeneration is Fix A round 3's
+// proof, exercised as a white-box test directly against maybeReopenCapture
+// (this file is in package audio, so that's available) rather than through
+// the full Start/Stop lifecycle -- driving it through real backoff timers
+// and hot-plug polling would need multi-second real-time waits (the retry
+// backoff starts at reopenBackoffInitial = 1s and isn't configurable) and
+// would still only produce this exact scenario probabilistically. Calling
+// maybeReopenCapture directly lets the test construct the precondition
+// (an in-flight reopen against a stale epoch) exactly and deterministically,
+// which is a stronger, not weaker, proof of the fix than a slow end-to-end
+// version would be.
+//
+// This complements, rather than duplicates,
+// TestManagerAbandonedDSPLoopCannotTouchTheNextGenerationsRings: that test
+// proves dspLoop/pollLoop's READ side can't cross generations; this one
+// proves the reopen paths' WRITE-BACK side can't either. Both are needed --
+// round 2 fixed the former and missed the latter.
+func TestManagerDiscardsLateReopenFromAStaleGeneration(t *testing.T) {
+	b := NewFakeBackend()
+	b.SetDevices([]DeviceInfo{{ID: "mic-1", IsDefault: true}}, []DeviceInfo{{ID: "out-1", IsDefault: true}})
+	unblockOpen := b.BlockNextOpenCapture()
+	m := NewManager(b, ManagerOptions{PollInterval: time.Hour, VUInterval: time.Hour})
+	t.Cleanup(unblockOpen)
+
+	// Set up "generation 1": captureStream down, epoch stamped, a reopen
+	// about to start -- exactly maybeReopenCapture's own precondition,
+	// constructed directly rather than via Start()/device-loss/backoff.
+	m.mu.Lock()
+	genEpoch := m.epoch + 1
+	m.epoch = genEpoch
+	m.mu.Unlock()
+
+	captureRing := NewRing(ringCapacityFrames)
+	reopenDone := make(chan struct{})
+	go func() {
+		m.maybeReopenCapture(Config{}, []DeviceInfo{{ID: "mic-1", IsDefault: true}}, time.Time{}, captureRing, genEpoch)
+		close(reopenDone)
+	}()
+
+	// Wait for the reopen to have genuinely reached (and be blocked inside)
+	// OpenCapture -- CaptureOpens() records the call before the block, so
+	// this is an observable state transition, not a guess.
+	waitFor(t, func() bool { return len(b.CaptureOpens()) > 0 }, "maybeReopenCapture never reached OpenCapture")
+
+	// "Generation 2" takes over WHILE the reopen is in flight: bump the
+	// epoch and publish its own real stream, exactly as Start() would
+	// under mu (constructed directly here, again to avoid a slow, only-
+	// probabilistic end-to-end reproduction).
+	gen2Stream := &spyStream{}
+	m.mu.Lock()
+	m.epoch++
+	m.captureStream = gen2Stream
+	m.mu.Unlock()
+
+	// Let the stale reopen's OpenCapture call finally return.
+	unblockOpen()
+	<-reopenDone
+
+	m.mu.Lock()
+	got := m.captureStream
+	m.mu.Unlock()
+	if got != gen2Stream {
+		t.Fatalf("m.captureStream = %v, want generation 2's stream unchanged -- a stale reopen overwrote it", got)
+	}
+	if b.CaptureCallbackActive() {
+		t.Fatal("the stale reopen's phantom stream is still registered with the backend -- it was discarded but not stopped (leaked)")
+	}
+}
+
 func TestManagerReportsInputOpenFailure(t *testing.T) {
 	b := NewFakeBackend()
 	b.SetDevices([]DeviceInfo{{ID: "mic-1", IsDefault: true}}, []DeviceInfo{{ID: "out-1", IsDefault: true}})

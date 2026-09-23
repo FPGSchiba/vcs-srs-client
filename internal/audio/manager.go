@@ -78,6 +78,16 @@ type VU struct {
 // Sink receives every gated, processed capture frame -- e.g. the Phase 5
 // network encoder. WriteFrame must not retain the slice past the call: the
 // DSP goroutine reuses the same backing array on the next frame.
+//
+// WriteFrame may be invoked concurrently from more than one goroutine.
+// m.sinks is deliberately Manager-lifetime (a registered Sink should
+// survive a Stop()/Start() restart), but Stop()'s bounded join (Fix 7) can
+// leave a previous generation's dspLoop still running (abandoned, not
+// stopped) at the same time a new generation's dspLoop is live -- and both
+// call WriteFrame on the SAME Sink. Implementations must be safe under
+// concurrent invocation; this package's own test sinks happen to be
+// internally synchronised, but that is not part of the interface's
+// contract elsewhere, so don't rely on it.
 type Sink interface {
 	WriteFrame([]float32)
 	Close() error
@@ -90,6 +100,12 @@ type Sink interface {
 // serializes Manager's own callers against its poll goroutine. Implement it
 // to be safe under concurrent invocation (a mutex or a channel send are
 // both fine); it must not assume a single caller.
+//
+// OnVU carries the identical exposure: an abandoned generation's dspLoop
+// (Stop()'s bounded join, Fix 7) can still be running, calling OnVU on its
+// own schedule, at the same time a new generation's dspLoop is doing the
+// same -- both from the same Manager, on the same callback. Implement it to
+// be safe under concurrent invocation too.
 type ManagerOptions struct {
 	Log          *slog.Logger
 	OnVU         func(VU)
@@ -149,6 +165,7 @@ type Manager struct {
 	mu                            sync.Mutex
 	running                       bool
 	starting                      bool       // claimed inside the same critical section as the running check, so a second concurrent Start() returns immediately instead of racing the first (Fix 2).
+	epoch                         uint64     // incremented in Start's mu-guarded publish. Round 2 parameterised the READ side of the poll goroutine (the rings); it missed that maybeReopenCapture/maybeReopenPlayback/pollOnce also WRITE BACK into Manager fields after a Backend call that can itself be the thing blocked when Stop() abandons this goroutine. mu makes those writes race-free, not current: a late write-back is checked against the CURRENT m.epoch before being published, and discarded (with the freshly-opened stream stopped) if this goroutine's generation is no longer it (Fix A round 3).
 	sfxVoices                     *voicePool // current generation's mixing state; read fresh under mu by PlayEffect (Fix A round 2). Published under mu in Start alongside the rings, for the same reason.
 	captureStream, playbackStream Stream
 	inputErr, outputErr           string
@@ -456,6 +473,8 @@ func (m *Manager) Start() error {
 	}
 	m.stopDSP, m.dspDone = stopDSP, dspDone
 	m.stopPoll, m.pollDone = stopPoll, pollDone
+	m.epoch++
+	epoch := m.epoch
 	m.running = true
 	m.mu.Unlock()
 
@@ -469,7 +488,7 @@ func (m *Manager) Start() error {
 	// an abandoned generation stays permanently wired to its OWN rings and
 	// can never cross into the next generation's state.
 	go m.dspLoop(denoiser, stopDSP, dspDone, captureRing, playbackRing, sfxVoices)
-	go m.pollLoop(stopPoll, pollDone, captureRing, playbackRing)
+	go m.pollLoop(stopPoll, pollDone, captureRing, playbackRing, epoch)
 
 	m.emitState()
 	return nil
@@ -724,7 +743,23 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 // Stop()+Start() cycle -- the same cross-generation entanglement dspLoop
 // was fixed for, just reached through the reopen path instead of the
 // steady-state read/write path.
-func (m *Manager) pollLoop(stopPoll, pollDone chan struct{}, captureRing, playbackRing *Ring) {
+//
+// epoch is this generation's stamp (Manager.epoch's value at the Start()
+// call that launched this goroutine). Round 2 parameterised the READ side
+// here (the rings) but missed that pollOnce/maybeReopenCapture/
+// maybeReopenPlayback also WRITE BACK into Manager fields (captureStream,
+// inputID, inputErr, lastInputs, ...) -- and those writes happen AFTER a
+// Backend call (Enumerate/OpenCapture/OpenPlayback) that can itself be the
+// thing blocked when Stop() gives up and abandons this goroutine. mu makes
+// those write-backs race-free, not current: it stops two goroutines from
+// tearing the same field, but nothing stopped an abandoned goroutine's
+// STALE result from being published as if it were fresh once the blocked
+// call finally returned. Every write-back site below re-checks m.epoch ==
+// epoch under the SAME mu critical section as the write, immediately
+// before committing, and discards (stopping any freshly-opened stream
+// first) if this goroutine's generation is no longer current. See the
+// Manager.epoch field doc.
+func (m *Manager) pollLoop(stopPoll, pollDone chan struct{}, captureRing, playbackRing *Ring, epoch uint64) {
 	defer close(pollDone)
 	ticker := time.NewTicker(m.opts.PollInterval)
 	defer ticker.Stop()
@@ -734,11 +769,11 @@ func (m *Manager) pollLoop(stopPoll, pollDone chan struct{}, captureRing, playba
 			return
 		case <-ticker.C:
 		}
-		m.pollOnce(captureRing, playbackRing)
+		m.pollOnce(captureRing, playbackRing, epoch)
 	}
 }
 
-func (m *Manager) pollOnce(captureRing, playbackRing *Ring) {
+func (m *Manager) pollOnce(captureRing, playbackRing *Ring, epoch uint64) {
 	inputs, outputs, err := m.backend.Enumerate()
 	if err != nil {
 		m.log.Warn("audio: enumerate failed during poll", "err", err)
@@ -746,6 +781,16 @@ func (m *Manager) pollOnce(captureRing, playbackRing *Ring) {
 	}
 
 	m.mu.Lock()
+	if m.epoch != epoch {
+		// Enumerate was in flight (possibly blocked) when Stop() abandoned
+		// this goroutine and a later Start() ran. Discard: publishing
+		// inputs/outputs here would overwrite the CURRENT generation's
+		// device snapshot with a stale one, and any reopen below would be
+		// working from stale data too -- skip the rest of this poll tick
+		// entirely.
+		m.mu.Unlock()
+		return
+	}
 	changed := !sameDevices(m.lastInputs, inputs) || !sameDevices(m.lastOutputs, outputs)
 	m.lastInputs, m.lastOutputs = inputs, outputs
 	m.mu.Unlock()
@@ -756,17 +801,17 @@ func (m *Manager) pollOnce(captureRing, playbackRing *Ring) {
 
 	now := time.Now()
 	cfg := m.currentConfig()
-	m.maybeReopenCapture(cfg, inputs, now, captureRing)
-	m.maybeReopenPlayback(cfg, outputs, now, playbackRing)
+	m.maybeReopenCapture(cfg, inputs, now, captureRing, epoch)
+	m.maybeReopenPlayback(cfg, outputs, now, playbackRing, epoch)
 
 	if changed {
 		m.emitState()
 	}
 }
 
-func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.Time, captureRing *Ring) {
+func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.Time, captureRing *Ring, epoch uint64) {
 	m.mu.Lock()
-	ready := m.captureStream == nil && !now.Before(m.inputRetryAt)
+	ready := m.captureStream == nil && !now.Before(m.inputRetryAt) && m.epoch == epoch
 	m.mu.Unlock()
 	if !ready {
 		return
@@ -778,6 +823,23 @@ func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.T
 	})
 
 	m.mu.Lock()
+	if m.epoch != epoch {
+		// OpenCapture (possibly blocked on a wedged device) outlived this
+		// generation: Stop() abandoned this goroutine and a later Start()
+		// is now current. Publishing a phantom stream/inputID/inputErr
+		// here would make gen 2's REAL capture stream unreachable from
+		// m.captureStream forever (no future Stop() could ever stop it --
+		// an OS microphone stream kept open after the user believes audio
+		// has stopped, for a voice-comms client), and would make
+		// `ready := m.captureStream == nil` permanently false so gen 2
+		// could never recover capture either. Discard entirely, and stop
+		// the stream we just opened so it isn't leaked.
+		m.mu.Unlock()
+		if stream != nil {
+			stream.Stop()
+		}
+		return
+	}
 	defer m.mu.Unlock()
 	if err != nil {
 		m.inputErr = err.Error()
@@ -792,9 +854,9 @@ func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.T
 	m.inputBackoff = 0
 }
 
-func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time.Time, playbackRing *Ring) {
+func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time.Time, playbackRing *Ring, epoch uint64) {
 	m.mu.Lock()
-	ready := m.playbackStream == nil && !now.Before(m.outputRetryAt)
+	ready := m.playbackStream == nil && !now.Before(m.outputRetryAt) && m.epoch == epoch
 	m.mu.Unlock()
 	if !ready {
 		return
@@ -809,6 +871,16 @@ func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time
 	})
 
 	m.mu.Lock()
+	if m.epoch != epoch {
+		// Symmetric with maybeReopenCapture above: discard a late result
+		// from an abandoned generation rather than publish a phantom
+		// playbackStream over the current generation's real one.
+		m.mu.Unlock()
+		if stream != nil {
+			stream.Stop()
+		}
+		return
+	}
 	defer m.mu.Unlock()
 	if err != nil {
 		m.outputErr = err.Error()

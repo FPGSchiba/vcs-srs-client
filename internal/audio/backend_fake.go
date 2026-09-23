@@ -32,6 +32,13 @@ type FakeBackend struct {
 	// until it's closed. Used to deterministically hold a Manager.Start()
 	// call inside its "starting" window for tests (Fix B).
 	enumerateGate chan struct{}
+
+	// openCaptureGate, when set (via BlockNextOpenCapture), makes exactly
+	// the next OpenCapture call block until it's closed -- AFTER already
+	// recording itself in captureOpens, so CaptureOpens() reflects the
+	// call as having genuinely started. Used to deterministically hold a
+	// reopen (maybeReopenCapture) in flight for tests (Fix A round 3).
+	openCaptureGate chan struct{}
 }
 
 func NewFakeBackend() *FakeBackend { return &FakeBackend{} }
@@ -87,10 +94,30 @@ func (b *FakeBackend) Enumerate() ([]DeviceInfo, []DeviceInfo, error) {
 	return inputs, outputs, nil
 }
 
+// BlockNextOpenCapture makes exactly the next OpenCapture call block until
+// the returned unblock func is called. Safe to call unblock more than once.
+func (b *FakeBackend) BlockNextOpenCapture() (unblock func()) {
+	gate := make(chan struct{})
+	b.mu.Lock()
+	b.openCaptureGate = gate
+	b.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
+}
+
 func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.captureOpens = append(b.captureOpens, id)
+	gate := b.openCaptureGate
+	b.openCaptureGate = nil // one-shot: only the call that claimed it blocks
+	b.mu.Unlock()
+
+	if gate != nil {
+		<-gate
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := b.takeFailure(); err != nil {
 		return nil, err
 	}
@@ -121,6 +148,17 @@ func (b *FakeBackend) CaptureOpens() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]string(nil), b.captureOpens...)
+}
+
+// CaptureCallbackActive reports whether some opened capture Stream's OS
+// callback is currently registered -- i.e. a Stream was returned by
+// OpenCapture and has NOT had Stop() called on it since. Used to confirm a
+// discarded (stale-generation) reopen result was properly stopped rather
+// than leaked.
+func (b *FakeBackend) CaptureCallbackActive() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.onFrame != nil
 }
 
 // PlaybackOpens returns every device id passed to OpenPlayback, in call
