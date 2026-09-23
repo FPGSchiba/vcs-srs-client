@@ -237,6 +237,31 @@ func (m *Manager) SetMuted(muted bool) { m.muted.Store(muted) }
 // Muted reports the current mute state.
 func (m *Manager) Muted() bool { return m.muted.Load() }
 
+// ToggleMuted flips the mute state and reports the new value.
+//
+// This is a CAS loop, not the more obvious `m.SetMuted(!m.Muted())`.
+// global.mute_toggle is a PRESS action, deliberately unrefcounted (unlike a
+// HOLD action's press/release, which internal/app's pressCount joins into
+// one edge across sources before either Manager method is ever called) --
+// so two independent sources bound to it (a keyboard chord and a joystick
+// button, both fully supported bind targets for the same action) can call
+// this from two separate goroutines with no coordination above this layer.
+// A plain load-then-store lets both goroutines read the same starting value
+// before either stores, so both flip to the same target and one toggle is
+// silently lost: the UI ends up disagreeing with the user's last press
+// until they press again. The CAS retry closes that window -- a losing
+// goroutine re-reads the value the winner just stored and flips THAT
+// instead, so no toggle is ever dropped.
+func (m *Manager) ToggleMuted() bool {
+	for {
+		old := m.muted.Load()
+		next := !old
+		if m.muted.CompareAndSwap(old, next) {
+			return next
+		}
+	}
+}
+
 // AddSink registers a Sink to receive every gated capture frame. The
 // backing slice is copy-on-write so the DSP goroutine never takes a lock to
 // read it.

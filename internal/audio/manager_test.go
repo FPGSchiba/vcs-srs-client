@@ -79,6 +79,49 @@ func TestManagerMuteSilencesTheSink(t *testing.T) {
 	waitFor(t, func() bool { return sink.count() == 0 }, "muted mic still reached the sink")
 }
 
+// TestToggleMutedFlipsAndReportsTheNewValue proves the basic contract:
+// ToggleMuted flips Muted() and returns exactly the value it flipped to.
+func TestToggleMutedFlipsAndReportsTheNewValue(t *testing.T) {
+	b := NewFakeBackend()
+	m := newTestManager(t, b)
+
+	if got := m.ToggleMuted(); !got || !m.Muted() {
+		t.Fatalf("ToggleMuted() = %v, Muted() = %v, want true/true from unmuted", got, m.Muted())
+	}
+	if got := m.ToggleMuted(); got || m.Muted() {
+		t.Fatalf("ToggleMuted() = %v, Muted() = %v, want false/false from muted", got, m.Muted())
+	}
+}
+
+// TestConcurrentToggleMutedNeverDropsAToggle is the race regression guard
+// for Fix 2: two independent sources bound to global.mute_toggle (a
+// keyboard chord and a joystick button) call ToggleMuted from separate
+// goroutines with no coordination above Manager. A plain
+// SetMuted(!Muted()) read-modify-write lets both goroutines read the same
+// starting value before either stores, so both flip to the same target and
+// one toggle is lost. N concurrent toggles from a known-false start must
+// leave Muted() == (N odd), proving every single toggle was actually
+// applied rather than merged with another.
+func TestConcurrentToggleMutedNeverDropsAToggle(t *testing.T) {
+	b := NewFakeBackend()
+	m := newTestManager(t, b)
+
+	const n = 200
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			m.ToggleMuted()
+		}()
+	}
+	wg.Wait()
+
+	if want := n%2 == 1; m.Muted() != want {
+		t.Fatalf("after %d concurrent toggles from false, Muted() = %v, want %v (a toggle was dropped)", n, m.Muted(), want)
+	}
+}
+
 func TestManagerHotPlugEmitsDeviceChange(t *testing.T) {
 	b := NewFakeBackend()
 	var mu sync.Mutex
