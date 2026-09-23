@@ -146,7 +146,11 @@ func (a *App) audioManager() *audio.Manager {
 // pre-existing test that builds an App without SetAudioBackend keeps
 // passing unchanged.
 func (a *App) dispatchAudioPressed(actionID string) {
-	m := a.audioManager()
+	sb := a.settings
+	sb.mu.Lock()
+	m := sb.audio
+	em := sb.em
+	sb.mu.Unlock()
 	if m == nil {
 		return
 	}
@@ -154,16 +158,30 @@ func (a *App) dispatchAudioPressed(actionID string) {
 	case actionID == "global.ptt" || isRadioPTTAction(actionID):
 		m.SetPTT(true)
 	case actionID == "global.push_to_mute":
-		m.SetMuted(true)
+		// Emit only on an actual transition -- see push_to_mute's Released
+		// half below for why this is the mirror image of that guard.
+		if !m.Muted() {
+			m.SetMuted(true)
+			em.AudioMicMuted(true)
+		}
 	case actionID == "global.mute_toggle":
 		// KindPress: fires once on down, never gets a matching Released (see
 		// isHold's doc), so this is the only edge this action ever sees.
-		m.SetMuted(!m.Muted())
+		// ToggleMuted's CAS loop (see its doc in internal/audio/manager.go)
+		// is what makes this safe when two independent sources -- e.g. a
+		// keyboard chord and a joystick button, both valid bind targets for
+		// the same action -- race each other here; SetMuted(!Muted()) would
+		// let both read the same starting value and drop one toggle.
+		em.AudioMicMuted(m.ToggleMuted())
 	}
 }
 
 func (a *App) dispatchAudioReleased(actionID string) {
-	m := a.audioManager()
+	sb := a.settings
+	sb.mu.Lock()
+	m := sb.audio
+	em := sb.em
+	sb.mu.Unlock()
 	if m == nil {
 		return
 	}
@@ -171,7 +189,14 @@ func (a *App) dispatchAudioReleased(actionID string) {
 	case actionID == "global.ptt" || isRadioPTTAction(actionID):
 		m.SetPTT(false)
 	case actionID == "global.push_to_mute":
-		m.SetMuted(false)
+		// Guarded the same way as the press half: emit the resulting state
+		// only when it actually changes, rather than on every release edge
+		// regardless of whether push_to_mute was even the reason the mic
+		// was muted (mute_toggle could have muted it independently).
+		if m.Muted() {
+			m.SetMuted(false)
+			em.AudioMicMuted(false)
+		}
 	}
 }
 

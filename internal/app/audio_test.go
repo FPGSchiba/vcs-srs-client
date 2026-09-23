@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 )
 
 // newTestAudioManager builds a real Manager against the in-memory
@@ -51,6 +52,61 @@ func TestPushToMuteHoldsMuteOnlyWhileHeld(t *testing.T) {
 	a.Released("global.push_to_mute")
 	if m.Muted() {
 		t.Fatal("push_to_mute stayed muted after release")
+	}
+}
+
+// TestMuteToggleActionEmitsMicMutedEvent is Fix 1's guard for
+// global.mute_toggle: every press must emit audio:mic_muted with the
+// resulting state, since this is the frontend's only way to learn the mic
+// was muted (a later task builds the UI that subscribes to it).
+func TestMuteToggleActionEmitsMicMutedEvent(t *testing.T) {
+	a, em, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+
+	a.Pressed("global.mute_toggle")
+	payloads := em.payloadsFor(events.EventAudioMicMuted)
+	if len(payloads) != 1 || payloads[0] != true {
+		t.Fatalf("after first mute_toggle press, audio:mic_muted payloads = %v, want [true]", payloads)
+	}
+
+	a.Pressed("global.mute_toggle")
+	payloads = em.payloadsFor(events.EventAudioMicMuted)
+	if len(payloads) != 2 || payloads[1] != false {
+		t.Fatalf("after second mute_toggle press, audio:mic_muted payloads = %v, want [true false]", payloads)
+	}
+}
+
+// TestPushToMuteEmitsMicMutedEventOnPressAndRelease is Fix 1's guard for
+// global.push_to_mute: press must emit true, release must emit false, and
+// nothing else in between.
+func TestPushToMuteEmitsMicMutedEventOnPressAndRelease(t *testing.T) {
+	a, em, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+
+	a.Pressed("global.push_to_mute")
+	a.Released("global.push_to_mute")
+
+	payloads := em.payloadsFor(events.EventAudioMicMuted)
+	if len(payloads) != 2 || payloads[0] != true || payloads[1] != false {
+		t.Fatalf("audio:mic_muted payloads = %v, want [true false]", payloads)
+	}
+}
+
+// TestPTTActionDoesNotEmitMicMutedEvent proves global.ptt -- which does not
+// touch the mute state at all -- never emits audio:mic_muted, so the event
+// stays a reliable signal of an actual mute-state change.
+func TestPTTActionDoesNotEmitMicMutedEvent(t *testing.T) {
+	a, em, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+
+	a.Pressed("global.ptt")
+	a.Released("global.ptt")
+
+	if n := em.count(events.EventAudioMicMuted); n != 0 {
+		t.Fatalf("audio:mic_muted emitted %d times for global.ptt, want 0", n)
 	}
 }
 
