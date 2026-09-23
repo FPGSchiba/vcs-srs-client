@@ -116,11 +116,10 @@ func NewOSSource(log *slog.Logger) (Source, error) {
 //
 // The error is deliberately NOT ErrUnsupported: Manager.New records any other
 // error in discoverErr while leaving Supported() true, so the failure reads as
-// {Supported:true, Error:"joystick: create helper window: ..."}, the Keybinds
-// banner fires on supported && error, and the rediscover loop keeps retrying.
-// That retry can genuinely succeed -- a CreateWindowEx or DirectInput8Create
-// failure this early is usually resource pressure during startup -- but even
-// when it cannot, a named cause beats silence.
+// {Supported:true, Error:"joystick: create helper window: ..."}, and the
+// Keybinds banner fires on supported && error. The point is a named cause
+// instead of silence -- NOT recovery, which this stub cannot deliver (see
+// winInitFailed below for why the 3s rediscover loop cannot heal it).
 //
 // Poll returns an empty state and no error on purpose. Nothing can be held
 // when nothing is open, and reporting a poll error every 10ms would hand

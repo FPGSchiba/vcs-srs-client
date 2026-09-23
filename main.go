@@ -66,6 +66,18 @@ func main() {
 	// slog.Default() to appLog. It also redirects the standard log package's
 	// output here, which is what carries the log.Fatal at the bottom of main
 	// into the log file instead of a console nobody sees.
+	//
+	// SetLogLoggerLevel FIRST, and it is not optional. SetDefault routes the
+	// standard log package through a handlerWriter pinned at LevelInfo, which
+	// DROPS the record when the handler is not enabled at that level. So with
+	// log_level = "WARN" or "ERROR" -- a perfectly ordinary setting for a user
+	// cutting noise -- log.Fatal(err) at the bottom of main would write
+	// NOWHERE: not the file, not stderr, where before this line it at least
+	// reached stderr. The app would exit 1 in total silence on the single most
+	// important message it can emit. Error is enabled at every level ParseLevel
+	// can return, so pinning it there keeps that message alive whatever the
+	// user configured.
+	slog.SetLogLoggerLevel(slog.LevelError)
 	slog.SetDefault(appLog)
 
 	if logPathErr != nil {
