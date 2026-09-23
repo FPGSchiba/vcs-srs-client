@@ -99,23 +99,29 @@ Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Au
 
 ## Phase 4 — Audio I/O
 
-**Status:** `[ ]`
+**Status:** `[x]` complete 2026-09-24 — malgo device lifecycle (input + output, hot-plug, bounded-backoff reopen), RNNoise noise suppression + pure-Go AGC, VU metering, the PTT/VOX/mute gate feeding `global.push_to_mute`/`global.mute_toggle` their first consumers, radio-effect DSP presets, a nine-slot SFX engine, four level buses, and the per-OS CI matrix (closes R3) all landed on `feat/phase-4-audio-io`.
+
+**Verification status:** the full automated suite is green (`go build`/`go vet`/`go test -race ./...` across all packages, frontend `vitest`/`tsc --noEmit`/production build — see Task 18's report). **The phase has NOT been verified on real hardware** — no audio device or GUI could be exercised in the environment that closed out the phase. A concrete manual checklist covering every hardware-dependent DoD item (device enumeration and selection per OS, the macOS microphone TCC prompt and its denied/recovery paths, unplug/replug and Bluetooth mid-session, System Default following an OS change, Star-Citizen audio coexistence in both launch orders, PTT from keyboard and joystick including the Phase 3.5 refcount now made audible, AGC/NS audibly doing what they claim, the four level knobs, latency/glitching with overrun/underrun counters, and the concurrency fixes around a device-unplug racing a Stop/restart) is written up and waiting for a human to run: [`2026-09-23-phase-4-manual-verification.md`](./superpowers/plans/2026-09-23-phase-4-manual-verification.md). Treat Phase 4 as code-complete, not field-verified, until that checklist has been executed.
+
+**The SFX sample pack is still outstanding.** The engine is asset-agnostic by design (D11) — a missing sample is silent and logged once, never a crash — but until the seven WAV files from the credited contributors land, every effect PREVIEW is silent. This is a real, open dependency on the user, not a soft caveat.
+
+**Design doc:** [`2026-09-23-vcs-client-phase-4-audio-io-design.md`](./superpowers/specs/2026-09-23-vcs-client-phase-4-audio-io-design.md)
 
 **Headline deliverables**
-- malgo lifecycle (input + output device init/teardown)
-- Device picker UI in Settings
-- Mic AGC + noise suppression
-- VU metering, surfaced via events at low rate
-- TX/RX/intercom/encryption SFX engine (samples bundled)
-- Per-OS smoke build job in CI (added one phase early to surface toolchain issues)
+- malgo lifecycle (input + output device init/teardown, hot-plug diff, bounded-backoff reopen, device-loss fallback)
+- Device picker UI in Settings, including `System Default` as a first-class value
+- Mic AGC + noise suppression (vendored RNNoise), each independently toggleable
+- VU metering, surfaced via events at ~20 Hz
+- TX/RX/intercom/encryption SFX engine (asset-agnostic; samples bundle pending)
+- Per-OS CI matrix in CI (closes R3 — see the master spec's §9)
 
-**Blocking deps:** malgo on each OS
+**Blocking deps:** none remaining — malgo and RNNoise both build cleanly on all three OSes
 
 ---
 
 ## Phase 5 — UDP voice
 
-**Status:** `[ ]` **— BLOCKED**
+**Status:** `[ ]` **— BLOCKED, next up**
 
 **Headline deliverables**
 - Custom UDP client matching the server's Go reference
