@@ -118,13 +118,15 @@ func NewOSSource(log *slog.Logger) (Source, error) {
 // error in discoverErr while leaving Supported() true, so the failure reads as
 // {Supported:true, Error:"joystick: create helper window: ..."}, and the
 // Keybinds banner fires on supported && error. The point is a named cause
-// instead of silence -- NOT recovery, which this stub cannot deliver (see
-// winInitFailed below for why the 3s rediscover loop cannot heal it).
+// instead of silence -- NOT recovery, which this stub cannot deliver; the
+// closing paragraph of this comment says why the 3s rediscover loop cannot
+// heal it.
 //
 // Poll returns an empty state and no error on purpose. Nothing can be held
 // when nothing is open, and reporting a poll error every 10ms would hand
 // lastErrLocked's poll-wins precedence a permanent, less useful message than
 // the enumeration one that names the actual failed call.
+//
 // The stub reports the SAME error for the life of the process: it holds no
 // helper window and no DirectInput object, and nothing re-invokes
 // newHelperWindow/di8.Create, which run only from NewOSSource at startup. So
