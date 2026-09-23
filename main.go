@@ -9,7 +9,9 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
+	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	vcsevents "github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
@@ -143,6 +145,65 @@ func main() {
 		defer jm.Close()
 	}
 
+	// Audio engine. Exactly the same optional-dependency discipline as
+	// joystick input just above: NewMalgoBackend can fail for reasons that
+	// have nothing to do with whether the rest of the app should run -- no
+	// sound card, a denied OS permission, a broken driver -- and none of
+	// them may stop the user from connecting, seeing the UI, or using
+	// keybinds and joystick input. internal/app's audio bindings are all
+	// documented no-ops (or ErrAudioUnavailable) when SetAudioBackend is
+	// never called, so a nil manager here is a fully supported path, not a
+	// degraded one.
+	//
+	// Unlike the joystick manager, a failed construction here leaves nothing
+	// behind that can ever emit audio:state on its own -- there is no
+	// Manager -- so this pushes one audio:state event by hand, carrying the
+	// error, so the frontend gets an honest answer instead of silence
+	// indistinguishable from "audio hasn't started reporting yet".
+	audioEvents := vcsevents.New(emitter)
+	if backend, err := audio.NewMalgoBackend(); err != nil {
+		appLog.Warn("audio backend unavailable; audio features are disabled", "err", err)
+		audioEvents.AudioState(app.AudioStateDTO{
+			InputError:  err.Error(),
+			OutputError: err.Error(),
+		})
+	} else {
+		am := audio.NewManager(backend, audio.ManagerOptions{
+			Log: appLog,
+			// OnDevices/OnState/OnVU are handed straight to the typed
+			// emitter: events.Tagged.Emit forwards to the Wails
+			// EventManager, whose EventProcessor.Emit only reads a
+			// (locked) listener map and hands the payload to an internal
+			// mailbox -- safe to call from more than one goroutine at
+			// once, which is exactly what OnState/OnVU's doc comments say
+			// Manager will do (Start's tail call and the poll/DSP
+			// goroutines can all reach these concurrently).
+			OnDevices: func(inputs, outputs []audio.DeviceInfo) {
+				audioEvents.AudioDevicesChanged(app.AudioDevicesDTO{
+					Inputs:  audioDeviceDTOs(inputs),
+					Outputs: audioDeviceDTOs(outputs),
+				})
+			},
+			OnState: func(st audio.State) {
+				audioEvents.AudioState(app.AudioStateDTO{
+					Running:     st.Running,
+					InputError:  st.InputError,
+					OutputError: st.OutputError,
+					Overruns:    st.Overruns,
+					Underruns:   st.Underruns,
+				})
+			},
+			OnVU: func(v audio.VU) {
+				audioEvents.AudioVU(audioVUPayload{Input: v.Input, Output: v.Output})
+			},
+		})
+		if err := am.Start(); err != nil {
+			appLog.Warn("audio engine failed to start; audio features are disabled", "err", err)
+		}
+		gui.SetAudioBackend(am)
+		defer am.Stop()
+	}
+
 	// Main window: frameless + transparent, fixed 1440x900, loads the main entry.
 	// Named so the tray (internal/app/tray.go) can resolve it back out of the
 	// Wails window manager for show/hide.
@@ -187,4 +248,26 @@ func main() {
 	if err := wailsApp.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// audioDeviceDTOs converts the engine's device list into the wire-facing
+// shape, mirroring internal/app's own (unexported) audioDeviceDTOs used by
+// GetAudioDevices -- kept as a small duplicate here rather than exporting
+// that one, since main.go's use is a one-off event payload, not a binding.
+func audioDeviceDTOs(devs []audio.DeviceInfo) []app.AudioDeviceDTO {
+	out := make([]app.AudioDeviceDTO, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, app.AudioDeviceDTO{ID: d.ID, Name: d.Name, IsDefault: d.IsDefault})
+	}
+	return out
+}
+
+// audioVUPayload is the audio:vu event's wire shape. audio.VU itself carries
+// no json tags (it is an internal engine type, not a wire DTO), so its
+// exported Go field names ("Input"/"Output") would leak onto the wire
+// verbatim without this -- and Task 16's frontend store is specified to read
+// lowercase `input`/`output`.
+type audioVUPayload struct {
+	Input  float32 `json:"input"`
+	Output float32 `json:"output"`
 }
