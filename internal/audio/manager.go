@@ -1,11 +1,20 @@
 package audio
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// ErrStartInProgress is returned by Start when a previous call is still
+// setting up (see Start's doc, Fix B). It is distinct from the ordinary
+// idempotent no-op Start returns when the manager is already running: this
+// means a start was already underway and this call did nothing, so a
+// caller that needs the manager running should retry rather than assume
+// success.
+var ErrStartInProgress = errors.New("audio: Start already in progress")
 
 // ringCapacityFrames bounds queued latency in either direction: enough
 // headroom (~160 ms) to absorb OS scheduling jitter without letting a
@@ -46,8 +55,14 @@ type Config struct {
 // from what Config asked for -- i.e. resolveDevice fell back to the default
 // because the saved id no longer enumerates (spec §13's "record the
 // substitution" requirement).
+//
+// Starting reports whether a Start() call is currently underway (claimed
+// but not yet resolved into Running). It exists so a wedged Start (backend
+// call that never returns) is at least OBSERVABLE from outside rather than
+// indistinguishable from "never started" -- see Fix B.
 type State struct {
 	Running                             bool
+	Starting                            bool
 	InputError, OutputError             string
 	Overruns, Underruns                 uint64
 	InputDevice, OutputDevice           string
@@ -121,11 +136,20 @@ type Manager struct {
 	muted atomic.Bool
 	sinks atomic.Pointer[[]Sink]
 
+	// sfx holds the shared, immutable-after-construction sample store only.
+	// Its MUTABLE mixing state is deliberately NOT here -- see sfxVoices
+	// below and voicePool's doc (sfx.go) for why a single Manager-lifetime
+	// voicePool would have been just as broken as reading m.captureRing
+	// live from dspLoop (Fix A's precise bug, rediscovered in round 2 via
+	// -race on this exact scenario: an abandoned generation's zombie
+	// dspLoop and the next generation's real one both calling MixInto on
+	// the one shared pool concurrently).
 	sfx *SFX
 
 	mu                            sync.Mutex
 	running                       bool
-	starting                      bool // claimed inside the same critical section as the running check, so a second concurrent Start() returns immediately instead of racing the first (Fix 2).
+	starting                      bool       // claimed inside the same critical section as the running check, so a second concurrent Start() returns immediately instead of racing the first (Fix 2).
+	sfxVoices                     *voicePool // current generation's mixing state; read fresh under mu by PlayEffect (Fix A round 2). Published under mu in Start alongside the rings, for the same reason.
 	captureStream, playbackStream Stream
 	inputErr, outputErr           string
 	inputID, outputID             string
@@ -208,15 +232,29 @@ func (m *Manager) AddSink(s Sink) {
 	}
 }
 
-// PlayEffect starts an SFX one-shot. Unknown or absent ids are ignored by
-// SFX itself.
-func (m *Manager) PlayEffect(id string) { m.sfx.Play(id) }
+// PlayEffect starts an SFX one-shot. Unknown or absent ids are ignored.
+// Also a silent no-op if called while the manager isn't running -- there is
+// no current generation's voicePool to queue into, and letting a request
+// linger until some later, unrelated Start() drained it would be more
+// surprising than dropping it.
+func (m *Manager) PlayEffect(id string) {
+	if !m.sfx.Available(id) {
+		return
+	}
+	m.mu.Lock()
+	v, running := m.sfxVoices, m.running
+	m.mu.Unlock()
+	if running && v != nil {
+		v.play(id)
+	}
+}
 
 // State returns a snapshot of the manager's health.
 func (m *Manager) State() State {
 	m.mu.Lock()
 	st := State{
 		Running:           m.running,
+		Starting:          m.starting,
 		InputError:        m.inputErr,
 		OutputError:       m.outputErr,
 		InputDevice:       m.inputID,
@@ -292,10 +330,19 @@ func sameDevices(a, b []DeviceInfo) bool {
 // back to the default) and never fails on a device that refuses to open
 // (the error is recorded in State and the other direction still runs) --
 // see the rules on manager.go's Start doc and task-10-brief.md rules 5-6.
-// It is idempotent while already running, and safe against concurrent
-// invocation: a second caller that arrives while the first is still setting
-// up observes m.starting and returns immediately rather than racing it
-// (Fix 2).
+// It is idempotent while already running: a second call returns nil once
+// running is true, same as before.
+//
+// A second call that arrives WHILE a first call is still setting up is
+// different: it returns ErrStartInProgress rather than nil (Fix B). Silent
+// success there would be a lie -- the manager did not just start, someone
+// else's in-flight Start() might still fail, hang, or resolve a different
+// device set. m.starting is cleared via defer, so even a panic mid-setup
+// cannot wedge it permanently; State().Starting also exposes it, so a
+// truly wedged Start (a Backend call that never returns -- Backend has no
+// cancellation hook, so this can't be turned into a bounded error) is at
+// least observable from outside instead of indistinguishable from
+// never having been called.
 //
 // Concurrency note (Fix 1): every field a concurrent State() or Stop() call
 // can observe -- captureRing, playbackRing, captureStream, playbackStream,
@@ -310,12 +357,22 @@ func sameDevices(a, b []DeviceInfo) bool {
 // single atomic unit rather than individually-torn fields.
 func (m *Manager) Start() error {
 	m.mu.Lock()
-	if m.running || m.starting {
+	if m.running {
 		m.mu.Unlock()
 		return nil
 	}
+	if m.starting {
+		m.mu.Unlock()
+		m.log.Warn("audio: Start called while a previous Start is still in progress")
+		return ErrStartInProgress
+	}
 	m.starting = true
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.starting = false
+		m.mu.Unlock()
+	}()
 
 	inputs, outputs, err := m.backend.Enumerate()
 	if err != nil {
@@ -370,9 +427,15 @@ func (m *Manager) Start() error {
 	dspDone := make(chan struct{})
 	stopPoll := make(chan struct{})
 	pollDone := make(chan struct{})
+	// A fresh voicePool per generation -- see sfx.go's voicePool doc for
+	// why m.sfx's SAMPLE STORE stays shared but its MIXING STATE cannot:
+	// an abandoned generation's dspLoop must never be able to mix into the
+	// same pool a later generation's dspLoop is using.
+	sfxVoices := m.sfx.NewVoicePool()
 
 	m.mu.Lock()
 	m.captureRing, m.playbackRing = captureRing, playbackRing
+	m.sfxVoices = sfxVoices
 	m.lastInputs, m.lastOutputs = inputs, outputs
 	m.captureStream, m.playbackStream = capStream, playStream
 	m.inputID, m.outputID = inID, outID
@@ -394,11 +457,19 @@ func (m *Manager) Start() error {
 	m.stopDSP, m.dspDone = stopDSP, dspDone
 	m.stopPoll, m.pollDone = stopPoll, pollDone
 	m.running = true
-	m.starting = false
 	m.mu.Unlock()
 
-	go m.dspLoop(denoiser)
-	go m.pollLoop()
+	// dspLoop/pollLoop take THIS generation's rings and channels as
+	// parameters -- exactly as the OS callbacks above already do -- rather
+	// than reading m.captureRing/m.playbackRing/m.stopDSP live. See Fix A's
+	// note on the Manager struct doc for why: Stop()'s bounded join (Fix 7)
+	// means a goroutine can outlive Stop() and still be running when the
+	// NEXT Start() publishes a new generation's rings into those fields.
+	// Passed-by-value locals can never be repointed by a later Start(), so
+	// an abandoned generation stays permanently wired to its OWN rings and
+	// can never cross into the next generation's state.
+	go m.dspLoop(denoiser, stopDSP, dspDone, captureRing, playbackRing, sfxVoices)
+	go m.pollLoop(stopPoll, pollDone, captureRing, playbackRing)
 
 	m.emitState()
 	return nil
@@ -434,6 +505,7 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	capStream, playStream := m.captureStream, m.playbackStream
 	m.captureStream, m.playbackStream = nil, nil
+	m.sfxVoices = nil // PlayEffect also gates on m.running, so this is belt-and-suspenders: don't hold a reference to a generation that may still be a zombie any longer than necessary.
 	m.mu.Unlock()
 
 	if capStream != nil {
@@ -452,7 +524,11 @@ func (m *Manager) Stop() {
 // inside a bounded-backoff reopen (poll goroutine) or a stalled Backend call
 // (either goroutine) could otherwise hang shutdown forever; an app that logs
 // an abandoned goroutine and exits is better than one that never quits.
-const stopJoinTimeout = 5 * time.Second
+//
+// A var, not a const, solely so a test can shorten it to deterministically
+// force an abandonment (Fix A's test) without a real 5s wait. Tests in this
+// package never run in parallel, so temporarily overriding it is safe.
+var stopJoinTimeout = 5 * time.Second
 
 // joinOrAbandon waits for done to close, up to stopJoinTimeout, logging and
 // returning instead of blocking forever if it never does. The goroutine
@@ -488,8 +564,27 @@ func peak(frame []float32) float32 {
 // Effect and the Denoiser exclusively: nothing else in this file touches
 // them, so there is nothing to synchronise here beyond the atomic reads of
 // cfg/ptt/muted/sinks that cross in from the control plane.
-func (m *Manager) dspLoop(denoiser *Denoiser) {
-	defer close(m.dspDone)
+//
+// stopDSP/dspDone/captureRing/playbackRing/sfxVoices are PARAMETERS, not
+// read from the Manager's own fields, and that is load-bearing (Fix A):
+// Stop()'s bounded join (Fix 7) means this goroutine can be abandoned --
+// still running after Stop() gives up waiting on it -- and a later Start()
+// then publishes a NEW generation's rings (and voicePool) into
+// m.captureRing/m.playbackRing/m.sfxVoices. If this loop read those fields
+// live, an abandoned instance that eventually unblocks (e.g. from a slow
+// Sink.WriteFrame or OnVU call) would resume operating on the NEW
+// generation's state -- an unguarded read racing a guarded write, AND a
+// second producer/consumer violating the Ring's documented single-consumer
+// invariant (ring.go) or the voicePool's single-goroutine invariant
+// (sfx.go) -- sfxVoices needed exactly the same treatment as the rings once
+// -race caught two generations' dspLoops both calling MixInto on one
+// shared voicePool during this fix's own testing. Taking them all as
+// parameters means this instance is permanently wired to the generation it
+// was launched for: even if it never returns, it can only ever touch its
+// OWN orphaned state, never the next generation's. See dspLoop's call site
+// in Start for how the OS callbacks already used this pattern.
+func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, captureRing, playbackRing *Ring, sfxVoices *voicePool) {
+	defer close(dspDone)
 	defer denoiser.Close()
 
 	agc := NewAGC()
@@ -520,7 +615,7 @@ func (m *Manager) dspLoop(denoiser *Denoiser) {
 
 	for {
 		select {
-		case <-m.stopDSP:
+		case <-stopDSP:
 			return
 		case <-ticker.C:
 		}
@@ -541,12 +636,12 @@ func (m *Manager) dspLoop(denoiser *Denoiser) {
 		// the consumer (this goroutine) may legally do that, so this is
 		// the one place latency can recover: observe Dropped() climbing
 		// and Drain() the backlog it left behind.
-		if d := m.captureRing.Dropped(); d != lastCaptureDropped {
+		if d := captureRing.Dropped(); d != lastCaptureDropped {
 			lastCaptureDropped = d
-			m.captureRing.Drain()
+			captureRing.Drain()
 		}
 
-		n := m.captureRing.Read(inFrame)
+		n := captureRing.Read(inFrame)
 		for i := n; i < len(inFrame); i++ {
 			inFrame[i] = 0
 		}
@@ -596,10 +691,10 @@ func (m *Manager) dspLoop(denoiser *Denoiser) {
 		}
 
 		clear(sfxBuf)
-		m.sfx.MixInto(sfxBuf)
+		sfxVoices.mixInto(sfxBuf, m.sfx.sampleFor)
 
 		mixer.Mix(outFrame, monitorBuf, sfxBuf, notifBuf)
-		m.playbackRing.Write(outFrame)
+		playbackRing.Write(outFrame)
 
 		if p := peak(outFrame); p > vuOut {
 			vuOut = p
@@ -619,21 +714,31 @@ func (m *Manager) dspLoop(denoiser *Denoiser) {
 // last snapshot for hot-plug notification, and drives bounded-backoff
 // reopen attempts for any direction that failed to open (or lost its
 // device). It never touches the DSP goroutine's state.
-func (m *Manager) pollLoop() {
-	defer close(m.pollDone)
+//
+// stopPoll/pollDone/captureRing/playbackRing are parameters for the exact
+// same reason as dspLoop's (Fix A): maybeReopenCapture/maybeReopenPlayback
+// open NEW OS streams whose callbacks close over whichever ring they're
+// given, and Stop()'s bounded join can abandon this goroutine too. Reading
+// m.captureRing/m.playbackRing live here would let an abandoned poll
+// goroutine reopen a device against the NEXT generation's ring after a
+// Stop()+Start() cycle -- the same cross-generation entanglement dspLoop
+// was fixed for, just reached through the reopen path instead of the
+// steady-state read/write path.
+func (m *Manager) pollLoop(stopPoll, pollDone chan struct{}, captureRing, playbackRing *Ring) {
+	defer close(pollDone)
 	ticker := time.NewTicker(m.opts.PollInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-m.stopPoll:
+		case <-stopPoll:
 			return
 		case <-ticker.C:
 		}
-		m.pollOnce()
+		m.pollOnce(captureRing, playbackRing)
 	}
 }
 
-func (m *Manager) pollOnce() {
+func (m *Manager) pollOnce(captureRing, playbackRing *Ring) {
 	inputs, outputs, err := m.backend.Enumerate()
 	if err != nil {
 		m.log.Warn("audio: enumerate failed during poll", "err", err)
@@ -651,15 +756,15 @@ func (m *Manager) pollOnce() {
 
 	now := time.Now()
 	cfg := m.currentConfig()
-	m.maybeReopenCapture(cfg, inputs, now)
-	m.maybeReopenPlayback(cfg, outputs, now)
+	m.maybeReopenCapture(cfg, inputs, now, captureRing)
+	m.maybeReopenPlayback(cfg, outputs, now, playbackRing)
 
 	if changed {
 		m.emitState()
 	}
 }
 
-func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.Time) {
+func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.Time, captureRing *Ring) {
 	m.mu.Lock()
 	ready := m.captureStream == nil && !now.Before(m.inputRetryAt)
 	m.mu.Unlock()
@@ -668,7 +773,6 @@ func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.T
 	}
 
 	id := resolveDevice(cfg.InputDevice, inputs)
-	captureRing := m.captureRing
 	stream, err := m.backend.OpenCapture(id, func(frame []float32) {
 		captureRing.Write(frame)
 	})
@@ -688,7 +792,7 @@ func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.T
 	m.inputBackoff = 0
 }
 
-func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time.Time) {
+func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time.Time, playbackRing *Ring) {
 	m.mu.Lock()
 	ready := m.playbackStream == nil && !now.Before(m.outputRetryAt)
 	m.mu.Unlock()
@@ -697,7 +801,6 @@ func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time
 	}
 
 	id := resolveDevice(cfg.OutputDevice, outputs)
-	playbackRing := m.playbackRing
 	stream, err := m.backend.OpenPlayback(id, func(dst []float32) {
 		n := playbackRing.Read(dst)
 		for i := n; i < len(dst); i++ {

@@ -27,6 +27,11 @@ type FakeBackend struct {
 	// (rather than merely that Start() reported Running).
 	captureOpens  []string
 	playbackOpens []string
+
+	// enumerateGate, when set (via BlockEnumerate), makes Enumerate block
+	// until it's closed. Used to deterministically hold a Manager.Start()
+	// call inside its "starting" window for tests (Fix B).
+	enumerateGate chan struct{}
 }
 
 func NewFakeBackend() *FakeBackend { return &FakeBackend{} }
@@ -53,13 +58,33 @@ func (b *FakeBackend) FailNextOpen(err error) {
 	b.failNext = err
 }
 
+// BlockEnumerate makes every subsequent Enumerate call block until the
+// returned unblock func is called. Safe to call unblock more than once.
+func (b *FakeBackend) BlockEnumerate() (unblock func()) {
+	gate := make(chan struct{})
+	b.mu.Lock()
+	b.enumerateGate = gate
+	b.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
+}
+
 func (b *FakeBackend) Enumerate() ([]DeviceInfo, []DeviceInfo, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	gate := b.enumerateGate
 	if b.enumErr != nil {
-		return nil, nil, b.enumErr
+		err := b.enumErr
+		b.mu.Unlock()
+		return nil, nil, err
 	}
-	return append([]DeviceInfo(nil), b.inputs...), append([]DeviceInfo(nil), b.outputs...), nil
+	inputs := append([]DeviceInfo(nil), b.inputs...)
+	outputs := append([]DeviceInfo(nil), b.outputs...)
+	b.mu.Unlock()
+
+	if gate != nil {
+		<-gate
+	}
+	return inputs, outputs, nil
 }
 
 func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, error) {

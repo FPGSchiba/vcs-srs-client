@@ -139,6 +139,186 @@ func TestManagerFallsBackToDefaultWhenSavedDeviceIsGone(t *testing.T) {
 	}
 }
 
+func TestManagerSecondStartWhileFirstIsInProgressReturnsError(t *testing.T) {
+	b := NewFakeBackend()
+	b.SetDevices([]DeviceInfo{{ID: "mic-1", IsDefault: true}}, []DeviceInfo{{ID: "out-1", IsDefault: true}})
+	unblock := b.BlockEnumerate()
+	m := NewManager(b, ManagerOptions{PollInterval: time.Hour, VUInterval: time.Hour})
+	t.Cleanup(func() {
+		unblock() // in case a failure below leaves the first Start() parked
+		m.Stop()
+	})
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- m.Start() }()
+
+	// Deterministically wait for the first call to have claimed `starting`
+	// and be parked inside the blocked Enumerate -- not a sleep, an
+	// observable state transition (Fix B's State().Starting).
+	waitFor(t, func() bool { return m.State().Starting }, "first Start() never reached the in-progress state")
+
+	if err := m.Start(); !errors.Is(err, ErrStartInProgress) {
+		t.Fatalf("second concurrent Start() = %v, want ErrStartInProgress", err)
+	}
+	// The in-progress rejection must not have disturbed the first call's
+	// claim, and must not itself be mistaken for a completed start.
+	if st := m.State(); st.Running {
+		t.Fatalf("Running = true after only the rejected second Start(): %+v", st)
+	}
+
+	unblock()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Start() (unblocked) returned an error: %v", err)
+	}
+	if st := m.State(); !st.Running || st.Starting {
+		t.Fatalf("State() after the first Start() completed = %+v, want Running=true Starting=false", st)
+	}
+}
+
+// TestManagerAbandonedDSPLoopCannotTouchTheNextGenerationsRings exercises
+// Fix A's scenario end to end: it forces Stop() to abandon a genuinely
+// parked dspLoop goroutine (via a blockingSink and a shortened
+// stopJoinTimeout), starts a fresh generation, drives it, and then releases
+// the abandoned goroutine.
+//
+// What this test DOES reliably prove, deterministically: generation 2's
+// captureRing overflow count is fixed the instant the overflowing pushes
+// happen (Ring.Write drops synchronously, in the caller's own goroutine --
+// see ring.go -- so it does not depend on dspLoop's ticker winning or
+// losing any race), and it must stay exactly there whether or not
+// generation 1's parked goroutine has been released. If Fix A regressed
+// (dspLoop reading m.captureRing/m.playbackRing live instead of via
+// parameters), generation 1's resumed goroutine would become a SECOND
+// reader of generation 2's captureRing and a SECOND writer of its
+// playbackRing -- but neither of Manager's public State() fields
+// (Overruns = captureRing.Dropped(), Underruns = playbackRing.Underruns())
+// is guaranteed to move in a predictable direction from that kind of
+// interference, and the interference itself is exactly as timing-dependent
+// as ring.go's own doc says a same-shaped bug already is ("the overlap
+// window is narrow and timing-dependent enough that -race does not
+// reliably catch it"). So: this test is real evidence for the specific,
+// deterministic slice it covers (Overruns fixed at push time), but it is
+// NOT a reliable catch-all for a reintroduced Fix A regression, and I'm
+// not presenting it as one. The load-bearing argument is structural --
+// dspLoop/pollLoop take the rings as parameters, so an abandoned instance
+// has no path to reach a later generation's fields at all, independent of
+// timing -- see the report.
+func TestManagerAbandonedDSPLoopCannotTouchTheNextGenerationsRings(t *testing.T) {
+	origTimeout := stopJoinTimeout
+	stopJoinTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { stopJoinTimeout = origTimeout })
+
+	b := NewFakeBackend()
+	b.SetDevices([]DeviceInfo{{ID: "mic-1", IsDefault: true}}, []DeviceInfo{{ID: "out-1", IsDefault: true}})
+
+	block := newBlockingSink()
+	m := NewManager(b, ManagerOptions{PollInterval: time.Hour, VUInterval: time.Hour})
+	m.AddSink(block)
+	m.SetPTT(true) // open the gate so generation 1's dspLoop reaches the sink
+	if err := m.Start(); err != nil {
+		t.Fatalf("generation 1 Start: %v", err)
+	}
+
+	// Drive generation 1's dspLoop into the blocking sink and confirm it's
+	// actually parked there before touching Stop().
+	b.PushFrame(sine(0.5))
+	waitFor(t, block.wasEntered, "generation 1's dspLoop never reached the blocking sink")
+
+	// Stop() cannot join a goroutine parked in a Sink call; with
+	// stopJoinTimeout shortened above, it abandons it (Fix 7) instead of
+	// hanging the test. Generation 1's dspLoop is now a leaked goroutine,
+	// still holding generation 1's rings as PARAMETERS (Fix A) -- not as
+	// live Manager fields.
+	stopReturned := make(chan struct{})
+	go func() { m.Stop(); close(stopReturned) }()
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not return within 1s -- it should have abandoned the parked goroutine after stopJoinTimeout, not hung on it")
+	}
+
+	// Generation 2 must not inherit the open gate: if it did, its OWN
+	// dspLoop would also call the still-blocked sink and this test would
+	// hang on the wrong goroutine.
+	m.SetPTT(false)
+	if err := m.Start(); err != nil {
+		t.Fatalf("generation 2 Start: %v", err)
+	}
+	t.Cleanup(func() {
+		block.release() // let generation 1's parked goroutine finish
+		m.Stop()
+	})
+
+	// Overflow generation 2's OWN captureRing deterministically: Write
+	// drops synchronously in the pushing goroutine (ring.go), so this does
+	// not race dspLoop's ticker at all -- by the time the loop below
+	// returns, the drop count is fixed for good.
+	for i := 0; i < 40; i++ {
+		b.PushFrame(sine(0.9))
+	}
+	baseline := m.State().Overruns
+	if baseline == 0 {
+		t.Fatalf("pushing 40 frames into a %d-frame ring produced no Overruns -- test setup assumption is wrong", ringCapacityFrames)
+	}
+
+	// NOW let generation 1's parked goroutine resume. Give it a window to
+	// run its post-resume steps before checking generation 2 again.
+	block.release()
+	time.Sleep(50 * time.Millisecond)
+
+	if got := m.State().Overruns; got != baseline {
+		t.Fatalf("generation 2 Overruns changed from %d to %d after releasing generation 1's parked goroutine -- generation 1 wrote into generation 2's captureRing", baseline, got)
+	}
+
+	// Weaker, indirect signal for the OTHER half of the bug (a rogue
+	// reader stealing generation 2's captured frames rather than writing
+	// extra ones): if generation 1's zombie had been consuming from
+	// generation 2's captureRing concurrently, its rd index would have
+	// advanced further than generation 2's own dspLoop alone would drive
+	// it, which skews the ring's free-space accounting and would show up
+	// as a SMALLER-than-expected overflow on a fresh push. It is not
+	// proof -- a lost update on the ring's atomic indices is exactly the
+	// kind of timing-dependent corruption ring.go's own doc says -race
+	// does not reliably catch either -- but a grossly reduced increment
+	// here would still be a red flag worth investigating.
+	for i := 0; i < 40; i++ {
+		b.PushFrame(sine(0.9))
+	}
+	if got := m.State().Overruns - baseline; got == 0 {
+		t.Fatalf("generation 2's captureRing accepted 40 more frames with zero new Overruns after generation 1 resumed -- its free-space accounting looks disturbed")
+	}
+}
+
+// blockingSink parks its first WriteFrame call until release is called, and
+// reports (via wasEntered) whether that call has arrived -- so a test can
+// deterministically wait for a dspLoop to be parked inside it before acting,
+// rather than sleeping and hoping.
+type blockingSink struct {
+	entered     chan struct{}
+	enteredOnce sync.Once
+	releaseCh   chan struct{}
+	releaseOnce sync.Once
+}
+
+func newBlockingSink() *blockingSink {
+	return &blockingSink{entered: make(chan struct{}), releaseCh: make(chan struct{})}
+}
+
+func (s *blockingSink) WriteFrame(f []float32) {
+	s.enteredOnce.Do(func() { close(s.entered) })
+	<-s.releaseCh
+}
+func (s *blockingSink) Close() error { return nil }
+func (s *blockingSink) release()     { s.releaseOnce.Do(func() { close(s.releaseCh) }) }
+func (s *blockingSink) wasEntered() bool {
+	select {
+	case <-s.entered:
+		return true
+	default:
+		return false
+	}
+}
+
 func TestManagerReportsInputOpenFailure(t *testing.T) {
 	b := NewFakeBackend()
 	b.SetDevices([]DeviceInfo{{ID: "mic-1", IsDefault: true}}, []DeviceInfo{{ID: "out-1", IsDefault: true}})
