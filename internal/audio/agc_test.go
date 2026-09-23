@@ -24,8 +24,14 @@ func TestAGCRaisesQuietSignalTowardTarget(t *testing.T) {
 		a.Process(f)
 		got = rms(f)
 	}
-	if got < agcTargetRMS*0.5 {
-		t.Fatalf("quiet signal settled at RMS %v, want at least %v", got, agcTargetRMS*0.5)
+	// At the spec'd release rate, 200 frames of this tone converges to
+	// RMS ~= 0.0985. A release rate 2x slower than spec only reaches
+	// RMS ~= 0.088, so the old >= target*0.5 bound let a ~10x error slip
+	// through. Tighten it to sit strictly between the two so a
+	// meaningfully-wrong release rate actually fails here.
+	const wantMin = agcTargetRMS * 0.93
+	if got < wantMin {
+		t.Fatalf("quiet signal settled at RMS %v, want at least %v", got, wantMin)
 	}
 }
 
@@ -68,5 +74,67 @@ func TestAGCDoesNotAmplifyDigitalSilence(t *testing.T) {
 				t.Fatal("AGC produced non-zero output from digital silence")
 			}
 		}
+	}
+	// The all-zero-output check above is tautological by itself: 0 * gain
+	// == 0 for any finite gain, so it cannot detect the agcSilenceFloor
+	// guard being removed (with the guard gone, gain winds up toward
+	// agcMaxGain while the output samples still read zero). Assert the
+	// gain itself never moved off its initial value.
+	const wantMaxGain = 1.0 + 1e-6
+	if g := a.Gain(); g > wantMaxGain {
+		t.Fatalf("AGC gain wound up to %v on digital silence, want ~1.0 (unchanged)", g)
+	}
+}
+
+// TestAGCAttackFasterThanRelease pins the required attack/release
+// asymmetry documented on agcAttack/agcRelease in agc.go: gain must come
+// down from a too-loud signal much faster than it climbs up from a
+// too-quiet one. It measures actual convergence speed in each direction
+// rather than comparing the raw constants, so it also catches a
+// same-branch-logic regression where the two constants' VALUES are
+// swapped.
+func TestAGCAttackFasterThanRelease(t *testing.T) {
+	const settleFrames = 4000 // enough to fully converge at either rate
+
+	// framesToHalfway reports how many frames it takes a fresh AGC fed a
+	// constant tone to cross halfway between its starting gain (1.0) and
+	// that tone's steady-state gain. The steady-state gain is measured by
+	// running to convergence first, so the halfway point doesn't assume
+	// which rate constant is attached to which direction.
+	framesToHalfway := func(amp float32, rising bool) int {
+		steady := NewAGC()
+		for i := 0; i < settleFrames; i++ {
+			steady.Process(sine(amp))
+		}
+		target := (1.0 + steady.Gain()) / 2
+
+		a := NewAGC()
+		for n := 1; n <= settleFrames; n++ {
+			a.Process(sine(amp))
+			g := a.Gain()
+			if rising && g >= target {
+				return n
+			}
+			if !rising && g <= target {
+				return n
+			}
+		}
+		return settleFrames // never crossed halfway within the budget
+	}
+
+	framesDown := framesToHalfway(0.9, false) // loud: gain must fall
+	framesUp := framesToHalfway(0.02, true)   // quiet: gain must rise
+
+	if framesDown >= framesUp {
+		t.Fatalf("downward convergence (%d frames) not faster than upward (%d frames)", framesDown, framesUp)
+	}
+	// "Substantially faster": require at least a 3x margin, derived from
+	// the measured frame counts rather than a hard-coded frame budget.
+	// With the spec constants this margin holds by roughly 11x; if
+	// agcAttack and agcRelease were swapped, downward convergence would
+	// instead be the SLOW direction and this assertion fails.
+	const margin = 3
+	if framesDown*margin > framesUp {
+		t.Fatalf("downward convergence (%d frames) not substantially faster than upward (%d frames), want at least %dx margin", framesDown, framesUp, margin)
 	}
 }
