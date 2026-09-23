@@ -62,3 +62,39 @@ func TestSlogDefaultIsInstalled(t *testing.T) {
 		t.Error("slog.SetDefault(appLog) must come after appLog := logger.New(...)")
 	}
 }
+
+// TestStdlogLevelIsPinnedBeforeSetDefault guards the fix that keeps log.Fatal
+// alive once slog.SetDefault is installed.
+//
+// slog.SetDefault redirects the standard log package through a handlerWriter
+// pinned at LevelInfo, which DROPS the record when the handler is not enabled
+// at that level. With log_level = "WARN" or "ERROR" -- an ordinary setting for
+// a user cutting noise -- the log.Fatal(err) at the bottom of main would then
+// write nowhere at all: not the file, not stderr, where before SetDefault it
+// at least reached stderr. The app would exit 1 in silence on the single most
+// important message it can emit.
+//
+// slog.SetLogLoggerLevel(slog.LevelError) fixes that, and it appears exactly
+// once, in main.go, so no unit test inside any package can observe it --
+// delete the line and every other test in the repo stays green. Hence the
+// same grep-style assertion as TestJoystickBackendIsWired and
+// TestSlogDefaultIsInstalled. The ORDER matters too: SetLogLoggerLevel must
+// run before SetDefault installs the bridge it configures.
+func TestStdlogLevelIsPinnedBeforeSetDefault(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	text := string(src)
+	pinIdx := strings.Index(text, "slog.SetLogLoggerLevel(slog.LevelError)")
+	if pinIdx < 0 {
+		t.Fatal("main.go does not call slog.SetLogLoggerLevel(slog.LevelError) -- " +
+			"log.Fatal would be silently dropped at log_level = \"WARN\" or \"ERROR\", " +
+			"and the app would exit 1 with no message anywhere")
+	}
+	setIdx := strings.Index(text, "slog.SetDefault(appLog)")
+	if setIdx < 0 || pinIdx > setIdx {
+		t.Error("slog.SetLogLoggerLevel(slog.LevelError) must come BEFORE " +
+			"slog.SetDefault(appLog) -- it configures the stdlib bridge SetDefault installs")
+	}
+}
