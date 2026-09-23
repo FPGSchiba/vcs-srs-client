@@ -340,15 +340,19 @@ func (s *spyStream) wasStopped() bool {
 
 // TestManagerDiscardsLateReopenFromAStaleGeneration is Fix A round 3's
 // proof, exercised as a white-box test directly against maybeReopenCapture
-// (this file is in package audio, so that's available) rather than through
-// the full Start/Stop lifecycle -- driving it through real backoff timers
-// and hot-plug polling would need multi-second real-time waits (the retry
-// backoff starts at reopenBackoffInitial = 1s and isn't configurable) and
-// would still only produce this exact scenario probabilistically. Calling
-// maybeReopenCapture directly lets the test construct the precondition
-// (an in-flight reopen against a stale epoch) exactly and deterministically,
-// which is a stronger, not weaker, proof of the fix than a slow end-to-end
-// version would be.
+// (this file is in package audio, so that's available) instead of through
+// the full Start/Stop lifecycle. An end-to-end version turned out to also
+// be achievable deterministically (see
+// TestManagerStopAloneInvalidatesAnAbandonedReopen /
+// TestManagerStartAfterStopInvalidatesAnAbandonedReopen, added in round 4)
+// -- Start resets inputRetryAt to the zero time, so the FIRST reopen
+// attempt needs no backoff wait, and stopJoinTimeout is test-injectable.
+// This white-box version is kept alongside those, not instead of them: it
+// pins down maybeReopenCapture's contract in isolation (construct an
+// in-flight reopen against a stamped epoch, promote a new generation while
+// it's parked, assert the discard), independent of Start/Stop/pollLoop's
+// surrounding machinery, so a future change to any of THAT machinery can't
+// accidentally stop exercising this specific function's guarantee.
 //
 // This complements, rather than duplicates,
 // TestManagerAbandonedDSPLoopCannotTouchTheNextGenerationsRings: that test
@@ -404,6 +408,160 @@ func TestManagerDiscardsLateReopenFromAStaleGeneration(t *testing.T) {
 	}
 	if b.CaptureCallbackActive() {
 		t.Fatal("the stale reopen's phantom stream is still registered with the backend -- it was discarded but not stopped (leaked)")
+	}
+}
+
+// startManagerWithAbandonedCaptureReopen drives the ACTUAL end-to-end
+// lifecycle into the round 3/4 scenario, deterministically:
+//
+//  1. FailNextOpen makes Start's own OpenCapture fail, leaving
+//     m.captureStream nil and m.inputRetryAt at the zero time.
+//  2. Because inputRetryAt is the zero time, maybeReopenCapture's very
+//     FIRST attempt (on the poll goroutine's first tick) needs no backoff
+//     wait at all -- !now.Before(zeroTime) is immediately true. There is
+//     no multi-second timer to race here; only PollInterval (short, set
+//     by the caller) gates when that first tick fires.
+//  3. BlockNextOpenCapture arms the backend so that reopen attempt blocks
+//     genuinely inside OpenCapture, and the test waits for CaptureOpens()
+//     to record it (an observable state transition, not a guess) before
+//     proceeding.
+//  4. stopJoinTimeout is shortened (test-injectable, already used by
+//     TestManagerAbandonedDSPLoopCannotTouchTheNextGenerationsRings) so
+//     Stop() abandons the parked poll goroutine instead of hanging on it.
+//
+// The caller decides what happens next -- release the block with no
+// further Start() (the Stop()-alone gap), or Start() again first (the
+// Start()-races-Start() case already covered in round 3) -- via the
+// returned unblock func.
+func startManagerWithAbandonedCaptureReopen(t *testing.T, pollInterval time.Duration) (m *Manager, b *FakeBackend, unblockOpen func()) {
+	t.Helper()
+	origTimeout := stopJoinTimeout
+	stopJoinTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { stopJoinTimeout = origTimeout })
+
+	b = NewFakeBackend()
+	b.SetDevices([]DeviceInfo{{ID: "mic-1", IsDefault: true}}, []DeviceInfo{{ID: "out-1", IsDefault: true}})
+	b.FailNextOpen(errors.New("device busy"))
+
+	m = NewManager(b, ManagerOptions{PollInterval: pollInterval, VUInterval: time.Hour})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if st := m.State(); st.InputError == "" {
+		t.Fatalf("Start()'s own OpenCapture was supposed to fail (FailNextOpen); State() = %+v", st)
+	}
+
+	unblockOpen = b.BlockNextOpenCapture()
+
+	// The poll goroutine's reopen is the SECOND OpenCapture call (the
+	// first was Start's own, which failed via FailNextOpen).
+	waitFor(t, func() bool { return len(b.CaptureOpens()) >= 2 }, "the poll goroutine's reopen never reached OpenCapture")
+
+	stopReturned := make(chan struct{})
+	go func() { m.Stop(); close(stopReturned) }()
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not return within 1s -- it should have abandoned the parked reopen goroutine, not hung on it")
+	}
+
+	return m, b, unblockOpen
+}
+
+// TestManagerStopAloneInvalidatesAnAbandonedReopen is Fix A round 4's
+// proof for the terminal case round 3 missed: Stop() with NO subsequent
+// Start(). Before round 4, epoch was bumped only in Start, so a reopen
+// Stop() abandoned (still parked in OpenCapture) would, on finally
+// returning, read its stamped epoch as still equal to m.epoch (unchanged
+// since Stop never touched it) and publish -- a live, backend-registered
+// capture stream landing in a Manager that had already reported itself
+// stopped, with no future Stop() able to reach it.
+func TestManagerStopAloneInvalidatesAnAbandonedReopen(t *testing.T) {
+	m, b, unblockOpen := startManagerWithAbandonedCaptureReopen(t, 5*time.Millisecond)
+	t.Cleanup(unblockOpen)
+
+	if st := m.State(); st.Running {
+		t.Fatalf("State().Running = true after Stop(), want false: %+v", st)
+	}
+
+	// Release the parked reopen NOW, with no subsequent Start(). If Stop()
+	// didn't invalidate this generation, the reopen's OpenCapture call
+	// (which completes successfully once unblocked -- FailNextOpen was
+	// one-shot and already consumed by Start's own attempt) would publish
+	// a phantom stream into a manager that believes itself stopped.
+	//
+	// Note this is a settle-then-check, not a waitFor on
+	// CaptureCallbackActive(): that flag is ALREADY false right now (the
+	// blocked call hasn't reached `b.onFrame = onFrame` yet), so a waitFor
+	// keyed on "eventually false" would pass trivially without the
+	// released goroutine having done anything at all. There is no
+	// externally-observable transition here to key a waitFor off of in
+	// either direction (the correct outcome leaves everything exactly as
+	// Stop() already left it), so -- as with the same-shaped check in
+	// TestManagerAbandonedDSPLoopCannotTouchTheNextGenerationsRings -- a
+	// bounded settle window is the honest tool, not a polling condition
+	// dressed up to look more precise than it is.
+	unblockOpen()
+	time.Sleep(50 * time.Millisecond)
+
+	if b.CaptureCallbackActive() {
+		t.Fatal("the abandoned reopen's phantom stream is still registered with the backend after Stop() alone -- Stop() did not invalidate its own generation")
+	}
+	m.mu.Lock()
+	got := m.captureStream
+	m.mu.Unlock()
+	if got != nil {
+		t.Fatalf("m.captureStream = %v after Stop() with no subsequent Start(), want nil", got)
+	}
+}
+
+// TestManagerStartAfterStopInvalidatesAnAbandonedReopen is round 3's
+// scenario (a later Start() supersedes an abandoned reopen), driven this
+// time through the real Stop()-then-Start() lifecycle rather than a
+// white-box call, to confirm the epoch invalidation still holds when a
+// goroutine's parked span crosses an ACTUAL Stop()/Start() boundary rather
+// than a hand-constructed one.
+func TestManagerStartAfterStopInvalidatesAnAbandonedReopen(t *testing.T) {
+	m, b, unblockOpen := startManagerWithAbandonedCaptureReopen(t, 5*time.Millisecond)
+
+	// The backend now opens cleanly (FailNextOpen was one-shot, already
+	// consumed). Start a real generation 2 while generation 1's reopen is
+	// still parked inside the blocked OpenCapture.
+	if err := m.Start(); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	t.Cleanup(func() {
+		unblockOpen()
+		m.Stop()
+	})
+
+	m.mu.Lock()
+	gen2Stream := m.captureStream
+	m.mu.Unlock()
+	if gen2Stream == nil {
+		t.Fatal("generation 2's Start() did not open a capture stream")
+	}
+	if calls := b.CaptureOpens(); len(calls) != 3 {
+		t.Fatalf("CaptureOpens() = %v, want 3 (gen 1's failed attempt, gen 1's blocked reopen, gen 2's Start())", calls)
+	}
+
+	// Release generation 1's parked reopen now that generation 2 is live.
+	// There's no further CaptureOpens()/State() transition to key a waitFor
+	// off of here -- the stale reopen's own OpenCapture call was already
+	// recorded before it blocked, and discarding it changes nothing
+	// externally observable except (if the bug were present) overwriting
+	// m.captureStream. A short settle window, exactly as
+	// TestManagerAbandonedDSPLoopCannotTouchTheNextGenerationsRings already
+	// uses for the same reason, gives the released goroutine time to reach
+	// its write-or-discard decision before we check.
+	unblockOpen()
+	time.Sleep(50 * time.Millisecond)
+
+	m.mu.Lock()
+	got := m.captureStream
+	m.mu.Unlock()
+	if got != gen2Stream {
+		t.Fatalf("m.captureStream changed from generation 2's real stream to %v after generation 1's abandoned reopen resumed -- it was not discarded", got)
 	}
 }
 

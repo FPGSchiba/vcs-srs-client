@@ -165,7 +165,7 @@ type Manager struct {
 	mu                            sync.Mutex
 	running                       bool
 	starting                      bool       // claimed inside the same critical section as the running check, so a second concurrent Start() returns immediately instead of racing the first (Fix 2).
-	epoch                         uint64     // incremented in Start's mu-guarded publish. Round 2 parameterised the READ side of the poll goroutine (the rings); it missed that maybeReopenCapture/maybeReopenPlayback/pollOnce also WRITE BACK into Manager fields after a Backend call that can itself be the thing blocked when Stop() abandons this goroutine. mu makes those writes race-free, not current: a late write-back is checked against the CURRENT m.epoch before being published, and discarded (with the freshly-opened stream stopped) if this goroutine's generation is no longer it (Fix A round 3).
+	epoch                         uint64     // GENERATION IDENTITY, not "a Start happened": incremented in Start's mu-guarded publish AND in Stop's first mu section (Fix A round 4 -- Stop alone, with no subsequent Start, must also invalidate the generation it's tearing down, or a reopen it abandoned and gives up waiting on can still publish after Stop returns). Round 2 parameterised the READ side of the poll goroutine (the rings); it missed that maybeReopenCapture/maybeReopenPlayback/pollOnce also WRITE BACK into Manager fields after a Backend call that can itself be the thing blocked when Stop() abandons this goroutine. mu makes those writes race-free, not current: a late write-back is checked against the CURRENT m.epoch before being published, and discarded (with the freshly-opened stream stopped) if this goroutine's generation is no longer it (Fix A round 3). Every stamped goroutine now carries one uniform invariant -- "my epoch must still be the live one" -- that covers being superseded by a later Start() and being torn down by a Stop() with no successor, via the same check, with no special-casing.
 	sfxVoices                     *voicePool // current generation's mixing state; read fresh under mu by PlayEffect (Fix A round 2). Published under mu in Start alongside the rings, for the same reason.
 	captureStream, playbackStream Stream
 	inputErr, outputErr           string
@@ -226,6 +226,9 @@ func (m *Manager) SetConfig(cfg Config) {
 
 // SetPTT reports the refcounted, cross-source push-to-talk state.
 func (m *Manager) SetPTT(held bool) { m.ptt.Store(held) }
+
+// PTT reports the current push-to-talk state, mirroring Muted below.
+func (m *Manager) PTT() bool { return m.ptt.Load() }
 
 // SetMuted reports push-to-mute / mute-toggle state. Mute wins over PTT and
 // VOX unconditionally -- see gate.go.
@@ -508,6 +511,25 @@ func (m *Manager) Stop() {
 		return
 	}
 	m.running = false
+	// Bump epoch here too, not just in Start (Fix A round 4): epoch means
+	// "generation identity", not "a Start happened". Without this, a
+	// reopen abandoned by the bounded joins below (still parked in
+	// Backend.OpenCapture/OpenPlayback/Enumerate) that finally returns
+	// AFTER this Stop() has already nilled captureStream/playbackStream
+	// and closed the backend would still read m.epoch == epoch as true --
+	// its stamped generation was never invalidated, just torn down -- and
+	// would publish a live, backend-registered stream into a Manager that
+	// believes itself fully stopped. No future Stop() could ever reach it
+	// (this Stop already returned), and the next Start would silently
+	// overwrite the pointer without stopping what's actually there: an OS
+	// microphone stream kept running after the user is told audio is off.
+	// Bumping here gives every write-back site (pollOnce,
+	// maybeReopenCapture, maybeReopenPlayback) one uniform invariant --
+	// "my stamped epoch must still be the live one" -- that covers BOTH "a
+	// newer generation replaced me" (Start's bump) AND "the manager was
+	// torn down with no replacement" (this bump), with no special-casing
+	// needed at the check sites themselves.
+	m.epoch++
 	stopDSP, dspDone := m.stopDSP, m.dspDone
 	stopPoll, pollDone := m.stopPoll, m.pollDone
 	m.mu.Unlock()
