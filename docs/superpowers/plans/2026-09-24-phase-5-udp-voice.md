@@ -1177,7 +1177,13 @@ func TestVoicePacketGoldenBytes(t *testing.T) {
 }
 
 func TestParseRoundTrip(t *testing.T) {
-	orig := NewVoice(goldenSender, 0xFFFFFF, KHz(16777215), bytes.Repeat([]byte{0x7F}, 100), true, true)
+	// Values MUST be asymmetric. The original version of this test used
+	// Sequence = 0xFFFFFF and Frequency = KHz(16777215), which is also
+	// 0xFFFFFF -- both encode to the wire bytes FF FF FF, invariant under any
+	// reversal of byte order. A reversed decode in Parse would have passed
+	// every test in this file while silently corrupting every real frequency
+	// and sequence received from a peer.
+	orig := NewVoice(goldenSender, 0x010203, KHz(251300), bytes.Repeat([]byte{0x7F}, 100), true, true)
 	got, err := Parse(orig.AppendTo(nil))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -1185,11 +1191,11 @@ func TestParseRoundTrip(t *testing.T) {
 	if got.Type != PacketTypeVoice {
 		t.Errorf("Type = %v", got.Type)
 	}
-	if got.Sequence != 0xFFFFFF {
-		t.Errorf("Sequence = %#x, want 0xffffff", got.Sequence)
+	if got.Sequence != 0x010203 {
+		t.Errorf("Sequence = %#x, want 0x010203", got.Sequence)
 	}
-	if got.Frequency != KHz(16777215) {
-		t.Errorf("Frequency = %d", got.Frequency)
+	if got.Frequency != KHz(251300) {
+		t.Errorf("Frequency = %d, want 251300", got.Frequency)
 	}
 	if got.SenderID != goldenSender {
 		t.Errorf("SenderID = %v", got.SenderID)
