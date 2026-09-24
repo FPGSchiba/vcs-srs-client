@@ -916,15 +916,27 @@ import "testing"
 // We make them equal BY CONSTRUCTION: MHz32 evaluates the identical
 // expression the server evaluates. This test pins that, and would catch a
 // future "optimisation" to float64 intermediates.
+// CORRECTED DURING EXECUTION. The original version of this test computed its
+// expected value as `float32(uint32(khz)) / 1000.0` -- the same expression
+// MHz32 evaluates, re-typed locally. That is tautological: it compares the
+// implementation against a copy of itself, cannot fail for any change that
+// alters both, and proves nothing about agreement with the server. Expected
+// values must be LITERALS, independent of the code under test.
 func TestMHz32MatchesServerComputation(t *testing.T) {
-	for _, khz := range []KHz{
-		118500, 251300, 243000, 305750, 127125, 140625,
-		121500, 156800, 100001, 399999, 1, 16777215,
+	for _, tc := range []struct {
+		khz  KHz
+		want float32
+	}{
+		{1, 0.001},
+		{118500, 118.5},
+		{251300, 251.3},
+		{243000, 243},
+		{305750, 305.75},
+		{127125, 127.125},
+		{16777215, 16777.215},
 	} {
-		advertised := khz.MHz32()               // what we send in UpdateRadioInfo
-		server := float32(uint32(khz)) / 1000.0 // what the server computes from the packet
-		if advertised != server {
-			t.Errorf("kHz %d: advertised %v != server-computed %v", khz, advertised, server)
+		if got := tc.khz.MHz32(); got != tc.want {
+			t.Errorf("KHz(%d).MHz32() = %v, want %v", tc.khz, got, tc.want)
 		}
 	}
 }
@@ -1001,11 +1013,18 @@ const maxKHz = 1<<24 - 1
 // It ROUNDS where the C# peer's SetFrequencyHz truncates. On the kHz grid the
 // two agree; off the grid, rounding is the only rule that round-trips, so a
 // float32 sitting a hair below its intended kHz does not lose a whole kHz.
+// CORRECTED DURING EXECUTION: the original returned KHz(math.Round(...)) with
+// no range guard. Converting a float64 that exceeds uint32's range is not
+// defined to any particular value in Go, so an out-of-range input silently
+// produced a garbage frequency. The result is now always Valid(), with 0 as
+// the single "not a representable frequency" sentinel -- which already covered
+// the f <= 0 case, so callers have one thing to check rather than two.
 func KHzFromMHz32(f float32) KHz {
-	if f <= 0 {
+	k := math.Round(float64(f) * 1000)
+	if !(k >= 1) || k > maxKHz { // !(k >= 1) also rejects NaN
 		return 0
 	}
-	return KHz(math.Round(float64(f) * 1000))
+	return KHz(k)
 }
 
 // MHz32 returns the float32 MHz value to advertise in UpdateRadioInfo.
