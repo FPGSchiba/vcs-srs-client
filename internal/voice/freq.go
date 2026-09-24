@@ -29,11 +29,20 @@ const maxKHz = 1<<24 - 1
 // It ROUNDS where the C# peer's SetFrequencyHz truncates. On the kHz grid the
 // two agree; off the grid, rounding is the only rule that round-trips, so a
 // float32 sitting a hair below its intended kHz does not lose a whole kHz.
+//
+// The returned value is always Valid(); 0 means the input was not a
+// representable frequency (negative, NaN, +Inf, or exceeds the 24-bit ceiling).
 func KHzFromMHz32(f float32) KHz {
 	if f <= 0 {
 		return 0
 	}
-	return KHz(math.Round(float64(f) * 1000))
+	// Compute in float64 to preserve precision during multiplication.
+	rounded := math.Round(float64(f) * 1000)
+	// Check for overflow: reject any value that exceeds maxKHz.
+	if rounded > float64(maxKHz) || math.IsNaN(rounded) {
+		return 0
+	}
+	return KHz(rounded)
 }
 
 // MHz32 returns the float32 MHz value to advertise in UpdateRadioInfo.
