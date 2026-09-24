@@ -176,21 +176,40 @@ type Manager struct {
 	inputRetryAt, outputRetryAt   time.Time
 	inputBackoff, outputBackoff   time.Duration
 
-	// inputTargetID/outputTargetID record the device id the LAST open
-	// ATTEMPT was made against, as opposed to inputID/outputID which record
-	// the device currently open. They exist so a backoff accumulated against
-	// one device can be recognised as irrelevant when the user selects a
-	// different one -- the case where no stream is open, which is precisely
-	// when a backoff is in force and precisely when the old reset (which
-	// required an open stream) never ran.
+	// inputTargetID/outputTargetID record the RESOLVED device id the LAST
+	// open ATTEMPT was made against; inputAttemptCfg/outputAttemptCfg record
+	// the CONFIGURED id (cfg.InputDevice/cfg.OutputDevice, "" meaning follow
+	// the system default) that attempt was made under. Both differ from
+	// inputID/outputID, which record the device currently OPEN.
 	//
-	// inputID/outputID cannot stand in for them: a direction that has never
-	// successfully opened leaves those empty, so the very scenario the
+	// They exist so closeSupersededStreams can tell three situations apart
+	// while no stream is open -- which is precisely when a backoff is in
+	// force, and precisely the case the old reset (which required an open
+	// stream) never ran for:
+	//
+	//  1. The CONFIGURED id moved: a deliberate user action in Settings.
+	//     The accumulated backoff belongs to a device nobody is asking for
+	//     any more, so it is cleared outright.
+	//  2. The configured id is unchanged but the RESOLVED target went from
+	//     nothing to a real device: System Default plus a hot-plug. The
+	//     retry is made due immediately, but the accumulated backoff is
+	//     KEPT -- see closeSupersededStreams for why that asymmetry is the
+	//     whole design.
+	//  3. The configured id is unchanged and the resolved target merely
+	//     moved between two real devices: a flapping enumeration, not a
+	//     user decision. Nothing is reset.
+	//
+	// inputID/outputID cannot stand in for the target: a direction that has
+	// never successfully opened leaves those empty, so the very scenario the
 	// reset is for -- a device that keeps failing -- is the one they carry
-	// no information about. Written under mu at every attempt site (Start's
-	// publish, maybeReopenCapture/maybeReopenPlayback), read under mu in
+	// no information about. And the target cannot stand in for the
+	// configured id either: under System Default cfg.InputDevice stays ""
+	// across a hot-plug, so only the pair distinguishes (1) from (2)/(3).
+	// All four are written under mu at every attempt site (Start's publish,
+	// maybeReopenCapture/maybeReopenPlayback) and read under mu in
 	// closeSupersededStreams.
-	inputTargetID, outputTargetID string
+	inputTargetID, outputTargetID     string
+	inputAttemptCfg, outputAttemptCfg string
 
 	// lastState is the last snapshot handed to opts.OnState, so
 	// emitStateIfChanged can suppress identical repeats. Nil until the
@@ -215,10 +234,16 @@ type Manager struct {
 	// only be observed by sleeping -- which turns a correctness assertion
 	// about backlog absorption into a race between the test and the
 	// scheduler, on the one path in this package where a flaky test would
-	// be worse than no test. It is read ONCE, at dspLoop entry, before the
-	// goroutine does any work -- never on the 10 ms path -- and is only
-	// ever set before Start, so the goroutine-creation edge publishes it
-	// and it needs no synchronisation of its own.
+	// be worse than no test.
+	//
+	// It is read ONCE, in Start, and handed to dspLoop as a PARAMETER --
+	// dspLoop never reads this field. That is not fussiness: dspLoop's doc
+	// explains at length why every piece of per-generation state it touches
+	// is a parameter (an abandoned generation must never be able to reach
+	// the next generation's fields), and an exception to that rule is worth
+	// more as a grep-clean invariant than as one saved argument. It is only
+	// ever set before Start, so Start's single read races nothing and the
+	// goroutine-creation edge publishes it.
 	dspTick <-chan time.Time
 }
 
@@ -597,10 +622,12 @@ func (m *Manager) Start() error {
 	m.captureStream, m.playbackStream = capStream, playStream
 	m.inputID, m.outputID = inID, outID
 	// Start's OpenCapture/OpenPlayback above ARE open attempts, so they
-	// stamp the target too -- otherwise a Start whose open failed would
-	// leave the target empty and the first device change after it would
-	// have nothing to compare against (see the inputTargetID field doc).
+	// stamp the target and the configured id they were made under too --
+	// otherwise a Start whose open failed would leave both empty and the
+	// first device change after it would have nothing to compare against
+	// (see the inputTargetID field doc).
 	m.inputTargetID, m.outputTargetID = inID, outID
+	m.inputAttemptCfg, m.outputAttemptCfg = cfg.InputDevice, cfg.OutputDevice
 	m.inputSubstituted, m.outputSubstituted = inputSubstituted, outputSubstituted
 	m.inputBackoff, m.outputBackoff = 0, 0
 	m.inputRetryAt, m.outputRetryAt = time.Time{}, time.Time{}
@@ -632,7 +659,10 @@ func (m *Manager) Start() error {
 	// Passed-by-value locals can never be repointed by a later Start(), so
 	// an abandoned generation stays permanently wired to its OWN rings and
 	// can never cross into the next generation's state.
-	go m.dspLoop(denoiser, stopDSP, dspDone, captureRing, playbackRing, sfxVoices)
+	// See Manager.dspTick: nil in production, and only ever set before
+	// Start, so reading it here (and never inside dspLoop) keeps the
+	// "per-generation state is a parameter" rule exceptionless.
+	go m.dspLoop(denoiser, stopDSP, dspDone, captureRing, playbackRing, sfxVoices, m.dspTick)
 	go m.pollLoop(stopPoll, pollDone, captureRing, playbackRing, epoch)
 
 	m.emitState()
@@ -802,8 +832,9 @@ func peak(frame []float32) float32 {
 // them, so there is nothing to synchronise here beyond the atomic reads of
 // cfg/ptt/muted/sinks that cross in from the control plane.
 //
-// stopDSP/dspDone/captureRing/playbackRing/sfxVoices are PARAMETERS, not
-// read from the Manager's own fields, and that is load-bearing (Fix A):
+// stopDSP/dspDone/captureRing/playbackRing/sfxVoices/dspTick are
+// PARAMETERS, not read from the Manager's own fields, and that is
+// load-bearing (Fix A):
 // Stop()'s bounded join (Fix 7) means this goroutine can be abandoned --
 // still running after Stop() gives up waiting on it -- and a later Start()
 // then publishes a NEW generation's rings (and voicePool) into
@@ -820,7 +851,7 @@ func peak(frame []float32) float32 {
 // was launched for: even if it never returns, it can only ever touch its
 // OWN orphaned state, never the next generation's. See dspLoop's call site
 // in Start for how the OS callbacks already used this pattern.
-func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, captureRing, playbackRing *Ring, sfxVoices *voicePool) {
+func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, captureRing, playbackRing *Ring, sfxVoices *voicePool, dspTick <-chan time.Time) {
 	defer close(dspDone)
 	defer denoiser.Close()
 
@@ -871,11 +902,11 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 	ticker := time.NewTicker(FrameDuration)
 	defer ticker.Stop()
 	// See Manager.dspTick: production always takes the real ticker; only a
-	// test ever substitutes a hand-driven channel, and it does so before
-	// Start, so this single read races nothing.
+	// test ever substitutes a hand-driven channel, which Start captured and
+	// passed in as the dspTick parameter.
 	tickC := ticker.C
-	if m.dspTick != nil {
-		tickC = m.dspTick
+	if dspTick != nil {
+		tickC = dspTick
 	}
 
 	for {
@@ -1161,27 +1192,73 @@ func (m *Manager) closeSupersededStreams(cfg Config, inputs, outputs []DeviceInf
 		// direction that had been failing could sit out its (up to 30s)
 		// backoff before honouring the user's brand-new selection.
 		m.inputBackoff, m.inputRetryAt = 0, time.Time{}
-	} else if m.captureStream == nil && m.inputTargetID != "" && wantIn != m.inputTargetID {
-		// No stream to close, but the target moved: the accumulated backoff
-		// belongs to a device the user is no longer asking for.
+	} else if m.captureStream == nil {
+		// No stream to close. This is the only case in which a backoff is
+		// actually in force -- a stream that is open by definition has none
+		// -- so gating the reset above on `m.captureStream != nil` made it
+		// a no-op for every situation it was written to fix.
 		//
-		// This is the case the reset above could never reach, and the only
-		// case in which a backoff is actually in force: a stream that is
-		// open by definition has no backoff, so gating the reset on
-		// `m.captureStream != nil` made it a no-op for every situation it
-		// was written to fix. A user whose microphone kept failing to open
-		// would pick a working one in Settings and then hear nothing for
-		// up to 30 s, with no indication that anything was pending.
-		m.inputBackoff, m.inputRetryAt = 0, time.Time{}
+		// Two DIFFERENT signals reach this branch and they need different
+		// answers (see the inputTargetID field doc for the three cases):
+		switch {
+		case cfg.InputDevice != m.inputAttemptCfg:
+			// (1) The user changed the selection in Settings. The backoff
+			// was accumulated against a device nobody is asking for any
+			// more, so it is irrelevant in full: clear it, and retry on
+			// this very tick. Otherwise a user whose microphone kept
+			// failing would pick a working one and then hear nothing for
+			// up to 30 s, with no indication anything was pending.
+			m.inputBackoff, m.inputRetryAt = 0, time.Time{}
+		case m.inputTargetID == "" && wantIn != "":
+			// (2) The selection is unchanged (typically System Default, so
+			// cfg.InputDevice is "" on both sides of a hot-plug) but the
+			// last attempt had NOTHING to aim at -- resolveDevice returns
+			// "" when nothing enumerates -- and a device has since
+			// appeared. Boot with the USB headset unplugged, plug it in a
+			// minute later: without this the retry sits out a backoff that
+			// escalated while there was no hardware to open at all.
+			//
+			// Only the DUE TIME is cleared; m.inputBackoff is deliberately
+			// KEPT. Clearing the backoff here too is what would reopen the
+			// hole this case sits next to: a device that flaps in and out
+			// of the enumeration drives the target between "" and a real
+			// id, so a full reset would fire on every flap and pin the
+			// retry rate at reopenBackoffInitial forever. Per
+			// reopenBackoffInitial/Max's doc, a pinned retry rate is a
+			// correspondingly faster leak of the per-open C allocation
+			// malgo never frees, so the rate must keep decaying even while
+			// hardware is flapping.
+			//
+			// RESIDUAL, accepted deliberately: a hot-plug gets exactly ONE
+			// prompt attempt. If the newly appeared device also fails to
+			// open, the next retry is nextBackoff(the accumulated value) --
+			// up to reopenBackoffMax -- rather than a fresh 1 s. The normal
+			// case (the device opens) resets the backoff to 0 on success,
+			// so the user-visible behaviour is "plug in, mic works within a
+			// poll"; the slow path is reserved for hardware that appears
+			// and still cannot be opened, which is exactly the case the
+			// bound exists for.
+			m.inputRetryAt = time.Time{}
+		}
+		// (3) Configured id unchanged and the target merely moved between
+		// two real devices: a flapping enumeration, not a user decision.
+		// Nothing is reset, so nextBackoff keeps escalating toward
+		// reopenBackoffMax.
 	}
 	wantOut := resolveDevice(cfg.OutputDevice, outputs)
 	if m.playbackStream != nil && wantOut != m.outputID {
 		playStream = m.playbackStream
 		m.playbackStream = nil
 		m.outputBackoff, m.outputRetryAt = 0, time.Time{}
-	} else if m.playbackStream == nil && m.outputTargetID != "" && wantOut != m.outputTargetID {
-		// Symmetric with capture above.
-		m.outputBackoff, m.outputRetryAt = 0, time.Time{}
+	} else if m.playbackStream == nil {
+		// Symmetric with capture above -- see that branch for the full
+		// reasoning behind the two different answers.
+		switch {
+		case cfg.OutputDevice != m.outputAttemptCfg:
+			m.outputBackoff, m.outputRetryAt = 0, time.Time{}
+		case m.outputTargetID == "" && wantOut != "":
+			m.outputRetryAt = time.Time{}
+		}
 	}
 	m.mu.Unlock()
 
@@ -1199,14 +1276,15 @@ func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.T
 	m.mu.Lock()
 	ready := m.captureStream == nil && !now.Before(m.inputRetryAt) && m.epoch == epoch
 	if ready {
-		// Stamp the device this attempt is aimed at in the SAME critical
-		// section that decides to make it. closeSupersededStreams reads it
-		// on a later tick to tell "the backoff belongs to the device we
-		// are still asking for" from "the backoff belongs to a device the
-		// user has moved on from". Stamping it only on SUCCESS would leave
-		// it empty for exactly the case that needs it -- a device that
-		// never opens at all.
+		// Stamp both the device this attempt is aimed at and the configured
+		// id it is being made under, in the SAME critical section that
+		// decides to make it. closeSupersededStreams reads the pair on a
+		// later tick to tell "the user picked something else" from "the
+		// enumeration moved under us" from "nothing changed". Stamping only
+		// on SUCCESS would leave them empty for exactly the case that needs
+		// them -- a device that never opens at all.
 		m.inputTargetID = id
+		m.inputAttemptCfg = cfg.InputDevice
 	}
 	m.mu.Unlock()
 	if !ready {
@@ -1257,6 +1335,7 @@ func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time
 	if ready {
 		// Symmetric with maybeReopenCapture: see its comment.
 		m.outputTargetID = id
+		m.outputAttemptCfg = cfg.OutputDevice
 	}
 	m.mu.Unlock()
 	if !ready {

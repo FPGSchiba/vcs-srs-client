@@ -101,8 +101,8 @@ func TestStdlogLevelIsPinnedBeforeSetDefault(t *testing.T) {
 
 // readMainGo is a small helper shared by the audio-wiring tests below --
 // unlike TestJoystickBackendIsWired and its siblings above, which each
-// re-read the file inline, these three all need the same source text more
-// than once per test.
+// re-read the file inline, these all need the same source text more than
+// once per test.
 func readMainGo(t *testing.T) string {
 	t.Helper()
 	src, err := os.ReadFile("main.go")
@@ -192,11 +192,7 @@ func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
 // func main(), which no test can observe at runtime without launching the
 // real GUI.
 func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("read main.go: %v", err)
-	}
-	text := string(src)
+	text := readMainGo(t)
 	stopIdx := strings.Index(text, "defer am.Stop()")
 	closeIdx := strings.Index(text, "defer backend.Close()")
 	if stopIdx < 0 {
