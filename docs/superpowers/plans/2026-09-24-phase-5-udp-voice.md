@@ -1779,6 +1779,18 @@ Structure, from spec §8.1:
 4. Targets held in an `atomic.Pointer[[]TXTarget]`.
 5. Assert `n <= opus.MaxPacket` before sending; log once and drop if exceeded.
 
+**A trap found while vendoring libopus (Task 1), confirmed empirically — do not re-derive it:**
+
+Even with DTX **off**, a bit-exact digital-silence frame encodes to **3 bytes**, via Opus's own `is_digital_silence()` path rather than DTX. Three bytes is ≤ 5, so **the server drops it without relaying**.
+
+Consequences that bind this task:
+
+- **Never use "encode a zero/silent frame" as a signal.** Not as a keepalive, not as an end-of-transmission marker, not as a heartbeat to hold a stream open on the receiver. It will not arrive, and nothing anywhere will report that it did not.
+- Silence *during* a held PTT is fine and needs no special handling: the receiver's jitter buffer sees a gap and conceals it, which is the correct outcome.
+- `TXStats.Sent` counts datagrams handed to the socket, not datagrams relayed. Do not document it as the latter.
+
+For reference, the measurement: DTX on, silent input → 1 byte for 181 of 200 frames. DTX off, silent input → 3 bytes for all 200. On real signal the two settings are byte-for-byte identical — which is exactly why enabling DTX would look harmless in testing and only fail when someone stopped talking.
+
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `go test -tags purego -race ./internal/voice/ -run TestTX -v`
