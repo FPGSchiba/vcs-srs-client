@@ -813,7 +813,20 @@ Replace the one-frame-per-tick read with a catch-up read bounded by the ring's a
 	const maxCatchUpFrames = 3
 ```
 
-and drive the per-frame chain body (NS → AGC → gate → sinks → monitor) in an inner loop over `frames := 1 + min(captureRing.Available()/FrameSamples, maxCatchUpFrames)` iterations, while the playback side (`mixer.Mix` / `playbackRing.Write`) still runs **exactly once** per tick — playback is paced by the output device, not by capture backlog.
+and drive the per-frame chain body (NS → AGC → gate → sinks → monitor) in an inner loop, while the playback side (`mixer.Mix` / `playbackRing.Write`) still runs **exactly once** per tick — playback is paced by the output device, not by capture backlog.
+
+> **Corrected during execution.** This step originally specified
+> `frames := 1 + min(captureRing.Available()/FrameSamples, maxCatchUpFrames)`.
+> That is wrong: `Available()/FrameSamples` is *already* the frame count, so the
+> `1 +` reads one frame past the end on every non-empty tick, the ring returns
+> short, the tail is zero-filled, and a **spurious silent frame is pushed into
+> every Sink** — precisely the bursty cadence this follow-up exists to remove.
+>
+> The correct form, which is what landed:
+> `frames := max(1, min(framesPresent, 1+maxCatchUpFrames))`.
+> The floor of 1 preserves the pre-existing empty-ring pass, which `Gate` needs
+> because it counts frames rather than wall clock — dropping it would stall PTT
+> release tails and VOX hang.
 
 Add a test in `internal/audio/manager_test.go` that writes 4 frames into the capture ring, runs a single tick, and asserts the sink saw more than one frame:
 
