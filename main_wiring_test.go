@@ -179,3 +179,35 @@ func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
 			"never be released cleanly on shutdown")
 	}
 }
+
+// TestMainWiringClosesBackendAfterManagerStop pins the shutdown ordering
+// main.go depends on. Stop()'s joins are bounded, so dspLoop can still be
+// running when Stop() returns; closing the backend before Stop() would let
+// an abandoned dspLoop touch a freed malgo context. Phase 5's socket-owning
+// sink is what makes a slow WriteFrame -- and therefore an abandoned
+// dspLoop -- reachable in practice.
+//
+// This reads main.go's source rather than executing it, because the
+// ordering being asserted is the order of two `defer` statements inside
+// func main(), which no test can observe at runtime without launching the
+// real GUI.
+func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	text := string(src)
+	stopIdx := strings.Index(text, "defer am.Stop()")
+	closeIdx := strings.Index(text, "defer backend.Close()")
+	if stopIdx < 0 {
+		t.Fatal("main.go no longer contains `defer am.Stop()`; update this test deliberately, not reflexively")
+	}
+	if closeIdx < 0 {
+		t.Fatal("main.go no longer contains `defer backend.Close()`; update this test deliberately, not reflexively")
+	}
+	// defers run LIFO, so the one registered FIRST runs LAST.
+	// backend.Close() must run last, so it must be registered first.
+	if closeIdx > stopIdx {
+		t.Fatalf("`defer backend.Close()` (offset %d) must be registered BEFORE `defer am.Stop()` (offset %d) so it runs after it; see Stop()'s doc on bounded joins", closeIdx, stopIdx)
+	}
+}

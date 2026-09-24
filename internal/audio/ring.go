@@ -115,6 +115,24 @@ func (r *Ring) Drain() {
 	r.r.Store(r.w.Load())
 }
 
+// Available reports how many samples are currently buffered, i.e. how much
+// backlog the consumer is behind by.
+//
+// It is consumer-side, like Read and Drain: it loads both indices and
+// stores neither, so it respects the strict index ownership the Ring doc
+// describes. Loading w first and r second means the result is a LOWER BOUND
+// on what a Read issued immediately after would find -- the producer may
+// add more in between, and only the consumer (the caller) moves r. That
+// direction of error is the one dspLoop's bounded catch-up needs: it must
+// never plan to read more frames than are really there (that would inject
+// silence), while reading fewer than are there merely defers the rest to
+// the next tick.
+func (r *Ring) Available() int {
+	w := r.w.Load()
+	rd := r.r.Load()
+	return int(w - rd)
+}
+
 // Dropped is the cumulative count of samples discarded because a Write
 // arrived with insufficient free space, reported via audio:state.
 func (r *Ring) Dropped() uint64 { return r.dropped.Load() }

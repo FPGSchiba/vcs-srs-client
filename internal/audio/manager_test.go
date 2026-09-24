@@ -929,3 +929,274 @@ func TestManagerRestartAfterStopReopensDevices(t *testing.T) {
 		t.Fatalf("backend.OpenPlayback calls = %v, want a second open for out-1 after the restart", calls)
 	}
 }
+
+// TestEmitStateIfChangedHonoursEpoch pins that an abandoned generation
+// cannot publish a stale state over the current one. pollOnce can outlive
+// the generation that launched it (Stop()'s bounded joins), and without an
+// epoch check its emitState would overwrite m.lastState and fire OnState
+// with a snapshot belonging to a dead generation.
+func TestEmitStateIfChangedHonoursEpoch(t *testing.T) {
+	var mu sync.Mutex
+	var seen []State
+	m := NewManager(NewFakeBackend(), ManagerOptions{
+		OnState: func(st State) {
+			mu.Lock()
+			seen = append(seen, st)
+			mu.Unlock()
+		},
+		VUInterval: time.Hour,
+	})
+
+	m.mu.Lock()
+	current := m.epoch
+	m.mu.Unlock()
+
+	// An emit tagged with a stale epoch must be discarded entirely.
+	m.emitStateIfChanged(current - 1)
+
+	mu.Lock()
+	n := len(seen)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("stale-epoch emit published %d state(s); expected 0", n)
+	}
+
+	// The current epoch still emits.
+	m.emitStateIfChanged(current)
+	mu.Lock()
+	n = len(seen)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("current-epoch emit published %d state(s); expected 1", n)
+	}
+}
+
+// pollOnceForTest drives exactly one poll tick synchronously, with this
+// generation's rings and epoch -- the same arguments pollLoop would pass.
+// It exists so a test can step the device-supersede / bounded-backoff
+// reopen machinery deterministically instead of sleeping on PollInterval
+// and hoping the right number of ticks landed.
+func (m *Manager) pollOnceForTest() {
+	m.mu.Lock()
+	captureRing, playbackRing, epoch := m.captureRing, m.playbackRing, m.epoch
+	m.mu.Unlock()
+	m.pollOnce(captureRing, playbackRing, epoch)
+}
+
+// TestDeviceChangeDuringBackoffIsNotDelayed pins that selecting a different
+// device clears a backoff accumulated against the PREVIOUS device. The
+// reset used to live only in the branch that requires an open stream, so
+// the one case that needed it -- no stream, because opening kept failing --
+// was the one case it never ran for, stranding the user's new selection
+// behind up to 30 seconds of backoff for a device they are no longer asking
+// for.
+func TestDeviceChangeDuringBackoffIsNotDelayed(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "bad", Name: "Bad"}, {ID: "good", Name: "Good", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	be.FailCaptureFor("bad", errors.New("device is wedged"))
+
+	// PollInterval is deliberately far longer than the test: every tick
+	// that matters is driven by hand through pollOnceForTest, so the real
+	// poll goroutine must not slip an extra one in behind our back.
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	m.SetConfig(Config{InputDevice: "bad"})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// Drive polls until a backoff has accumulated against "bad".
+	for i := 0; i < 3; i++ {
+		m.pollOnceForTest()
+	}
+	m.mu.Lock()
+	backoff := m.inputBackoff
+	m.mu.Unlock()
+	if backoff == 0 {
+		t.Fatal("expected a non-zero input backoff after repeated open failures")
+	}
+
+	// The user picks a device that works.
+	m.SetConfig(Config{InputDevice: "good"})
+	m.pollOnceForTest()
+
+	m.mu.Lock()
+	stream, id, resetBackoff := m.captureStream, m.inputID, m.inputBackoff
+	m.mu.Unlock()
+	if stream == nil {
+		t.Fatalf("capture did not open on the newly selected device; backoff is still %v", resetBackoff)
+	}
+	if id != "good" {
+		t.Fatalf("opened device %q, want \"good\"", id)
+	}
+}
+
+// TestBackoffIsHeldWhileTheTargetIsUnchanged is the other half of
+// TestDeviceChangeDuringBackoffIsNotDelayed: the nil-stream reset must fire
+// when the target MOVES and stay quiet when it does not.
+//
+// It is what makes maybeReopenCapture's inputTargetID stamp load-bearing.
+// Without that stamp the target would freeze at whatever Start resolved, so
+// a FALLBACK device that keeps failing (the device Start opened is gone, so
+// resolveDevice now names a different one) would look like a brand-new
+// target on every single poll tick. The reset would then clear the backoff
+// each time and bounded-backoff would silently degrade into a retry on
+// every tick -- which is precisely the unbounded per-open C-allocation path
+// reopenBackoffMax exists to prevent (see its doc).
+func TestBackoffIsHeldWhileTheTargetIsUnchanged(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "a", Name: "A", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	// Empty id == "follow the system default", so the resolved device
+	// changes under us when the default changes -- without any SetConfig.
+	m.SetConfig(Config{})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// "a" unplugs; the default becomes "b", which is wedged.
+	be.SetDevices(
+		[]DeviceInfo{{ID: "b", Name: "B", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	be.FailCaptureFor("b", errors.New("device is wedged"))
+
+	m.pollOnceForTest() // supersedes "a", attempts "b", starts the backoff
+	afterFirst := len(be.CaptureOpens())
+	if afterFirst != 2 {
+		t.Fatalf("expected exactly 2 capture opens (Start's \"a\" and the poll's \"b\"), got %v", be.CaptureOpens())
+	}
+
+	// Neither of these ticks may attempt anything: the target has not
+	// moved, so the backoff from "b" is still the right answer.
+	m.pollOnceForTest()
+	m.pollOnceForTest()
+
+	if opens := be.CaptureOpens(); len(opens) != afterFirst {
+		t.Fatalf("backoff was not honoured: capture opens grew to %v across two polls inside the backoff window", opens)
+	}
+	m.mu.Lock()
+	backoff, target := m.inputBackoff, m.inputTargetID
+	m.mu.Unlock()
+	if backoff == 0 {
+		t.Fatal("backoff was reset even though the target device did not change")
+	}
+	if target != "b" {
+		t.Fatalf("inputTargetID = %q, want \"b\" -- the reopen attempt must stamp the device it aimed at", target)
+	}
+}
+
+// markedSink counts frames, separating the ones carrying real (non-silent)
+// capture data from the zero-filled frames a ring underrun produces. The
+// distinction is what lets TestDSPLoopCatchesUpAfterAStall tell "the loop
+// absorbed the backlog" from "the loop ticked again and read nothing".
+type markedSink struct {
+	mu            sync.Mutex
+	marked, total int
+}
+
+func (s *markedSink) WriteFrame(f []float32) {
+	s.mu.Lock()
+	s.total++
+	if f[0] != 0 {
+		s.marked++
+	}
+	s.mu.Unlock()
+}
+func (s *markedSink) Close() error { return nil }
+
+// TestDSPLoopCatchesUpAfterAStall pins that a capture backlog decays instead
+// of becoming permanent latency. A time.Ticker coalesces missed ticks, so
+// one-frame-per-tick could never drain a backlog it did not cause: every
+// frame the loop failed to read stayed in the ring forever as added latency,
+// until Drain() eventually dumped ~160 ms of it in one audible jump.
+//
+// It equally pins the OTHER half of the fix, which is the easier one to get
+// wrong and the harder one to hear in a unit test: the playback side must
+// still run EXACTLY ONCE per tick. Playback is paced by the output device,
+// not by capture backlog, so writing one playback frame per absorbed capture
+// frame would make playback run fast. The playbackRing depth assertion below
+// is what holds that line -- nothing reads that ring in this test, so its
+// depth is exactly the number of mixer passes the loop performed.
+//
+// The tick source is hand-driven (Manager.dspTick) rather than the real
+// FrameDuration ticker: the assertions are about what ONE tick does, and a
+// sleep-based version would be a race between the test and the scheduler on
+// the one path in this package where a flaky test is worse than none.
+func TestDSPLoopCatchesUpAfterAStall(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	sink := &markedSink{}
+	m.AddSink(sink)
+	m.SetPTT(true) // gate open with no start delay, so every frame reaches the sink
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// The stall: four frames arrive from the OS capture callback before the
+	// DSP loop gets a single tick. A real time.Ticker would have coalesced
+	// those missed ticks into exactly one, which is what this hand-driven
+	// channel models.
+	frame := make([]float32, FrameSamples)
+	for i := range frame {
+		frame[i] = 0.5
+	}
+	for i := 0; i < 4; i++ {
+		be.PushFrame(frame)
+	}
+
+	tick <- time.Now() // the catch-up tick
+	// A send completes exactly when dspLoop receives, so this second send
+	// returning proves the first iteration finished. Stop() then joins the
+	// goroutine, which both ends the second iteration and gives us a
+	// happens-before edge to read everything below race-free.
+	tick <- time.Now()
+	m.Stop()
+
+	sink.mu.Lock()
+	marked, total := sink.marked, sink.total
+	sink.mu.Unlock()
+
+	if marked <= 1 {
+		t.Fatalf("sink saw %d frame(s) of real capture data across 2 ticks; a 4-frame backlog "+
+			"was not caught up -- it is now permanent latency", marked)
+	}
+	if marked > 4 {
+		t.Fatalf("sink saw %d frames of real capture data but only 4 were ever written", marked)
+	}
+	if marked != 4 {
+		t.Fatalf("sink saw %d of the 4 backlogged frames; one tick should absorb up to "+
+			"1+maxCatchUpFrames = 4", marked)
+	}
+	// Tick 2 finds an empty ring and still runs the chain once on a
+	// zero-filled frame, exactly as the pre-fix loop did on an underrun.
+	if total != 5 {
+		t.Fatalf("sink saw %d frames total, want 5 (4 real on the catch-up tick, 1 silent on the next)", total)
+	}
+
+	// THE REGRESSION THAT WOULD BE INAUDIBLE IN A TEST AND OBVIOUS ON
+	// HARDWARE: playback must advance one frame per TICK, never one per
+	// absorbed capture frame.
+	m.mu.Lock()
+	pb := m.playbackRing
+	m.mu.Unlock()
+	if got := pb.Available() / FrameSamples; got != 2 {
+		t.Fatalf("playbackRing holds %d frames after 2 ticks, want exactly 2 -- the playback "+
+			"side must run once per tick, not once per caught-up capture frame, or playback runs fast", got)
+	}
+}

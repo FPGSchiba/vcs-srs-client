@@ -176,6 +176,22 @@ type Manager struct {
 	inputRetryAt, outputRetryAt   time.Time
 	inputBackoff, outputBackoff   time.Duration
 
+	// inputTargetID/outputTargetID record the device id the LAST open
+	// ATTEMPT was made against, as opposed to inputID/outputID which record
+	// the device currently open. They exist so a backoff accumulated against
+	// one device can be recognised as irrelevant when the user selects a
+	// different one -- the case where no stream is open, which is precisely
+	// when a backoff is in force and precisely when the old reset (which
+	// required an open stream) never ran.
+	//
+	// inputID/outputID cannot stand in for them: a direction that has never
+	// successfully opened leaves those empty, so the very scenario the
+	// reset is for -- a device that keeps failing -- is the one they carry
+	// no information about. Written under mu at every attempt site (Start's
+	// publish, maybeReopenCapture/maybeReopenPlayback), read under mu in
+	// closeSupersededStreams.
+	inputTargetID, outputTargetID string
+
 	// lastState is the last snapshot handed to opts.OnState, so
 	// emitStateIfChanged can suppress identical repeats. Nil until the
 	// first emission; State is all-comparable by construction, so this is
@@ -188,6 +204,22 @@ type Manager struct {
 	// under mu in Stop -- see Start's doc for why this matters (Fix 1).
 	stopDSP, stopPoll chan struct{}
 	dspDone, pollDone chan struct{}
+
+	// dspTick, when non-nil, replaces dspLoop's internal time.Ticker so a
+	// test can advance the loop exactly one tick at a time. Production
+	// never sets it: NewManager leaves it nil and dspLoop builds a real
+	// FrameDuration ticker.
+	//
+	// It exists because dspLoop's catch-up behaviour (see maxCatchUpFrames)
+	// is defined in terms of "what one tick does", and a real ticker can
+	// only be observed by sleeping -- which turns a correctness assertion
+	// about backlog absorption into a race between the test and the
+	// scheduler, on the one path in this package where a flaky test would
+	// be worse than no test. It is read ONCE, at dspLoop entry, before the
+	// goroutine does any work -- never on the 10 ms path -- and is only
+	// ever set before Start, so the goroutine-creation edge publishes it
+	// and it needs no synchronisation of its own.
+	dspTick <-chan time.Time
 }
 
 // NewManager builds a Manager against the given Backend. Start must be
@@ -378,12 +410,29 @@ func (m *Manager) emitState() {
 // gives all of them a trigger, and the equality check keeps an idle manager
 // from pushing an identical payload every PollInterval forever (the same
 // discipline dspLoop's VU suppression already follows).
-func (m *Manager) emitStateIfChanged() {
+//
+// epoch identifies the generation the caller belongs to: an abandoned
+// generation (Stop()'s bounded joins) must not publish over the current
+// one, so a stale epoch discards the emit entirely rather than racing
+// m.lastState. This mirrors the epoch discipline at every other Manager
+// field write-back site in this file -- pollOnce is the only caller, it
+// reaches here AFTER Enumerate/OpenCapture/OpenPlayback (any of which can
+// be the thing blocked when Stop() gives up on this goroutine), and
+// m.lastState is a Manager field write-back like any other. Without the
+// check a zombie poll tick could overwrite lastState with a dead
+// generation's snapshot -- which then also SUPPRESSES the live
+// generation's next identical-to-the-zombie emit, so the damage outlives
+// the one bad event.
+func (m *Manager) emitStateIfChanged(epoch uint64) {
 	if m.opts.OnState == nil {
 		return
 	}
 	st := m.State()
 	m.mu.Lock()
+	if m.epoch != epoch {
+		m.mu.Unlock()
+		return
+	}
 	unchanged := m.lastState != nil && *m.lastState == st
 	if !unchanged {
 		s := st
@@ -547,6 +596,11 @@ func (m *Manager) Start() error {
 	m.lastInputs, m.lastOutputs = inputs, outputs
 	m.captureStream, m.playbackStream = capStream, playStream
 	m.inputID, m.outputID = inID, outID
+	// Start's OpenCapture/OpenPlayback above ARE open attempts, so they
+	// stamp the target too -- otherwise a Start whose open failed would
+	// leave the target empty and the first device change after it would
+	// have nothing to compare against (see the inputTargetID field doc).
+	m.inputTargetID, m.outputTargetID = inID, outID
 	m.inputSubstituted, m.outputSubstituted = inputSubstituted, outputSubstituted
 	m.inputBackoff, m.outputBackoff = 0, 0
 	m.inputRetryAt, m.outputRetryAt = time.Time{}, time.Time{}
@@ -603,6 +657,7 @@ func (m *Manager) Start() error {
 //     Every other part of this type treats Stop/Start as a supported cycle
 //     (the whole epoch/generation machinery exists for exactly that), so a
 //     restart panic was reachable by design, not by misuse.
+//
 //   - It was a fifth instance of the abandoned-generation class the epoch
 //     discipline exists to close. The bounded joins above can ABANDON the
 //     poll goroutine while it is still parked inside
@@ -611,8 +666,18 @@ func (m *Manager) Start() error {
 //     use-after-free, and the `b.ctx = nil` that followed raced that
 //     goroutine's read of it. Epoch checks guard Manager FIELD write-backs;
 //     the Backend is not a field write, it is the shared resource itself,
-//     so no epoch check could ever have covered it. Not closing a resource
-//     we do not own removes the hazard rather than trying to synchronise it.
+//     so no epoch check could ever have covered it.
+//
+//     Not closing a resource we do not own removes the hazard FROM THIS
+//     FUNCTION. It does not remove it from the process. main.go still does
+//     `defer backend.Close()` before `defer am.Stop()`, so the backend is
+//     closed AFTER Stop() returns -- and Stop()'s joins below are BOUNDED,
+//     so they can return while dspLoop is still running. A slow
+//     Sink.WriteFrame is exactly what makes that happen, and Phase 5
+//     registers the first Sink that can be slow (it writes to a socket).
+//     The ordering in main.go is therefore load-bearing and is pinned by
+//     TestMainWiringClosesBackendAfterManagerStop. If you reorder those
+//     defers, an abandoned dspLoop can touch a freed malgo context.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	if !m.running {
@@ -793,14 +858,31 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 	// establishes a baseline.
 	lastVUInSeg, lastVUOutSeg := int32(-1), int32(-1)
 
+	// maxCatchUpFrames bounds how much backlog one tick may absorb. A
+	// time.Ticker coalesces missed ticks into one, so after a scheduling
+	// stall the ring holds several frames and a strict one-frame-per-tick
+	// read can NEVER recover -- the backlog is permanent latency until
+	// Drain() dumps it in one audible ~160 ms jump. Draining a bounded
+	// number of extra frames per tick lets latency decay smoothly instead.
+	// The bound exists so a pathological stall cannot turn one tick into an
+	// unbounded burst of encode work on this goroutine.
+	const maxCatchUpFrames = 3
+
 	ticker := time.NewTicker(FrameDuration)
 	defer ticker.Stop()
+	// See Manager.dspTick: production always takes the real ticker; only a
+	// test ever substitutes a hand-driven channel, and it does so before
+	// Start, so this single read races nothing.
+	tickC := ticker.C
+	if m.dspTick != nil {
+		tickC = m.dspTick
+	}
 
 	for {
 		select {
 		case <-stopDSP:
 			return
-		case <-ticker.C:
+		case <-tickC:
 		}
 
 		cfg := m.cfg.Load()
@@ -824,53 +906,95 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 			captureRing.Drain()
 		}
 
-		n := captureRing.Read(inFrame)
-		for i := n; i < len(inFrame); i++ {
-			inFrame[i] = 0
+		// The CAPTURE side catches up; the PLAYBACK side below does not.
+		// That asymmetry is the whole point. Capture backlog is ours to
+		// absorb -- nothing downstream is paced by our read rate, and a
+		// frame we leave in the ring is latency we have chosen to keep.
+		// Playback is paced by the OUTPUT DEVICE, which pulls from
+		// playbackRing on its own callback schedule; writing two frames on
+		// one tick because capture was behind would run playback fast and
+		// overrun the ring, an artefact no listener can un-hear. So: read
+		// at least one frame (a short/empty read still runs the chain on a
+		// zero-filled frame, exactly as before, so the gate, VOX and VU
+		// keep advancing on the fixed 10 ms grid), and at most
+		// 1+maxCatchUpFrames.
+		//
+		// NOTE for the reader comparing this against task-2's brief: the
+		// brief's prose ("process every whole frame the ring currently
+		// holds, up to a bounded catch-up limit") and the formula it
+		// sketched (`1 + min(Available()/FrameSamples, maxCatchUpFrames)`)
+		// disagree, and the prose is the correct one. The sketch adds one
+		// to a count that is ALREADY the number of whole frames present,
+		// so a ring holding exactly one frame would be read twice: once for
+		// real and once into an underrun, injecting a silent frame into
+		// every Sink. That is precisely the bursty, spurious-packet TX
+		// cadence this fix exists to avoid, so the clamp below is
+		// max(1, min(present, 1+maxCatchUpFrames)) instead.
+		frames := captureRing.Available() / FrameSamples
+		if frames > 1+maxCatchUpFrames {
+			frames = 1 + maxCatchUpFrames
+		}
+		if frames < 1 {
+			frames = 1
 		}
 
-		// Chain order NS -> AGC -> gate -> voice effect is load-bearing:
-		// NS runs before AGC so AGC cannot amplify the noise floor during
-		// silence, and gate runs after AGC because it decides on a
-		// levelled signal. VOX level measurement is the one thing that
-		// moves: VOXNoiseCancel decides whether the gate sees the level
-		// pre- or post-denoise.
-		var level float32
-		if cfg.VOXNoiseCancel {
-			if cfg.NoiseSuppression {
-				denoiser.Process(inFrame)
+		for f := 0; f < frames; f++ {
+			n := captureRing.Read(inFrame)
+			for i := n; i < len(inFrame); i++ {
+				inFrame[i] = 0
 			}
-			level = rms(inFrame)
-		} else {
-			level = rms(inFrame)
-			if cfg.NoiseSuppression {
-				denoiser.Process(inFrame)
-			}
-		}
-		if cfg.AGC {
-			agc.Process(inFrame)
-		}
-		gateOpen := gate.Step(GateInput{
-			PTT:   m.ptt.Load(),
-			Muted: m.muted.Load(),
-			Level: level,
-		})
-		effect.Process(inFrame)
 
-		if p := peak(inFrame); p > vuIn {
-			vuIn = p
-		}
-
-		if gateOpen {
-			sinks := *m.sinks.Load()
-			for _, s := range sinks {
-				s.WriteFrame(inFrame)
+			// Chain order NS -> AGC -> gate -> voice effect is load-bearing:
+			// NS runs before AGC so AGC cannot amplify the noise floor during
+			// silence, and gate runs after AGC because it decides on a
+			// levelled signal. VOX level measurement is the one thing that
+			// moves: VOXNoiseCancel decides whether the gate sees the level
+			// pre- or post-denoise.
+			var level float32
+			if cfg.VOXNoiseCancel {
+				if cfg.NoiseSuppression {
+					denoiser.Process(inFrame)
+				}
+				level = rms(inFrame)
+			} else {
+				level = rms(inFrame)
+				if cfg.NoiseSuppression {
+					denoiser.Process(inFrame)
+				}
 			}
-		}
-		if gateOpen && cfg.MicPassthrough {
-			copy(monitorBuf, inFrame)
-		} else {
-			clear(monitorBuf)
+			if cfg.AGC {
+				agc.Process(inFrame)
+			}
+			gateOpen := gate.Step(GateInput{
+				PTT:   m.ptt.Load(),
+				Muted: m.muted.Load(),
+				Level: level,
+			})
+			effect.Process(inFrame)
+
+			if p := peak(inFrame); p > vuIn {
+				vuIn = p
+			}
+
+			if gateOpen {
+				sinks := *m.sinks.Load()
+				for _, s := range sinks {
+					s.WriteFrame(inFrame)
+				}
+			}
+			// monitorBuf is written once per CAPTURE frame but consumed
+			// once per TICK, so during a catch-up the last frame of the
+			// burst is the one that reaches the monitor bus. That is the
+			// right trade: mic passthrough is a local sidetone, and there
+			// is exactly one playback slot to put it in -- the alternative
+			// would be to mix the burst together, which is a comb filter,
+			// or to drop the sidetone entirely, which is worse than
+			// shortening it by a few milliseconds.
+			if gateOpen && cfg.MicPassthrough {
+				copy(monitorBuf, inFrame)
+			} else {
+				clear(monitorBuf)
+			}
 		}
 
 		clear(sfxBuf)
@@ -986,7 +1110,7 @@ func (m *Manager) pollOnce(captureRing, playbackRing *Ring, epoch uint64) {
 	m.maybeReopenCapture(cfg, inputs, now, captureRing, epoch)
 	m.maybeReopenPlayback(cfg, outputs, now, playbackRing, epoch)
 
-	m.emitStateIfChanged()
+	m.emitStateIfChanged(epoch)
 }
 
 // closeSupersededStreams stops and nils any open stream whose device is no
@@ -1028,7 +1152,8 @@ func (m *Manager) closeSupersededStreams(cfg Config, inputs, outputs []DeviceInf
 		return
 	}
 	var capStream, playStream Stream
-	if m.captureStream != nil && resolveDevice(cfg.InputDevice, inputs) != m.inputID {
+	wantIn := resolveDevice(cfg.InputDevice, inputs)
+	if m.captureStream != nil && wantIn != m.inputID {
 		capStream = m.captureStream
 		m.captureStream = nil
 		// Clear the backoff: this is a fresh target, not a retry of the
@@ -1036,10 +1161,26 @@ func (m *Manager) closeSupersededStreams(cfg Config, inputs, outputs []DeviceInf
 		// direction that had been failing could sit out its (up to 30s)
 		// backoff before honouring the user's brand-new selection.
 		m.inputBackoff, m.inputRetryAt = 0, time.Time{}
+	} else if m.captureStream == nil && m.inputTargetID != "" && wantIn != m.inputTargetID {
+		// No stream to close, but the target moved: the accumulated backoff
+		// belongs to a device the user is no longer asking for.
+		//
+		// This is the case the reset above could never reach, and the only
+		// case in which a backoff is actually in force: a stream that is
+		// open by definition has no backoff, so gating the reset on
+		// `m.captureStream != nil` made it a no-op for every situation it
+		// was written to fix. A user whose microphone kept failing to open
+		// would pick a working one in Settings and then hear nothing for
+		// up to 30 s, with no indication that anything was pending.
+		m.inputBackoff, m.inputRetryAt = 0, time.Time{}
 	}
-	if m.playbackStream != nil && resolveDevice(cfg.OutputDevice, outputs) != m.outputID {
+	wantOut := resolveDevice(cfg.OutputDevice, outputs)
+	if m.playbackStream != nil && wantOut != m.outputID {
 		playStream = m.playbackStream
 		m.playbackStream = nil
+		m.outputBackoff, m.outputRetryAt = 0, time.Time{}
+	} else if m.playbackStream == nil && m.outputTargetID != "" && wantOut != m.outputTargetID {
+		// Symmetric with capture above.
 		m.outputBackoff, m.outputRetryAt = 0, time.Time{}
 	}
 	m.mu.Unlock()
@@ -1053,14 +1194,25 @@ func (m *Manager) closeSupersededStreams(cfg Config, inputs, outputs []DeviceInf
 }
 
 func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.Time, captureRing *Ring, epoch uint64) {
+	id := resolveDevice(cfg.InputDevice, inputs)
+
 	m.mu.Lock()
 	ready := m.captureStream == nil && !now.Before(m.inputRetryAt) && m.epoch == epoch
+	if ready {
+		// Stamp the device this attempt is aimed at in the SAME critical
+		// section that decides to make it. closeSupersededStreams reads it
+		// on a later tick to tell "the backoff belongs to the device we
+		// are still asking for" from "the backoff belongs to a device the
+		// user has moved on from". Stamping it only on SUCCESS would leave
+		// it empty for exactly the case that needs it -- a device that
+		// never opens at all.
+		m.inputTargetID = id
+	}
 	m.mu.Unlock()
 	if !ready {
 		return
 	}
 
-	id := resolveDevice(cfg.InputDevice, inputs)
 	stream, err := m.backend.OpenCapture(id, func(frame []float32) {
 		captureRing.Write(frame)
 	})
@@ -1098,14 +1250,19 @@ func (m *Manager) maybeReopenCapture(cfg Config, inputs []DeviceInfo, now time.T
 }
 
 func (m *Manager) maybeReopenPlayback(cfg Config, outputs []DeviceInfo, now time.Time, playbackRing *Ring, epoch uint64) {
+	id := resolveDevice(cfg.OutputDevice, outputs)
+
 	m.mu.Lock()
 	ready := m.playbackStream == nil && !now.Before(m.outputRetryAt) && m.epoch == epoch
+	if ready {
+		// Symmetric with maybeReopenCapture: see its comment.
+		m.outputTargetID = id
+	}
 	m.mu.Unlock()
 	if !ready {
 		return
 	}
 
-	id := resolveDevice(cfg.OutputDevice, outputs)
 	stream, err := m.backend.OpenPlayback(id, func(dst []float32) {
 		n := playbackRing.Read(dst)
 		for i := n; i < len(dst); i++ {
