@@ -3,6 +3,7 @@ package audio
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1466,5 +1467,258 @@ func TestPlaybackHotPlugAfterAnEmptyEnumerationRetriesPromptly(t *testing.T) {
 	}
 	if id != "spk-1" {
 		t.Fatalf("opened output device %q, want \"spk-1\"", id)
+	}
+}
+
+// copyingSink keeps a copy of every frame it is handed. recordingSink above
+// only counts and markedSink only looks at f[0]; these tests need the whole
+// frame, because what they are asking is whether a filter ran over it.
+type copyingSink struct {
+	mu     sync.Mutex
+	frames [][]float32
+}
+
+func (s *copyingSink) WriteFrame(f []float32) {
+	s.mu.Lock()
+	s.frames = append(s.frames, append([]float32(nil), f...))
+	s.mu.Unlock()
+}
+func (s *copyingSink) Close() error { return nil }
+
+func (s *copyingSink) last() []float32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.frames) == 0 {
+		return nil
+	}
+	return s.frames[len(s.frames)-1]
+}
+
+// constantSource is a Source that overwrites every frame with one value and
+// counts how many times it was asked.
+type constantSource struct {
+	v     float32
+	calls atomic.Int64
+}
+
+func (s *constantSource) ReadInto(buf []float32) {
+	s.calls.Add(1)
+	for i := range buf {
+		buf[i] = s.v
+	}
+}
+
+// dcFrame is a constant-amplitude frame. DC is the right probe for a radio
+// effect: the voice presets all start with a highpass, so a filtered DC
+// frame decays to nothing within a few dozen samples while an unfiltered one
+// stays flat. That makes "was the effect applied" a one-sample question at
+// the tail rather than a spectral one.
+func dcFrame(v float32) []float32 {
+	f := make([]float32, FrameSamples)
+	for i := range f {
+		f[i] = v
+	}
+	return f
+}
+
+// startTicked brings up a Manager on a hand-driven tick with one input and
+// one output device, and returns it with its tick channel.
+func startTicked(t *testing.T, cfg Config) (*Manager, *FakeBackend, chan time.Time) {
+	t.Helper()
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	m.SetConfig(cfg)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return m, be, tick
+}
+
+// readPlayback takes one frame off the playback ring. Nothing else consumes
+// it in these tests, so it holds exactly what the mixer wrote.
+func readPlayback(t *testing.T, m *Manager) []float32 {
+	t.Helper()
+	m.mu.Lock()
+	pr := m.playbackRing
+	m.mu.Unlock()
+	out := make([]float32, FrameSamples)
+	if n := pr.Read(out); n != FrameSamples {
+		t.Fatalf("playback ring held %d samples, want a whole %d-sample frame", n, FrameSamples)
+	}
+	return out
+}
+
+// readLastPlayback empties the playback ring and returns the most recent
+// whole frame the mixer wrote into it.
+func readLastPlayback(t *testing.T, m *Manager) []float32 {
+	t.Helper()
+	m.mu.Lock()
+	pr := m.playbackRing
+	m.mu.Unlock()
+	var last []float32
+	buf := make([]float32, FrameSamples)
+	for pr.Available() >= FrameSamples {
+		pr.Read(buf)
+		last = append([]float32(nil), buf...)
+	}
+	if last == nil {
+		t.Fatal("the playback ring holds no whole frame")
+	}
+	return last
+}
+
+// TestDSPLoopTransmitsUneffectedAudio is design decision D7's regression.
+// The radio effect used to run before the sink loop, so we transmitted
+// pre-effected audio; the C# peer applies effects on RECEIVE, which left a
+// C# listener hearing us double-effected while we heard them dry.
+func TestDSPLoopTransmitsUneffectedAudio(t *testing.T) {
+	m, be, tick := startTicked(t, Config{
+		VoiceEffect: "comms_filter_mid",
+		Levels:      Levels{Master: 1, Voice: 1},
+	})
+	defer m.Stop()
+	sink := &copyingSink{}
+	m.AddSink(sink)
+	m.SetPTT(true)
+
+	be.PushFrame(dcFrame(0.5))
+	tick <- time.Now()
+	m.Stop()
+
+	got := sink.last()
+	if got == nil {
+		t.Fatal("the sink saw no frame at all")
+	}
+	// Written out by hand: the sink must see exactly what was captured. A
+	// bandpass would leave the head near 0.5 and decay the tail to nothing,
+	// so the tail is where a surviving effect shows up.
+	for i, v := range got {
+		if v != 0.5 {
+			t.Fatalf("transmitted sample %d = %v, want exactly 0.5 -- the radio effect must NOT run before the sinks (D7)", i, v)
+		}
+	}
+}
+
+// TestDSPLoopEffectsTheLocalMonitor is D7's other half: the effect did not
+// simply disappear, it moved. Self-monitoring must still sound like the
+// radio, so the monitor keeps an instance of its own.
+func TestDSPLoopEffectsTheLocalMonitor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		effect string
+		// wantTail is written out from what the filter does, not computed
+		// from the filter: "off" passes DC through untouched, and any
+		// highpass blocks DC entirely within a frame.
+		wantTail    float32
+		tolerance   float32
+		description string
+	}{
+		{"off", "", 0.5, 0.001, "passthrough must leave the monitor at the captured level"},
+		{"comms_filter_mid", "comms_filter_mid", 0, 0.02, "a highpass must have blocked the DC by the tail of the frame"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, be, tick := startTicked(t, Config{
+				MicPassthrough: true,
+				VoiceEffect:    tc.effect,
+				Levels:         Levels{Master: 1, Voice: 1},
+			})
+			defer m.Stop()
+			m.SetPTT(true)
+
+			be.PushFrame(dcFrame(0.5))
+			tick <- time.Now()
+			tick <- time.Now() // returns only once the first iteration finished
+			out := readPlayback(t, m)
+
+			tail := out[len(out)-1]
+			if d := tail - tc.wantTail; d < -tc.tolerance || d > tc.tolerance {
+				t.Fatalf("monitor tail sample = %v, want %v ± %v: %s", tail, tc.wantTail, tc.tolerance, tc.description)
+			}
+		})
+	}
+}
+
+// TestDSPLoopMixesTheRegisteredSource pins that a registered Source reaches
+// the output at all -- without this the whole RX path is inaudible.
+func TestDSPLoopMixesTheRegisteredSource(t *testing.T) {
+	m, _, tick := startTicked(t, Config{Levels: Levels{Master: 1, Voice: 1}})
+	defer m.Stop()
+	m.SetSource(&constantSource{v: 0.25})
+
+	tick <- time.Now()
+	tick <- time.Now()
+	out := readPlayback(t, m)
+
+	// Master and Voice are both at 1, and taper(1) is 1, so the received
+	// sample must arrive at the output unchanged.
+	for i, v := range out {
+		if v < 0.24 || v > 0.26 {
+			t.Fatalf("output sample %d = %v, want ~0.25 -- the registered Source must reach the voice bus", i, v)
+		}
+	}
+}
+
+// TestDSPLoopClearsTheSourceBufferWhenTheSourceGoesAway pins the `else`
+// branch that clears rxBuf. rxBuf is allocated once and reused, so a
+// Manager that simply skipped the read when no Source is registered would
+// replay the last received frame forever -- a stuck 10 ms loop of the last
+// thing anyone said, for as long as the pipeline runs.
+func TestDSPLoopClearsTheSourceBufferWhenTheSourceGoesAway(t *testing.T) {
+	m, _, tick := startTicked(t, Config{Levels: Levels{Master: 1, Voice: 1}})
+	defer m.Stop()
+	m.SetSource(&constantSource{v: 0.25})
+
+	tick <- time.Now()
+	tick <- time.Now()
+	if out := readPlayback(t, m); out[0] < 0.24 {
+		t.Fatalf("precondition failed: source did not reach the output, sample 0 = %v", out[0])
+	}
+
+	// Three ticks and then the LAST frame in the ring: a tick send returns
+	// when dspLoop RECEIVES it, so the iteration that was already in flight
+	// when SetSource(nil) landed may still write a frame carrying the old
+	// audio. Reading the most recent frame instead of the oldest is what
+	// makes the assertion about a tick that provably started after the
+	// change.
+	m.SetSource(nil)
+	tick <- time.Now()
+	tick <- time.Now()
+	tick <- time.Now()
+	out := readLastPlayback(t, m)
+	for i, v := range out {
+		if v != 0 {
+			t.Fatalf("output sample %d = %v after the Source was cleared, want 0 -- the reused rx buffer must be cleared, not left holding the last received frame", i, v)
+		}
+	}
+}
+
+// TestDSPLoopPullsTheSourceOncePerTick pins that received audio is paced by
+// the DSP tick and not by capture backlog. A catch-up tick absorbs up to
+// four CAPTURE frames but still writes exactly one playback frame, so
+// pulling the Source inside that loop would run every remote talker up to
+// four times real speed while the local ring drained.
+func TestDSPLoopPullsTheSourceOncePerTick(t *testing.T) {
+	m, be, tick := startTicked(t, Config{Levels: Levels{Master: 1, Voice: 1}})
+	defer m.Stop()
+	src := &constantSource{v: 0.25}
+	m.SetSource(src)
+	m.SetPTT(true)
+
+	// Eight frames: twice what one tick is allowed to absorb, so the tick
+	// below is a full catch-up tick.
+	for i := 0; i < 8; i++ {
+		be.PushFrame(dcFrame(0.5))
+	}
+	tick <- time.Now()
+	m.Stop()
+
+	if got := src.calls.Load(); got != 1 {
+		t.Fatalf("ReadInto was called %d times on one catch-up tick, want exactly 1 -- received audio is paced by the tick, not by capture backlog", got)
 	}
 }

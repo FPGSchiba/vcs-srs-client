@@ -93,6 +93,30 @@ type Sink interface {
 	Close() error
 }
 
+// Source supplies the received-voice bus: one frame of already-decoded PCM
+// per DSP tick, summed onto the voice bus alongside the local monitor. The
+// Phase 5 implementation is internal/voice's Session.
+//
+// The direction of the seam is what keeps the dependency acyclic. package
+// voice imports package audio (it needs Effect for its per-stream radio
+// colouration); audio must therefore never import voice, so the RX path
+// arrives here as an interface satisfied from the outside rather than as a
+// concrete type.
+//
+// ReadInto is called ON THE DSP GOROUTINE, inside the same 10 ms budget as
+// Sink.WriteFrame, and carries the same prohibitions: no blocking, no
+// allocation, no contended lock, and in particular no decoding. It must
+// OVERWRITE buf rather than sum into it -- dspLoop hands it a scratch
+// buffer whose previous contents are the last tick's received audio, so a
+// summing implementation would smear a tail across every subsequent frame.
+//
+// Like Sink, it may be invoked concurrently: Stop()'s bounded join can
+// leave an abandoned generation's dspLoop running alongside a live one, and
+// both call ReadInto on the same Source.
+type Source interface {
+	ReadInto(buf []float32)
+}
+
 // ManagerOptions configures a Manager's callbacks and polling cadence.
 //
 // OnState may be invoked concurrently from more than one goroutine -- e.g.
@@ -151,6 +175,16 @@ type Manager struct {
 	ptt   atomic.Bool
 	muted atomic.Bool
 	sinks atomic.Pointer[[]Sink]
+
+	// source is the received-voice bus, nil until one is registered. It is
+	// control-plane state, not per-generation state, so dspLoop reads it
+	// live through this atomic exactly as it reads sinks -- the "take it as
+	// a parameter" rule above applies to the rings, the voicePool and the
+	// tick, which a later Start() REPLACES; a Source survives a
+	// Stop()/Start() cycle by design, so an abandoned generation reading
+	// the current one is the intended behaviour rather than a crossing of
+	// generations.
+	source atomic.Pointer[Source]
 
 	// sfx holds the shared, immutable-after-construction sample store only.
 	// Its MUTABLE mixing state is deliberately NOT here -- see sfxVoices
@@ -339,6 +373,24 @@ func (m *Manager) AddSink(s Sink) {
 			return
 		}
 	}
+}
+
+// SetSource registers (or, with nil, clears) the received-voice bus. Like
+// AddSink it is Manager-lifetime and survives a Stop()/Start() cycle: the
+// Phase 5 wiring registers exactly one Source at startup whose own session
+// pointer goes nil on disconnect, rather than registering and clearing one
+// per connection.
+//
+// A single slot rather than AddSink's copy-on-write slice because there is
+// exactly one received-voice bus and the mixer has exactly one input for
+// it; two Sources would need a summing order and a shared scratch buffer
+// that ReadInto's no-allocation contract has nowhere to put.
+func (m *Manager) SetSource(s Source) {
+	if s == nil {
+		m.source.Store(nil)
+		return
+	}
+	m.source.Store(&s)
 }
 
 // PlayEffect starts an SFX one-shot. Unknown or absent ids are ignored.
@@ -827,10 +879,10 @@ func peak(frame []float32) float32 {
 }
 
 // dspLoop is the only place Tasks 2-9's building blocks run, and the only
-// producer for the playback ring. It owns AGC, Gate, Mixer, the voice
+// producer for the playback ring. It owns AGC, Gate, Mixer, the monitor
 // Effect and the Denoiser exclusively: nothing else in this file touches
 // them, so there is nothing to synchronise here beyond the atomic reads of
-// cfg/ptt/muted/sinks that cross in from the control plane.
+// cfg/ptt/muted/sinks/source that cross in from the control plane.
 //
 // stopDSP/dspDone/captureRing/playbackRing/sfxVoices/dspTick are
 // PARAMETERS, not read from the Manager's own fields, and that is
@@ -858,7 +910,12 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 	agc := NewAGC()
 	gate := NewGate(GateConfig{})
 	mixer := NewMixer()
-	effect := NewEffect("", "")
+	// monitorEffect colours the LOCAL MONITOR ONLY. Phase 5 moved the radio
+	// effect off the transmit path (design decision D7); see the sink loop
+	// below for why. Every RECEIVED stream carries its own instance in
+	// internal/voice/rx.go, because a biquad's state is per-signal and one
+	// shared filter fed alternating talkers would smear each into the next.
+	monitorEffect := NewEffect("", "")
 	var lastCfg *Config
 
 	// All scratch buffers allocated exactly once, here -- nothing in this
@@ -871,6 +928,12 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 	inFrame := make([]float32, FrameSamples)
 	outFrame := make([]float32, FrameSamples)
 	monitorBuf := make([]float32, FrameSamples)
+	// rxBuf is the received-voice bus. It is filled once per TICK (not once
+	// per catch-up frame like monitorBuf): received audio is paced by the
+	// remote senders and by the RX path's own jitter buffers, not by how far
+	// behind our capture ring happens to be, so pulling it more than once on
+	// a catch-up tick would run every talker fast.
+	rxBuf := make([]float32, FrameSamples)
 	sfxBuf := make([]float32, FrameSamples)
 	notifBuf := make([]float32, FrameSamples) // no notification engine yet (Phase 4 scope); always silent.
 
@@ -921,8 +984,8 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 			lastCfg = cfg
 			gate.SetConfig(cfg.Gate)
 			mixer.SetLevels(cfg.Levels)
-			if vID, cID := effect.IDs(); vID != cfg.VoiceEffect || cID != cfg.ClippingEffect {
-				effect = NewEffect(cfg.VoiceEffect, cfg.ClippingEffect)
+			if vID, cID := monitorEffect.IDs(); vID != cfg.VoiceEffect || cID != cfg.ClippingEffect {
+				monitorEffect = NewEffect(cfg.VoiceEffect, cfg.ClippingEffect)
 			}
 		}
 
@@ -1001,12 +1064,23 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 				Muted: m.muted.Load(),
 				Level: level,
 			})
-			effect.Process(inFrame)
-
 			if p := peak(inFrame); p > vuIn {
 				vuIn = p
 			}
 
+			// The radio effect used to run here, before the sinks -- which
+			// meant we TRANSMITTED pre-effected audio. The C# peer applies
+			// effects on RECEIVE, so that left a C# listener hearing us
+			// double-effected while we heard them dry, and made the "no
+			// effects on global frequencies" rule unimplementable from the
+			// sending side (we cannot know each listener's frequency).
+			// Effects now live on the RX path, one instance per stream, in
+			// internal/voice/rx.go. monitorEffect below colours ONLY the
+			// local monitor, so self-monitoring still sounds like the radio.
+			//
+			// vuIn above therefore now measures the signal we actually send
+			// rather than the effected copy, which is what an INPUT meter
+			// should have read all along.
 			if gateOpen {
 				sinks := *m.sinks.Load()
 				for _, s := range sinks {
@@ -1023,15 +1097,25 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 			// shortening it by a few milliseconds.
 			if gateOpen && cfg.MicPassthrough {
 				copy(monitorBuf, inFrame)
+				monitorEffect.Process(monitorBuf)
 			} else {
 				clear(monitorBuf)
 			}
 		}
 
+		// The Source OVERWRITES rxBuf (see the interface's contract), so
+		// there is nothing to clear first; the nil branch has to, because
+		// last tick's received audio is still sitting in it.
+		if src := m.source.Load(); src != nil {
+			(*src).ReadInto(rxBuf)
+		} else {
+			clear(rxBuf)
+		}
+
 		clear(sfxBuf)
 		sfxVoices.mixInto(sfxBuf, m.sfx.sampleFor)
 
-		mixer.Mix(outFrame, monitorBuf, sfxBuf, notifBuf)
+		mixer.Mix(outFrame, monitorBuf, rxBuf, sfxBuf, notifBuf)
 		playbackRing.Write(outFrame)
 
 		if p := peak(outFrame); p > vuOut {

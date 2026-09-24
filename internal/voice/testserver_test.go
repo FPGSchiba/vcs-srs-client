@@ -39,9 +39,10 @@ type testServer struct {
 	helloes    int
 	keepalives int
 	byes       int
-	byesBound  int    // BYEs that arrived from an address this server had bound
-	lastHello  string // source address of the most recent HELLO
-	lastSentTS int64  // the timestamp most recently sent in a keepalive reply
+	byesBound  int          // BYEs that arrived from an address this server had bound
+	lastHello  string       // source address of the most recent HELLO
+	lastFrom   *net.UDPAddr // the same address in the form WriteToUDP needs
+	lastSentTS int64        // the timestamp most recently sent in a keepalive reply
 	kaSeen     []keepaliveObservation
 
 	// voices records every VOICE datagram in arrival order. The real server
@@ -94,6 +95,24 @@ func (ts *testServer) voicePackets() []*Packet {
 	return append([]*Packet(nil), ts.voices...)
 }
 
+// sendToClient writes pkt to the address the most recent HELLO came from.
+// The real server relays VOICE datagrams from other clients back down this
+// path; this is the fixture's stand-in for that, so an RX test exercises the
+// whole socket -> rxLoop -> Parse -> demux chain rather than reaching past
+// it.
+func (ts *testServer) sendToClient(t *testing.T, pkt *Packet) {
+	t.Helper()
+	ts.mu.Lock()
+	addr := ts.lastFrom
+	ts.mu.Unlock()
+	if addr == nil {
+		t.Fatal("no client has sent a HELLO yet, so there is nowhere to send to")
+	}
+	if _, err := ts.conn.WriteToUDP(pkt.AppendTo(nil), addr); err != nil {
+		t.Fatalf("sendToClient: %v", err)
+	}
+}
+
 func (ts *testServer) keepaliveCount() int {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -132,6 +151,7 @@ func (ts *testServer) loop() {
 		case PacketTypeHello:
 			ts.helloes++
 			ts.lastHello = from.String()
+			ts.lastFrom = from
 			ok := len(pkt.Payload) >= VoiceSecretLen &&
 				string(pkt.Payload[:VoiceSecretLen]) == ts.acceptSec
 			drop := ts.dropHello

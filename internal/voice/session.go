@@ -142,6 +142,13 @@ type Options struct {
 	// it is a test seam for driving the packet-ceiling and back-pressure
 	// paths deterministically, not part of the API.
 	txEncode func(pcm []float32, dst []byte) (int, error)
+
+	// rxNewDecoder replaces the Opus decoder FACTORY on the receive path.
+	// Unexported, and a factory rather than a single decode function because
+	// each stream owns its own decoder: a shared one would smear every
+	// talker into every other, and a shared stub would hide exactly that
+	// defect.
+	rxNewDecoder func() (rxDecoder, error)
 }
 
 // eventKind identifies what rxLoop saw.
@@ -171,13 +178,13 @@ type stateChange struct {
 // Session owns one connected UDP socket for its whole life, plus the state
 // machine that keeps that socket's source address bound on the server.
 //
-// Four goroutines run per session: rxLoop, which does a blocking read,
+// Five goroutines run per session: rxLoop, which does a blocking read,
 // parses and dispatches; lifecycleLoop, which owns the HELLO ladder and the
 // keepalive schedule; txLoop, which encodes captured audio and writes it;
-// and deliverLoop, which delivers OnState callbacks. Close joins the first
-// three (rxLoop also exits via the socket being closed under it) and does
-// NOT join deliverLoop, which is what makes it safe for OnState to call
-// Close.
+// decodeLoop, which decodes and colours received audio; and deliverLoop,
+// which delivers OnState callbacks. Close joins the first four (rxLoop also
+// exits via the socket being closed under it) and does NOT join
+// deliverLoop, which is what makes it safe for OnState to call Close.
 type Session struct {
 	src    Sources
 	self   uuid.UUID
@@ -189,14 +196,19 @@ type Session struct {
 	keepalive time.Duration
 	poll      time.Duration
 
-	// jitterMS is the configured jitter-buffer target. Task 7 only records
-	// it; the RX path that consumes it lands in a later task.
+	// jitterMS is the configured jitter-buffer target, in milliseconds. It
+	// sets both each stream's priming delay and how much decoded PCM the
+	// decode loop keeps ahead of playback -- see rxState.aheadSamples.
 	jitterMS int
 
 	// tx is the transmit path: see tx.go. It is a field of Session because
 	// its packets go out on Session's socket, through the same lock that
 	// serialises every other write against Close's BYE.
 	tx txState
+
+	// rx is the receive path: see rx.go. It is a field of Session because
+	// its packets arrive on Session's socket, dispatched by rxLoop below.
+	rx rxState
 
 	events chan event
 	done   chan struct{}
@@ -295,6 +307,7 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 	}
 
 	s.tx.init(opt.txEncode, s.log)
+	s.rx.init(opt.rxNewDecoder, s.jitterMS)
 
 	// Started before the first transition so no callback is ever dropped,
 	// and deliberately outside s.wg: Close joins s.wg, and OnState is
@@ -303,17 +316,19 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 
 	s.setState(StateResolving, nil)
 	if err := s.openSocket(); err != nil {
-		// No goroutine has touched the encoder yet, and the caller gets no
+		// No goroutine has touched the codec yet, and the caller gets no
 		// Session to Close, so it has to be freed here or its C memory
 		// leaks for the life of the process.
 		s.tx.close()
+		s.rx.close()
 		s.setState(StateClosed, err)
 		return nil, err
 	}
 
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.lifecycleLoop()
 	go s.txLoop()
+	go s.decodeLoop()
 	return s, nil
 }
 
@@ -369,8 +384,9 @@ func (s *Session) Close() error {
 			s.closeErr = conn.Close()
 		}
 		s.wg.Wait()
-		// After the join, so nothing can be inside an encode call.
+		// After the join, so nothing can be inside an encode or decode call.
 		s.tx.close()
+		s.rx.close()
 		s.setState(StateClosed, nil)
 	})
 	return s.closeErr
@@ -566,9 +582,15 @@ func (s *Session) rxLoop(conn *net.UDPConn, gen uint64) {
 				at:       s.now(),
 				serverTS: KeepaliveTimestamp(pkt.Payload),
 			})
-		default:
-			// VOICE and BYE are not this task's business; the RX audio path
-			// picks them up in a later task.
+		case PacketTypeVoice:
+			// rxVoice filters and enqueues, and does nothing that can
+			// block. Everything slower -- decode, effects, playout timing --
+			// happens on the decode goroutine.
+			s.rxVoice(pkt, s.now())
+		case PacketTypeBye:
+			// The server never sends one. Counted rather than ignored so a
+			// server that starts to is visible rather than mysterious.
+			s.rx.byes.Add(1)
 		}
 	}
 }
