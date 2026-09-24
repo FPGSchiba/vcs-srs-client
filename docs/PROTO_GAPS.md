@@ -26,7 +26,11 @@ message Radio {
 }
 ```
 
-Server-side, voice payloads on `encrypted=true` radios use a per-(coalition, channel) key derived from the existing `VoiceHostDetails.secret`.
+Server-side, voice payloads on `encrypted=true` radios would use a per-(coalition, channel) key derived from a per-session secret.
+
+> **Corrected 2026-09-24.** This previously said the key would derive from `VoiceHostDetails.secret`. That field is now explicitly annotated `UNIMPLEMENTED` in `srs.proto` — the server never populates it, and `VoiceHostDetails` is never constructed outside generated code. The live per-session secret is `ServerSyncResult.voice_secret`, added by `vngd-srs-server` PR #207 and consumed by Phase 5's voice HELLO.
+>
+> Note that it is **not** a suitable key source as-is: it authenticates the establishment of a UDP source-address binding and is deliberately sent in cleartext in the HELLO payload, so anything derived from it inherits the unclosed HELLO-replay exposure the server documents. Per-radio encryption needs its own key material, negotiated over the TLS control path. Treat this row's key-derivation sketch as unresolved, not as a design.
 
 ---
 

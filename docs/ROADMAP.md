@@ -121,17 +121,26 @@ Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Au
 
 ## Phase 5 — UDP voice
 
-**Status:** `[ ]` **— BLOCKED, next up**
+**Status:** `[~]` in progress — **unblocked 2026-09-24**. Design doc approved; implementation planning next.
+
+**Design doc:** [`2026-09-24-vcs-client-phase-5-udp-voice-design.md`](./superpowers/specs/2026-09-24-vcs-client-phase-5-udp-voice-design.md)
+
+**How it unblocked:** the server landed the voice path and its authentication in `vngd-srs-server` PR #207 (merged 2026-09-24, `3d5ca96`), and the C# client is being ported onto the same wire format in `VNGD-SimpleRadioStandalone` PR #253. Both were read at source; `srs.proto` is now byte-for-byte identical between client and server.
 
 **Headline deliverables**
 - Custom UDP client matching the server's Go reference
-- Opus encode/decode
+- Opus encode/decode — **48 kHz / 20 ms / mono / `Application.Audio` / 48 kbps / FEC off / DTX off**, a wire contract with the C# peer
 - Per-frequency multiplex on a single UDP socket
 - PTT-gated TX, jitter buffer
-- Reconnect on `VoiceAddressUpdate`
-- `VoiceHostDetails.secret` authentication
+- Reconnect on `VoiceAddressUpdate`; binding-loss detection and re-HELLO recovery
+- Voice-secret authentication via `ServerSyncResult.voice_secret` (**not** `VoiceHostDetails.secret`, which the server never populates)
+- Minimal radio bootstrap: persisted `[[radios]]`, editable frequency, selected-radio state — without these there is nothing to transmit on
+- Integration tests driving the real headless server, wired into CI
+- The five accepted Phase 4 follow-ups
 
-**Blocking deps:** **server-side Go protocol reference from user** — packet structure, framing, codec, sample rate / frame size, multiplex layout, secret handshake, `coalition_voice_addr` vs `global_voice_addr`.
+**Blocking deps:** none remaining.
+
+**Carried risk:** the C# peer's `CreateHelloPacket` sends no voice secret, so PR #253 as it stands cannot complete a handshake against the current server. Cross-client interop testing is blocked on that branch, not on this one.
 
 ---
 
