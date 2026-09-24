@@ -111,18 +111,45 @@ These apply to **every** task. They are not repeated per task.
 
 - [ ] **Step 1: Vendor the upstream sources**
 
-Fetch libopus 1.5.2 (`https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz`). Copy into `internal/audio/opus/`, **flattened** — no subdirectories except `include/`:
+Upstream libopus **1.5.2** has already been downloaded and extracted for you to `/tmp/claude-501/opus-1.5.2` (verify with `ls`; if absent, re-fetch `https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz`).
 
-- `src/*.c`, `src/*.h` (excluding `opus_demo.c`, `repacketizer_demo.c`, `mlp_train.*`)
-- `celt/*.c`, `celt/*.h` (excluding `tests/`, `dump_modes/`)
-- `silk/*.c`, `silk/*.h` (excluding `tests/`, `fixed/` — we build the float path)
-- `silk/float/*.c`, `silk/float/*.h`
-- `include/opus.h`, `include/opus_defines.h`, `include/opus_types.h`, `include/opus_multistream.h`, `include/opus_projection.h`
-- `COPYING` → `LICENSE`
+**The authoritative file list is upstream's own `.mk` files** — use them, do not hand-pick:
 
-Do **not** copy: `autogen.sh`, `configure.ac`, `Makefile.am`, `m4/`, `doc/`, `tests/`, `training/`, `dnn/` (that is the LPCNet/DRED extension — not needed for plain voice, and it drags in a separate model asset exactly as RNNoise's `v0.2` does).
+```bash
+cd /tmp/claude-501/opus-1.5.2
+cat opus_sources.mk celt_sources.mk silk_sources.mk   # OPUS_SOURCES, OPUS_SOURCES_FLOAT,
+                                                       # CELT_SOURCES, SILK_SOURCES, SILK_SOURCES_FLOAT
+```
 
-Exclude architecture-specific SIMD directories (`celt/arm/`, `celt/x86/`, `silk/arm/`, `silk/x86/`). The generic C path is selected because our `#cgo CFLAGS` never define `OPUS_ARM_*`, `OPUS_X86_*` or `FIXED_POINT`.
+Take `OPUS_SOURCES` + `OPUS_SOURCES_FLOAT` + `CELT_SOURCES` + `SILK_SOURCES` + `SILK_SOURCES_FLOAT`. Do **not** take `SILK_SOURCES_FIXED` (we build the float path) or any `*_SOURCES_ARM*` / `*_SOURCES_X86*` variant.
+
+**Layout — this is not the obvious one, and the obvious one does not build.**
+
+cgo compiles only the `.c` files sitting in the *same directory* as the file doing `import "C"`, so every `.c` file must be flattened into `internal/audio/opus/`. Two facts were verified empirically before this plan was written:
+
+1. **There are no basename collisions** across `src/`, `celt/`, `silk/` and `silk/float/`, so flattening the `.c` files is safe.
+2. **Some sources use path-qualified includes** — `#include "celt/stack_alloc.h"`, `#include "celt/cpu_support.h"` — which plain flattening would break.
+
+So: **flatten the `.c` files to the package root, but keep the headers in their upstream directory structure as well**, and let the include path resolve both spellings:
+
+```
+internal/audio/opus/
+  *.c                  ← every source, flattened (cgo requirement)
+  opus.go  opus_stub.go  ctl_shim.c  ctl_shim.h  VENDOR.md  LICENSE
+  include/             ← opus.h, opus_defines.h, opus_types.h, opus_multistream.h, opus_projection.h
+  celt/                ← celt headers, upstream names (resolves "celt/stack_alloc.h")
+  silk/                ← silk headers
+  silk/float/          ← silk float headers
+  src/                 ← src headers
+```
+
+Headers may appear both flat and in the subtree; that is deliberate and costs nothing, because only the `.c` files drive compilation.
+
+Also copy `COPYING` → `LICENSE`.
+
+Do **not** copy: `autogen.sh`, `configure.ac`, `Makefile.am`, `m4/`, `doc/`, `tests/`, `cmake/`, `meson/`, and above all **`dnn/`** — that is the LPCNet/DRED extension, 17 MB, not needed for plain voice, and exactly the separate-model-asset problem that made RNNoise's `v0.2` the wrong choice to vendor. Verified: none of the five source lists above reference `dnn/`.
+
+Exclude the architecture-specific SIMD directories (`celt/arm/`, `celt/x86/`, `celt/mips/`, `silk/arm/`, `silk/x86/`, `silk/mips/`). The `arm/*.h` includes that remain in the generic sources sit inside `#if defined(OPUS_ARM_*)` guards, and nothing in our build defines those — `HAVE_CONFIG_H` is never set, so upstream's autotools detection never runs.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -254,10 +281,12 @@ Create `internal/audio/opus/opus.go`:
 package opus
 
 /*
-#cgo CFLAGS: -I${SRCDIR} -I${SRCDIR}/include -O2 -DOPUS_BUILD -DHAVE_LRINTF -DFLOATING_POINT -DUSE_ALLOCA
+#cgo CFLAGS: -I${SRCDIR} -I${SRCDIR}/include -I${SRCDIR}/celt -I${SRCDIR}/silk -I${SRCDIR}/silk/float -I${SRCDIR}/src
+#cgo CFLAGS: -O2 -DOPUS_BUILD -DHAVE_LRINTF -DFLOATING_POINT -DVAR_ARRAYS
 #cgo linux LDFLAGS: -lm
 #include <opus.h>
 #include <stdlib.h>
+#include "ctl_shim.h"
 */
 import "C"
 
