@@ -14,6 +14,18 @@ import (
 // A Session is the Phase 5 network sink the Phase 4 pipeline writes into.
 // The assertion lives in the test rather than in tx.go so that package voice
 // does not take a production dependency on package audio.
+//
+// TRAP: audio.Sink is { WriteFrame([]float32); Close() error }, and *Session
+// satisfies Close() via its OWN lifecycle Close -- the one that tears down
+// the socket, joins rxLoop/lifecycleLoop/txLoop and sends BYE. Manager does
+// not call Sink.Close() today, but if a later wiring task adds sink cleanup
+// to Manager.Stop() (e.g. on an audio device hot-unplug or a settings-driven
+// pipeline restart), it will silently kill the VOICE SESSION too, not just
+// detach it from the pipeline. That presents as "voice drops whenever I
+// change an audio setting" with nothing in this package to explain it. If
+// that wiring is ever added, Session must NOT be handed to Manager as its
+// own Sink.Close -- wrap it in an adapter whose Close is a no-op (or detaches
+// without dialing down the session) instead.
 var _ audio.Sink = (*Session)(nil)
 
 // dspFrameSamples is Phase 4's 10 ms capture frame at 48 kHz, written out
@@ -303,6 +315,16 @@ func TestTXWriteFrameNeverBlocks(t *testing.T) {
 		t.Fatal("the TX queue never reported a drop; it cannot be bounded")
 	}
 
+	// The wall-clock bound below (10 ms for 1000 calls, i.e. 10 µs/call) is
+	// roughly 30x looser than the actual per-call cost, so on its own it
+	// would not fail on a regression that added a per-call slice allocation,
+	// a slog.Debug with a real handler, or a second lock. Pin the allocation
+	// budget directly, against the full-queue drop path specifically (the
+	// path this same loop is about to hammer for the timing assertion).
+	if allocs := testing.AllocsPerRun(2000, func() { s.WriteFrame(frame) }); allocs != 0 {
+		t.Fatalf("WriteFrame allocates %v per call on the DSP goroutine (queue full)", allocs)
+	}
+
 	start := time.Now()
 	for i := 0; i < 1000; i++ {
 		s.WriteFrame(frame)
@@ -410,6 +432,124 @@ func TestTXOversizeEncodeIsDroppedNotSent(t *testing.T) {
 	}
 	if got := sBig.TXStats().Sent; got != 0 {
 		t.Fatalf("TXStats().Sent = %d for an over-ceiling payload, want 0", got)
+	}
+	if got := sBig.TXStats().DroppedEncode; got != 1 {
+		t.Fatalf("TXStats().DroppedEncode = %d for an over-ceiling payload, want 1", got)
+	}
+}
+
+// TestTXEmptyEncodeIsDroppedAndCounted exercises tx.go's n <= 0 path, which
+// used to be the only completely mute drop in the file: no log, no counter,
+// nothing. mic live, gate open, encoder reporting "nothing to send", and
+// TXStats indistinguishable from "not transmitting at all". It must now show
+// up in DroppedEncode.
+func TestTXEmptyEncodeIsDroppedAndCounted(t *testing.T) {
+	ts, s := dialConnectedTX(t, func(o *Options) {
+		o.txEncode = func([]float32, []byte) (int, error) { return 0, nil }
+	})
+	s.SetTXFrequencies([]TXTarget{{Freq: freqAlpha}})
+
+	s.WriteFrame(sineFrame(0))
+	s.WriteFrame(sineFrame(1))
+	settle()
+
+	if got := ts.voiceCount(); got != 0 {
+		t.Fatalf("%d datagrams sent for a zero-byte encode, want 0", got)
+	}
+	if got := s.TXStats().DroppedEncode; got != 1 {
+		t.Fatalf("TXStats().DroppedEncode = %d, want 1 (this drop used to be silently uncounted)", got)
+	}
+}
+
+// TestTXFreeListConservedAcrossManyFlushes drives roughly 3x the free-list
+// pool (txBufferCount = 9) through the encoder and checks every buffer comes
+// back. Without txLoop's t.free <- pcm recycle (tx.go, end of the pcm case),
+// the pool empties after its first ~9 buffers -- about 180 ms of audio -- and
+// TX goes silently, PERMANENTLY dead for the rest of the session: every later
+// flush finds t.free empty and increments DroppedFull forever, the user's
+// radio working for one fifth of a second per launch. The whole rest of this
+// suite would stay green under that regression: the next deepest TX test
+// here produces only 3 flushes against a 9-buffer pool.
+func TestTXFreeListConservedAcrossManyFlushes(t *testing.T) {
+	requireOpus(t)
+	ts, s := dialConnectedTX(t, nil)
+	s.SetTXFrequencies([]TXTarget{{Freq: freqAlpha}, {Freq: freqBravo}})
+
+	const (
+		dspFrames = 60 // 30 Opus packets: more than 3x the 9-buffer pool
+		targets   = 2
+	)
+	wantSent := uint64(dspFrames / 2 * targets)
+
+	for i := 0; i < dspFrames; i++ {
+		s.WriteFrame(sineFrame(i))
+		if i%2 == 1 {
+			// Real callers hand WriteFrame one 10 ms DSP frame every 10 ms;
+			// this loop has no such cadence, so let txLoop actually drain
+			// and recycle each completed 20 ms packet before handing it
+			// more. Without this, a synchronous burst can legitimately
+			// outrun txLoop's non-blocking flush (WriteFrame drops rather
+			// than blocks by design) and manufacture drops that have
+			// nothing to do with free-list conservation -- exactly the
+			// false failure this pacing avoids.
+			wantSoFar := uint64((i + 1) / 2 * targets)
+			waitFor(t, "txLoop to catch up with the encoder", func() bool {
+				return s.TXStats().Sent >= wantSoFar
+			})
+		}
+	}
+
+	pkts := waitVoice(t, ts, int(wantSent))
+	if len(pkts) != int(wantSent) {
+		t.Fatalf("server saw %d datagrams, want %d", len(pkts), wantSent)
+	}
+
+	stats := s.TXStats()
+	if stats.Sent != wantSent {
+		t.Fatalf("TXStats().Sent = %d, want %d (the free list ran out mid-session, "+
+			"so later flushes had no buffer to put their frame in)", stats.Sent, wantSent)
+	}
+	if stats.DroppedFull != 0 {
+		t.Fatalf("TXStats().DroppedFull = %d, want 0 (the free-list pool starved before "+
+			"the session finished transmitting)", stats.DroppedFull)
+	}
+}
+
+// TestTXDialSucceedsWithoutACodec pins judgment call 4: a session with no
+// Opus codec available must still let Dial succeed and the handshake
+// complete -- only transmit is disabled. Nothing else in this suite asserts
+// this; a change that made init (or Dial) fail outright when the encoder is
+// unavailable would leave the session unable to connect at all, even though
+// it could still receive once RX lands and roster presence comes from the
+// gRPC control plane rather than this UDP binding.
+//
+// On a CGO_ENABLED=1 build (opus.Available() here), txState.init's own
+// opus.NewEncoder call always succeeds, so init cannot land in the no-codec
+// state through Dial alone; this reproduces that state directly so the
+// assertions below still pin the downstream contract. A CGO_ENABLED=0 run of
+// this exact test (see the design doc's manual verification plan) drives the
+// same state through Dial itself, with nothing poked.
+func TestTXDialSucceedsWithoutACodec(t *testing.T) {
+	ts, s := dialConnectedTX(t, nil)
+
+	if opus.Available() {
+		s.tx.encode = nil
+		s.tx.enc = nil
+	}
+
+	s.SetTXFrequencies([]TXTarget{{Freq: freqAlpha}})
+	s.WriteFrame(sineFrame(0))
+	s.WriteFrame(sineFrame(1))
+	settle()
+
+	if got := ts.voiceCount(); got != 0 {
+		t.Fatalf("%d datagrams sent with no codec, want 0", got)
+	}
+	if got := s.TXStats().DroppedEncode; got != 1 {
+		t.Fatalf("TXStats().DroppedEncode = %d, want 1", got)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close with no codec configured: %v", err)
 	}
 }
 

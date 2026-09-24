@@ -48,7 +48,20 @@ type TXTarget struct {
 // address, a frequency no radio is tuned to, a payload of five bytes or
 // fewer -- and says nothing about it, so this number is an upper bound on
 // what any peer actually heard.
-type TXStats struct{ Sent, DroppedFull, DroppedNoTarget uint64 }
+//
+// DroppedEncode covers every drop on the encode side of txSend: no encoder
+// configured, an Opus encode error, a non-positive byte count, and an
+// over-ceiling frame. They are folded into one counter rather than four
+// because the diagnosis and the remedy are the same for all of them ("audio
+// is not reaching the wire, check the log for which reason"); what matters
+// for "am I transmitting at all" is that the counter moves.
+//
+// DroppedWrite counts frames that were encoded and sized correctly but
+// failed on the per-target socket write (e.g. a sticky ICMP
+// port-unreachable). It is separate from DroppedEncode because it locates
+// the failure on the other side of the encode call, which matters for
+// diagnosing it.
+type TXStats struct{ Sent, DroppedFull, DroppedNoTarget, DroppedEncode, DroppedWrite uint64 }
 
 // txState is everything the transmit path owns. It lives inside Session
 // because the packets go out on Session's socket, through the same lock that
@@ -88,10 +101,14 @@ type txState struct {
 	oversizeOnce sync.Once
 	encErrOnce   sync.Once
 	noEncOnce    sync.Once
+	emptyOnce    sync.Once
+	writeErrOnce sync.Once
 
 	sent         atomic.Uint64
 	dropFull     atomic.Uint64
 	dropNoTarget atomic.Uint64
+	dropEncode   atomic.Uint64
+	dropWrite    atomic.Uint64
 
 	// mu guards the accumulator only, and is never held across anything that
 	// can block. audio.Sink documents that WriteFrame may be invoked
@@ -157,6 +174,8 @@ func (s *Session) TXStats() TXStats {
 		Sent:            s.tx.sent.Load(),
 		DroppedFull:     s.tx.dropFull.Load(),
 		DroppedNoTarget: s.tx.dropNoTarget.Load(),
+		DroppedEncode:   s.tx.dropEncode.Load(),
+		DroppedWrite:    s.tx.dropWrite.Load(),
 	}
 }
 
@@ -284,6 +303,7 @@ func (s *Session) txSend(pcm []float32, encoded, wire []byte, seqs map[KHz]uint3
 	t := &s.tx
 
 	if t.encode == nil {
+		t.dropEncode.Add(1)
 		t.noEncOnce.Do(func() {
 			s.log.Error("voice: dropping transmit audio: no encoder")
 		})
@@ -291,15 +311,21 @@ func (s *Session) txSend(pcm []float32, encoded, wire []byte, seqs map[KHz]uint3
 	}
 	n, err := t.encode(pcm, encoded)
 	if err != nil {
+		t.dropEncode.Add(1)
 		t.encErrOnce.Do(func() {
 			s.log.Error("voice: Opus encode failed; dropping transmit audio", "err", err)
 		})
 		return
 	}
 	if n <= 0 {
+		t.dropEncode.Add(1)
+		t.emptyOnce.Do(func() {
+			s.log.Error("voice: Opus encode returned no bytes; dropping transmit audio", "n", n)
+		})
 		return
 	}
 	if n > opus.MaxPacket || !txPayloadFits(n) {
+		t.dropEncode.Add(1)
 		t.oversizeOnce.Do(func() {
 			s.log.Error("voice: encoded frame exceeds the datagram ceiling; dropping",
 				"bytes", n, "max", opus.MaxPacket)
@@ -318,8 +344,15 @@ func (s *Session) txSend(pcm []float32, encoded, wire []byte, seqs map[KHz]uint3
 
 		p := NewVoice(s.self, seq, target.Freq, payload, true, target.Intercom)
 		if err := s.sendScratch(p, wire); err != nil {
+			t.dropWrite.Add(1)
 			if !errors.Is(err, errSessionClosed) {
-				s.log.Debug("voice: voice packet not sent", "freq", uint32(target.Freq), "err", err)
+				// Throttled like every sibling failure in this function: a
+				// persistent socket error (a sticky ICMP port-unreachable on
+				// a connected UDP socket, say) would otherwise log at 50 Hz
+				// per stuck frequency for as long as the fault lasts.
+				t.writeErrOnce.Do(func() {
+					s.log.Debug("voice: voice packet not sent", "freq", uint32(target.Freq), "err", err)
+				})
 			}
 			continue
 		}

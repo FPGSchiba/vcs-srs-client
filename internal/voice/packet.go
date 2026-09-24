@@ -34,8 +34,9 @@ const (
 	// accept for the voice protocol.
 	MaxDatagram = 1024
 
-	// MinVoicePayload is the smallest VOICE payload the server will relay;
-	// it discards anything at or below this length.
+	// MinVoicePayload is the smallest VOICE payload the server will relay
+	// (server: len(packet.Payload) > 5, i.e. len >= 6); it discards anything
+	// BELOW this length, i.e. 5 bytes or fewer.
 	MinVoicePayload = 6
 )
 
