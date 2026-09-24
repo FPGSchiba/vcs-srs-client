@@ -1160,7 +1160,7 @@ func TestVoicePacketGoldenBytes(t *testing.T) {
 		0x10,                   // 3     version 1 << 4 | type 0 (VOICE)
 		0x01,                   // 4     flags: PTT
 		0x01, 0x02, 0x03,       // 5-7   sequence 0x010203
-		0x03, 0xD5, 0x64,       // 8-10  frequency 251300 kHz
+		0x03, 0xD5, 0xA4,       // 8-10  frequency 251300 kHz (0x3D5A4)
 		0x01, 0x23, 0x45, 0x67, // 11-26 sender uuid, RFC 4122 order
 		0x89, 0xab,
 		0xcd, 0xef,
@@ -1275,7 +1275,7 @@ func TestSequenceIsMaskedTo24Bits(t *testing.T) {
 	if raw[5] != 0xFF || raw[6] != 0xFF || raw[7] != 0xFF {
 		t.Fatalf("sequence bytes %x %x %x, want ff ff ff", raw[5], raw[6], raw[7])
 	}
-	if raw[8] != 0x03 || raw[9] != 0xD5 || raw[10] != 0x64 {
+	if raw[8] != 0x03 || raw[9] != 0xD5 || raw[10] != 0xA4 {
 		t.Fatalf("frequency corrupted by sequence overflow: %x %x %x", raw[8], raw[9], raw[10])
 	}
 }
