@@ -1790,6 +1790,8 @@ Expected: FAIL — undefined `SetTXFrequencies`.
 Structure, from spec §8.1:
 
 1. `WriteFrame` (DSP goroutine): append into a 960-sample accumulator; on full, take a buffer from a free list, copy, **non-blocking** send to `txPCM` (capacity 8 ≈ 160 ms), drop-and-count when full. Before appending, read an atomic generation counter and reset the accumulator if it changed.
+
+   > **The channel's capacity has a hard floor of 4, and the reason must not be lost.** Task 2's catch-up fix means `dspLoop` can call `WriteFrame` up to **4 times in a single 10 ms tick** (`maxCatchUpFrames = 3`, so a 4-frame ceiling). A capacity below that turns a recoverable latency spike into *permanent* audio loss: the non-blocking send silently drops the overflow, and a catch-up burst is exactly when the backlog arrives. 8 is the chosen value; do not reduce it below 4 under any circumstances.
 2. `EndTransmission` bumps that generation counter.
 3. `txLoop` goroutine: receive PCM, encode **once**, then emit one packet per target, each with its own 24-bit sequence counter. Return the buffer to the free list.
 4. Targets held in an `atomic.Pointer[[]TXTarget]`.
