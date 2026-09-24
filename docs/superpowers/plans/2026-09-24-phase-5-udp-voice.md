@@ -2274,6 +2274,8 @@ One `Sink` at startup, never removed (D5), holding an atomic session pointer. Ke
 > `SetRXContext` and `SetEffects` are in the same position: no production caller until Tasks 10 and 11 add them, and until they do the RX path accepts nothing — deliberately fail-closed, so a missing call is silence rather than unfiltered audio.
 >
 > **Write a test that asserts the wiring itself**, not just that each side works in isolation.
+>
+> **And do not hand `SetSource` a typed nil.** Its guard is `if s == nil`, which does *not* catch a nil pointer boxed in the interface — verified by probe: `var sess *voice.Session; am.SetSource(sess)` skips the guard and stores a non-nil interface wrapping a nil pointer, after which `dspLoop` calls `ReadInto` on it and nil-panics **on the DSP goroutine**, taking the audio engine down. Register a wrapper value that is never nil and whose own session pointer goes nil on disconnect, which is what D5 calls for anyway.
 
 - [ ] **Step 6: Run the full Go suite**
 
