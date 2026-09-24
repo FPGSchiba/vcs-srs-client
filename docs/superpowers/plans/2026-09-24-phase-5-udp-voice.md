@@ -2267,6 +2267,14 @@ In `internal/app/audio.go`, the two PTT cases now also update the TX set. `m.Set
 
 One `Sink` at startup, never removed (D5), holding an atomic session pointer. Keep `defer backend.Close()` registered **before** `defer am.Stop()` — Task 2's test now pins this.
 
+> **Registering the Sink is only half the wiring, and the other half fails silently.** The `Sink` carries audio *out*. Received audio comes back through a separate seam that Task 9 added: `Manager.SetSource(...)`, feeding the mixer's fourth bus via `ReadInto`.
+>
+> **If Task 11 registers the `Sink` but forgets `SetSource`, transmit works, receive is completely inaudible, and every test written in Task 9 still passes** — because they exercise the RX path directly rather than through the Manager. There is no failing test anywhere to tell you. The symptom is "I can talk but I can't hear anyone", which reads like a server or codec problem rather than one missing call.
+>
+> `SetRXContext` and `SetEffects` are in the same position: no production caller until Tasks 10 and 11 add them, and until they do the RX path accepts nothing — deliberately fail-closed, so a missing call is silence rather than unfiltered audio.
+>
+> **Write a test that asserts the wiring itself**, not just that each side works in isolation.
+
 - [ ] **Step 6: Run the full Go suite**
 
 Run: `go build -tags purego ./... && go vet -tags purego ./... && go test -tags purego -race ./...`
