@@ -43,6 +43,11 @@ type testServer struct {
 	lastHello  string // source address of the most recent HELLO
 	lastSentTS int64  // the timestamp most recently sent in a keepalive reply
 	kaSeen     []keepaliveObservation
+
+	// voices records every VOICE datagram in arrival order. The real server
+	// relays them; this fixture only counts and keeps them, which is all the
+	// TX tests need to see.
+	voices []*Packet
 }
 
 func newTestServer(t *testing.T, secret string) *testServer {
@@ -72,6 +77,21 @@ func (ts *testServer) lastHelloFrom() string {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.lastHello
+}
+
+// voiceCount returns how many VOICE datagrams have arrived.
+func (ts *testServer) voiceCount() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return len(ts.voices)
+}
+
+// voicePackets returns a copy of every VOICE datagram seen so far, in
+// arrival order.
+func (ts *testServer) voicePackets() []*Packet {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return append([]*Packet(nil), ts.voices...)
 }
 
 func (ts *testServer) keepaliveCount() int {
@@ -139,6 +159,10 @@ func (ts *testServer) loop() {
 				ts.conn.WriteToUDP(reply.AppendTo(nil), from)
 				continue
 			}
+			ts.mu.Unlock()
+			continue
+		case PacketTypeVoice:
+			ts.voices = append(ts.voices, pkt)
 			ts.mu.Unlock()
 			continue
 		case PacketTypeBye:

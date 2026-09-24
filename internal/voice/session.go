@@ -137,6 +137,11 @@ type Options struct {
 	// poll overrides defaultPoll. Unexported: it is a test seam for driving
 	// the state machine with an injected clock, not part of the API.
 	poll time.Duration
+
+	// txEncode replaces the Opus encoder on the transmit path. Unexported:
+	// it is a test seam for driving the packet-ceiling and back-pressure
+	// paths deterministically, not part of the API.
+	txEncode func(pcm []float32, dst []byte) (int, error)
 }
 
 // eventKind identifies what rxLoop saw.
@@ -166,12 +171,13 @@ type stateChange struct {
 // Session owns one connected UDP socket for its whole life, plus the state
 // machine that keeps that socket's source address bound on the server.
 //
-// Three goroutines run per session: rxLoop, which does a blocking read,
+// Four goroutines run per session: rxLoop, which does a blocking read,
 // parses and dispatches; lifecycleLoop, which owns the HELLO ladder and the
-// keepalive schedule; and deliverLoop, which delivers OnState callbacks.
-// Close joins the first two (rxLoop also exits via the socket being closed
-// under it) and does NOT join deliverLoop, which is what makes it safe for
-// OnState to call Close.
+// keepalive schedule; txLoop, which encodes captured audio and writes it;
+// and deliverLoop, which delivers OnState callbacks. Close joins the first
+// three (rxLoop also exits via the socket being closed under it) and does
+// NOT join deliverLoop, which is what makes it safe for OnState to call
+// Close.
 type Session struct {
 	src    Sources
 	self   uuid.UUID
@@ -186,6 +192,11 @@ type Session struct {
 	// jitterMS is the configured jitter-buffer target. Task 7 only records
 	// it; the RX path that consumes it lands in a later task.
 	jitterMS int
+
+	// tx is the transmit path: see tx.go. It is a field of Session because
+	// its packets go out on Session's socket, through the same lock that
+	// serialises every other write against Close's BYE.
+	tx txState
 
 	events chan event
 	done   chan struct{}
@@ -283,6 +294,8 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 		s.jitterMS = defaultJitterMS
 	}
 
+	s.tx.init(opt.txEncode, s.log)
+
 	// Started before the first transition so no callback is ever dropped,
 	// and deliberately outside s.wg: Close joins s.wg, and OnState is
 	// allowed to call Close.
@@ -290,12 +303,17 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 
 	s.setState(StateResolving, nil)
 	if err := s.openSocket(); err != nil {
+		// No goroutine has touched the encoder yet, and the caller gets no
+		// Session to Close, so it has to be freed here or its C memory
+		// leaks for the life of the process.
+		s.tx.close()
 		s.setState(StateClosed, err)
 		return nil, err
 	}
 
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.lifecycleLoop()
+	go s.txLoop()
 	return s, nil
 }
 
@@ -335,7 +353,7 @@ func (s *Session) Close() error {
 		// server-side after we said goodbye, leaving a ghost client behind
 		// until the 60 s sweep.
 		s.mu.Lock()
-		byeErr := s.sendLocked(NewBye(s.self))
+		byeErr := s.sendLocked(NewBye(s.self), nil)
 		s.closed = true
 		conn := s.conn
 		s.conn = nil
@@ -351,6 +369,8 @@ func (s *Session) Close() error {
 			s.closeErr = conn.Close()
 		}
 		s.wg.Wait()
+		// After the join, so nothing can be inside an encode call.
+		s.tx.close()
 		s.setState(StateClosed, nil)
 	})
 	return s.closeErr
@@ -810,7 +830,7 @@ func (s *Session) sendKeepalive() error {
 	defer s.mu.Unlock()
 	echo := s.lastServerTS
 	at := s.now()
-	err := s.sendLocked(NewKeepalive(s.self, echo))
+	err := s.sendLocked(NewKeepalive(s.self, echo), nil)
 	if err == nil {
 		// Only a keepalive that actually went out can be answered; timing a
 		// reply against a send that failed would mis-date the next one.
@@ -823,16 +843,27 @@ func (s *Session) sendKeepalive() error {
 func (s *Session) send(p *Packet) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sendLocked(p)
+	return s.sendLocked(p, nil)
 }
 
-// sendLocked writes one packet on the live socket. Caller holds s.mu, which
-// is what serialises it against Close's BYE. A connected UDP write does not
-// block on the network, so holding the lock across it costs nothing.
-func (s *Session) sendLocked(p *Packet) error {
+// sendScratch writes one packet on the live socket, serialising it into a
+// caller-owned buffer. txLoop uses it to avoid an allocation per packet per
+// frequency, fifty times a second; a scratch with cap >= MaxDatagram is
+// never regrown.
+func (s *Session) sendScratch(p *Packet, scratch []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sendLocked(p, scratch)
+}
+
+// sendLocked writes one packet on the live socket, serialising it into
+// scratch (nil means allocate). Caller holds s.mu, which is what serialises
+// it against Close's BYE. A connected UDP write does not block on the
+// network, so holding the lock across it costs nothing.
+func (s *Session) sendLocked(p *Packet, scratch []byte) error {
 	if s.closed || s.conn == nil {
 		return errSessionClosed
 	}
-	_, err := s.conn.Write(p.AppendTo(nil))
+	_, err := s.conn.Write(p.AppendTo(scratch[:0]))
 	return err
 }
