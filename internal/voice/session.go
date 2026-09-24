@@ -68,8 +68,9 @@ const (
 	// here for the RX path that lands in a later task.
 	defaultJitterMS = 60
 
-	// retryInterval is how long an exhausted ladder waits before dialing a
-	// fresh socket and running the whole ladder again.
+	// retryInterval is how long an exhausted INITIAL ladder waits before
+	// dialing a fresh socket and running the whole ladder again. It does not
+	// apply to the binding-loss path: see lifecycleLoop.
 	retryInterval = 15 * time.Second
 
 	// bindingLossThreshold is how many consecutive unanswered keepalives are
@@ -90,18 +91,48 @@ const (
 	// control packets are queued, at a handful per second, so this is far
 	// more headroom than the protocol can use.
 	eventBuffer = 16
+
+	// maxPendingKA bounds the number of unanswered keepalive send times kept
+	// for RTT matching. Binding loss is declared long before this fills, so
+	// it only exists so a pathological server that answers nothing cannot
+	// grow the slice without limit.
+	maxPendingKA = 8
+
+	// resolveTimeout bounds one name lookup. It is REAL time, deliberately
+	// not the injected clock: it bounds an I/O call, not a protocol
+	// interval. See resolveUDPAddr for why the bound has to exist at all.
+	resolveTimeout = 10 * time.Second
 )
 
-var errSessionClosed = errors.New("voice: session closed")
+var (
+	errSessionClosed = errors.New("voice: session closed")
+
+	// ErrSecretLength reports a voice secret that is not exactly
+	// VoiceSecretLen bytes. The server reads payload[0:VoiceSecretLen] and
+	// compares that slice, so a short or long secret can never match: it
+	// would fail as an endless, indistinguishable "no HELLO_ACK" retry loop
+	// rather than as the configuration error it is.
+	ErrSecretLength = errors.New("voice: secret has the wrong length")
+)
 
 // Options configures a Session. The zero value is usable: every field falls
 // back to a documented default.
 type Options struct {
-	Log       *slog.Logger
-	OnState   func(State, error) // may be called concurrently
-	Clock     func() time.Time   // nil means time.Now
-	Keepalive time.Duration      // 0 means 5s
-	JitterMS  int                // 0 means 60
+	Log *slog.Logger
+
+	// OnState receives every lifecycle transition. Calls are delivered one
+	// at a time, in order, from a single goroutine dedicated to that job, so
+	// the callback never runs concurrently with itself. It may call any
+	// Session method, INCLUDING Close: the delivery goroutine is not one of
+	// the goroutines Close joins.
+	//
+	// It is delivered synchronously with nothing else, so a slow callback
+	// delays later callbacks but never the state machine itself.
+	OnState func(State, error)
+
+	Clock     func() time.Time // nil means time.Now
+	Keepalive time.Duration    // 0 means 5s
+	JitterMS  int              // 0 means 60
 
 	// poll overrides defaultPoll. Unexported: it is a test seam for driving
 	// the state machine with an injected clock, not part of the API.
@@ -126,16 +157,21 @@ type event struct {
 	serverTS int64
 }
 
+// stateChange is one queued OnState delivery.
+type stateChange struct {
+	st  State
+	err error
+}
+
 // Session owns one connected UDP socket for its whole life, plus the state
 // machine that keeps that socket's source address bound on the server.
 //
-// Two goroutines run per session: rxLoop, which does a blocking read, parses
-// and dispatches, and lifecycleLoop, which owns the HELLO ladder and the
-// keepalive schedule. Both exit via done (and, for rxLoop, via the socket
-// being closed under it).
-//
-// OnState must not call Close: Close waits for those goroutines, and one of
-// them is what delivers the callback.
+// Three goroutines run per session: rxLoop, which does a blocking read,
+// parses and dispatches; lifecycleLoop, which owns the HELLO ladder and the
+// keepalive schedule; and deliverLoop, which delivers OnState callbacks.
+// Close joins the first two (rxLoop also exits via the socket being closed
+// under it) and does NOT join deliverLoop, which is what makes it safe for
+// OnState to call Close.
 type Session struct {
 	src    Sources
 	self   uuid.UUID
@@ -158,9 +194,10 @@ type Session struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	// cbMu serialises OnState callbacks so they are delivered in the order
-	// the transitions happened.
-	cbMu sync.Mutex
+	// cbSignal wakes deliverLoop. It carries no data -- the queue below does
+	// -- so a full buffer means "already awake", and the send can be dropped
+	// rather than blocking the transition that triggered it.
+	cbSignal chan struct{}
 
 	mu           sync.Mutex
 	state        State
@@ -169,7 +206,20 @@ type Session struct {
 	closed       bool
 	rtt          time.Duration
 	lastServerTS int64
-	lastKASent   time.Time
+
+	// pendingKA holds the send time of every keepalive still unanswered,
+	// oldest first. A reply is matched to the OLDEST outstanding send, not
+	// to the most recent one: on a link slow enough for a reply to arrive
+	// after the next keepalive went out -- exactly where the number matters
+	// -- matching the most recent send measures a residue, or a negative.
+	pendingKA []time.Time
+
+	// cbQueue holds transitions waiting for deliverLoop; cbFinal records
+	// that StateClosed has been queued, after which nothing more may be
+	// published. Both are guarded by mu together with state itself, so a
+	// transition and its delivery cannot be reordered by a racing caller.
+	cbQueue []stateChange
+	cbFinal bool
 
 	// waitSeq and waitDeadline publish what the lifecycle goroutine is
 	// currently parked on. See waitingOn.
@@ -198,6 +248,10 @@ func (s *Session) waitingOn() (seq uint64, deadline time.Time) {
 // everything afterwards by that binding, and a connected socket also surfaces
 // ICMP port-unreachable as a write error.
 func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, error) {
+	if len(secret) != VoiceSecretLen {
+		return nil, fmt.Errorf("%w: got %d bytes, want %d", ErrSecretLength, len(secret), VoiceSecretLen)
+	}
+
 	s := &Session{
 		src:       src,
 		self:      self,
@@ -210,6 +264,7 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 		jitterMS:  opt.JitterMS,
 		events:    make(chan event, eventBuffer),
 		done:      make(chan struct{}),
+		cbSignal:  make(chan struct{}, 1),
 		state:     StateIdle,
 	}
 	if s.log == nil {
@@ -227,6 +282,11 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 	if s.jitterMS <= 0 {
 		s.jitterMS = defaultJitterMS
 	}
+
+	// Started before the first transition so no callback is ever dropped,
+	// and deliberately outside s.wg: Close joins s.wg, and OnState is
+	// allowed to call Close.
+	go s.deliverLoop()
 
 	s.setState(StateResolving, nil)
 	if err := s.openSocket(); err != nil {
@@ -247,7 +307,9 @@ func (s *Session) State() State {
 }
 
 // RTT returns the most recent keepalive round-trip time, or zero if no
-// keepalive has been answered yet.
+// keepalive has been answered on the current binding. It is reset whenever
+// the binding is re-established, so it never reports a pre-outage figure
+// while the session is rebinding.
 func (s *Session) RTT() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -255,23 +317,37 @@ func (s *Session) RTT() time.Duration {
 }
 
 // Close sends a best-effort BYE, closes the socket and stops the session's
-// goroutines. It is safe to call more than once; only the first call does
-// anything. A BYE from an unbound address is inert server-side, which is why
-// this is best-effort: the server's liveness sweep is the backstop.
+// goroutines. It is safe to call more than once and from any goroutine,
+// including from inside OnState; only the first call does anything. A BYE
+// from an unbound address is inert server-side, which is why this is
+// best-effort: the server's liveness sweep is the backstop.
+//
+// The final StateClosed callback may be delivered shortly after Close
+// returns. Close cannot wait for it without deadlocking the case that
+// matters most -- OnState calling Close -- so State() is the synchronous
+// answer and the callback is the notification.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
+		// The BYE is written and the session marked closed under one hold
+		// of mu, and every other write takes the same lock for its whole
+		// check-and-write. A ladder HELLO therefore lands strictly before
+		// the BYE or not at all -- it can never re-bind the session
+		// server-side after we said goodbye, leaving a ghost client behind
+		// until the 60 s sweep.
 		s.mu.Lock()
+		byeErr := s.sendLocked(NewBye(s.self))
 		s.closed = true
 		conn := s.conn
 		s.conn = nil
 		s.mu.Unlock()
 
+		if byeErr != nil && !errors.Is(byeErr, errSessionClosed) {
+			s.log.Debug("voice: BYE not sent", "err", byeErr)
+		}
+
 		close(s.done)
 
 		if conn != nil {
-			if _, err := conn.Write(NewBye(s.self).AppendTo(nil)); err != nil {
-				s.log.Debug("voice: BYE not sent", "err", err)
-			}
 			s.closeErr = conn.Close()
 		}
 		s.wg.Wait()
@@ -283,12 +359,24 @@ func (s *Session) Close() error {
 // now reads the injected clock.
 func (s *Session) now() time.Time { return s.clock() }
 
-// setState records the new state and delivers it to OnState. The callback
-// runs outside s.mu so it may call State() or RTT(), and under cbMu so
-// callbacks cannot be reordered relative to each other.
+// setState records the new state and queues it for delivery. The state and
+// its queue entry are written under one hold of mu, and deliverLoop is the
+// only consumer, so callbacks are delivered exactly in the order the
+// transitions happened.
+//
+// It never blocks: queueing is a slice append, so a slow or absent consumer
+// cannot stall the state machine. Nothing is published after StateClosed.
 func (s *Session) setState(st State, err error) {
 	s.mu.Lock()
+	if s.cbFinal {
+		s.mu.Unlock()
+		return
+	}
 	s.state = st
+	if st == StateClosed {
+		s.cbFinal = true
+	}
+	s.cbQueue = append(s.cbQueue, stateChange{st: st, err: err})
 	s.mu.Unlock()
 
 	if err != nil {
@@ -297,10 +385,38 @@ func (s *Session) setState(st State, err error) {
 		s.log.Debug("voice: session state", "state", st.String())
 	}
 
-	s.cbMu.Lock()
-	defer s.cbMu.Unlock()
-	if s.onState != nil {
-		s.onState(st, err)
+	select {
+	case s.cbSignal <- struct{}{}:
+	default:
+	}
+}
+
+// deliverLoop is the sole caller of OnState. Running deliveries on a
+// goroutine of their own is what lets OnState call Close: Close joins the rx
+// and lifecycle goroutines, and if a callback ran on either of those, a
+// Close from inside it would wait for itself forever.
+//
+// It exits after delivering StateClosed, which every terminated session
+// publishes exactly once.
+func (s *Session) deliverLoop() {
+	for range s.cbSignal {
+		for {
+			s.mu.Lock()
+			if len(s.cbQueue) == 0 {
+				s.mu.Unlock()
+				break
+			}
+			ch := s.cbQueue[0]
+			s.cbQueue = s.cbQueue[1:]
+			s.mu.Unlock()
+
+			if s.onState != nil {
+				s.onState(ch.st, ch.err)
+			}
+			if ch.st == StateClosed {
+				return
+			}
+		}
 	}
 }
 
@@ -309,6 +425,41 @@ func (s *Session) currentGen() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gen
+}
+
+// resolveUDPAddr resolves addr, bounded in time and cancellable by Close.
+//
+// net.ResolveUDPAddr takes no context, and Close joins the loop that calls
+// it, so an unbounded system resolver -- a blackholed DNS server after a VPN
+// toggle, precisely the case this state machine exists for -- would block
+// Close for as long as the resolver blocked. The lookup therefore runs on a
+// goroutine of its own, writing to a buffered channel nobody has to read; it
+// outlives this call at most until the resolver returns.
+func (s *Session) resolveUDPAddr(addr string) (*net.UDPAddr, error) {
+	type result struct {
+		addr *net.UDPAddr
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		ua, err := net.ResolveUDPAddr("udp", addr)
+		ch <- result{addr: ua, err: err}
+	}()
+
+	timer := time.NewTimer(resolveTimeout)
+	defer timer.Stop()
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, fmt.Errorf("voice: resolve %q: %w", addr, r.err)
+		}
+		return r.addr, nil
+	case <-s.done:
+		return nil, errSessionClosed
+	case <-timer.C:
+		return nil, fmt.Errorf("voice: resolve %q: no answer within %s", addr, resolveTimeout)
+	}
 }
 
 // openSocket resolves the endpoint afresh and dials a new connected socket,
@@ -322,9 +473,9 @@ func (s *Session) openSocket() error {
 	if err != nil {
 		return fmt.Errorf("voice: resolve endpoint: %w", err)
 	}
-	raddr, err := net.ResolveUDPAddr("udp", addr)
+	raddr, err := s.resolveUDPAddr(addr)
 	if err != nil {
-		return fmt.Errorf("voice: resolve %q: %w", addr, err)
+		return err
 	}
 	conn, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
@@ -343,9 +494,7 @@ func (s *Session) openSocket() error {
 	gen := s.gen
 	// A fresh socket means a fresh source address; nothing measured against
 	// the old binding carries over.
-	s.rtt = 0
-	s.lastServerTS = 0
-	s.lastKASent = time.Time{}
+	s.resetBindingLocked()
 	s.mu.Unlock()
 
 	if old != nil {
@@ -355,6 +504,19 @@ func (s *Session) openSocket() error {
 	s.wg.Add(1)
 	go s.rxLoop(conn, gen)
 	return nil
+}
+
+// resetBindingLocked drops everything measured against a binding that is
+// gone. Caller holds s.mu.
+//
+// lastServerTS in particular MUST go: echoing a pre-outage timestamp back
+// after recovery records one hugely inflated sample in the server's
+// per-client latency map, and a stale rtt would show the UI a healthy ping
+// for a session that is in fact broken.
+func (s *Session) resetBindingLocked() {
+	s.rtt = 0
+	s.lastServerTS = 0
+	s.pendingKA = nil
 }
 
 // rxLoop reads datagrams off one socket until that socket is closed. It does
@@ -395,7 +557,6 @@ func (s *Session) rxLoop(conn *net.UDPConn, gen uint64) {
 func (s *Session) emit(ev event) {
 	select {
 	case s.events <- ev:
-	case <-s.done:
 	default:
 		s.log.Warn("voice: control event queue full, dropping", "kind", ev.kind)
 	}
@@ -406,50 +567,88 @@ func (s *Session) emit(ev event) {
 func (s *Session) lifecycleLoop() {
 	defer s.wg.Done()
 
+	// rebinding records that the ladder about to run is a re-HELLO on an
+	// existing socket after binding loss, rather than a first handshake on a
+	// fresh one. The two exhaust differently: see below.
+	rebinding := false
+
 	for {
 		acked, closed := s.runLadder()
 		if closed {
 			return
 		}
 		if acked {
+			rebinding = false
 			s.setState(StateConnected, nil)
 			lost, closed := s.serve()
 			if closed {
 				return
 			}
-			if lost {
-				// Re-HELLO on the SAME socket first: if the binding died
-				// server-side (a restart, a cleanup sweep) the existing
-				// source address is still perfectly good.
-				s.setState(StateRebinding, nil)
-				continue
+			if !lost {
+				return
 			}
-			return
+			// Re-HELLO on the SAME socket first: if the binding died
+			// server-side (a restart, a cleanup sweep) the existing
+			// source address is still perfectly good.
+			s.mu.Lock()
+			s.resetBindingLocked()
+			s.mu.Unlock()
+			s.setState(StateRebinding, nil)
+			rebinding = true
+			continue
 		}
 
-		// The ladder is exhausted. The C# peer logs "proceeding with
+		if rebinding {
+			// §7.3: "the retry ladder also failing -> close the socket, dial
+			// a fresh one (new source port), HELLO again" -- with no
+			// interval, and for good reason. By this point the caller has
+			// already lost 3 unanswered keepalives (15 s) plus the whole
+			// re-HELLO ladder (22.5 s) of audio. Sitting out another 15 s
+			// idle before even trying would push the outage past the
+			// server's 60 s liveness sweep, so the client could be culled
+			// while waiting to recover from a NAT rebind.
+			rebinding = false
+			if stop := s.reopen(); stop {
+				return
+			}
+			continue
+		}
+
+		// The INITIAL ladder is exhausted. The C# peer logs "proceeding with
 		// keepalive path" here; that cannot work against this server,
 		// because keepalives from an unbound address are dropped. Report the
 		// reason and re-run the whole ladder on a fresh socket instead --
 		// the usual causes (server restarting, secret not yet propagated to
-		// a voice node) are transient, so surrender is the wrong response.
+		// a voice node) are transient and want a pause, so surrender is the
+		// wrong response and so is hammering.
 		s.setState(StateRetrying, fmt.Errorf(
 			"voice: no HELLO_ACK after %d attempts; retrying in %s", len(helloLadder), retryInterval))
-
-		for {
-			if _, closed := s.wait(retryInterval, nil); closed {
-				return
-			}
-			s.setState(StateResolving, nil)
-			if err := s.openSocket(); err != nil {
-				if errors.Is(err, errSessionClosed) {
-					return
-				}
-				s.setState(StateRetrying, err)
-				continue
-			}
-			break
+		if _, closed := s.wait(retryInterval, nil); closed {
+			return
 		}
+		if stop := s.reopen(); stop {
+			return
+		}
+	}
+}
+
+// reopen dials a fresh socket -- a fresh source port -- retrying every
+// retryInterval for as long as dialing itself keeps failing. It reports
+// whether the session was closed while trying.
+func (s *Session) reopen() (stop bool) {
+	for {
+		s.setState(StateResolving, nil)
+		if err := s.openSocket(); err != nil {
+			if errors.Is(err, errSessionClosed) {
+				return true
+			}
+			s.setState(StateRetrying, err)
+			if _, closed := s.wait(retryInterval, nil); closed {
+				return true
+			}
+			continue
+		}
+		return false
 	}
 }
 
@@ -569,17 +768,37 @@ func (s *Session) wait(d time.Duration, onEvent func(event) bool) (matched, clos
 
 // recordKeepalive stores the server's echo timestamp for the next keepalive
 // payload and updates the locally measured round-trip time.
+//
+// The reply is matched to the OLDEST unanswered send, not to the most recent
+// one. Keepalives go out strictly in order and the server answers each in
+// turn, so on a link slow enough that a reply arrives after the next
+// keepalive was sent, the oldest outstanding send is the one it answers.
 func (s *Session) recordKeepalive(ev event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ev.serverTS != 0 {
 		s.lastServerTS = ev.serverTS
 	}
-	if !s.lastKASent.IsZero() {
-		if rtt := ev.at.Sub(s.lastKASent); rtt > 0 {
-			s.rtt = rtt
-		}
+	if len(s.pendingKA) == 0 {
+		// Nothing outstanding: a duplicate, or a reply that survived a
+		// re-dial. It carries no usable timing, and guessing one would be
+		// worse than reporting the last good measurement.
+		return
 	}
+	sent := s.pendingKA[0]
+	s.pendingKA = s.pendingKA[1:]
+	if rtt := ev.at.Sub(sent); rtt > 0 {
+		s.rtt = rtt
+	}
+}
+
+// noteKeepaliveSentLocked remembers when a keepalive went out so its reply
+// can be timed against it. Caller holds s.mu.
+func (s *Session) noteKeepaliveSentLocked(at time.Time) {
+	if len(s.pendingKA) >= maxPendingKA {
+		s.pendingKA = s.pendingKA[1:]
+	}
+	s.pendingKA = append(s.pendingKA, at)
 }
 
 // sendKeepalive writes a keepalive echoing the server's last timestamp. The
@@ -588,20 +807,32 @@ func (s *Session) recordKeepalive(ev event) {
 // the payload is empty.
 func (s *Session) sendKeepalive() error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	echo := s.lastServerTS
-	s.lastKASent = s.now()
-	s.mu.Unlock()
-	return s.send(NewKeepalive(s.self, echo))
+	at := s.now()
+	err := s.sendLocked(NewKeepalive(s.self, echo))
+	if err == nil {
+		// Only a keepalive that actually went out can be answered; timing a
+		// reply against a send that failed would mis-date the next one.
+		s.noteKeepaliveSentLocked(at)
+	}
+	return err
 }
 
 // send writes one packet on the live socket.
 func (s *Session) send(p *Packet) error {
 	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
-	if conn == nil {
+	defer s.mu.Unlock()
+	return s.sendLocked(p)
+}
+
+// sendLocked writes one packet on the live socket. Caller holds s.mu, which
+// is what serialises it against Close's BYE. A connected UDP write does not
+// block on the network, so holding the lock across it costs nothing.
+func (s *Session) sendLocked(p *Packet) error {
+	if s.closed || s.conn == nil {
 		return errSessionClosed
 	}
-	_, err := conn.Write(p.AppendTo(nil))
+	_, err := s.conn.Write(p.AppendTo(nil))
 	return err
 }

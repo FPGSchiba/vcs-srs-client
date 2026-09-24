@@ -1,6 +1,8 @@
 package voice
 
 import (
+	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -169,7 +171,16 @@ func dialTestSession(t *testing.T, ts *testServer, secret string, opt Options) *
 // number and clock position reached, so a caller can carry on from there.
 func walkLadder(t *testing.T, s *Session, ts *testServer, clk *fakeClock) (uint64, time.Time) {
 	t.Helper()
-	seq, now := uint64(0), clk.peek()
+	return walkLadderFrom(t, s, ts, clk, 0, clk.peek(), 0)
+}
+
+// walkLadderFrom is walkLadder for a ladder that is not the session's first:
+// seq and now are the wait sequence number and clock position it carries on
+// from, and priorHellos is how many HELLOs the fixture had already seen
+// before this ladder began.
+func walkLadderFrom(t *testing.T, s *Session, ts *testServer, clk *fakeClock,
+	seq uint64, now time.Time, priorHellos int) (uint64, time.Time) {
+	t.Helper()
 	for i, rung := range ladderRungs {
 		nextSeq, deadline := parkedAfter(t, s, seq)
 		if got := deadline.Sub(now); got != rung {
@@ -177,10 +188,10 @@ func walkLadder(t *testing.T, s *Session, ts *testServer, clk *fakeClock) (uint6
 		}
 		// The session parks as soon as it has written the HELLO, which can be
 		// before the fixture has read it off the socket.
-		want := i + 1
+		want := priorHellos + i + 1
 		waitFor(t, "the HELLO for this ladder attempt", func() bool { return ts.helloCount() >= want })
 		if got := ts.helloCount(); got != want {
-			t.Fatalf("helloCount = %d on ladder attempt %d, want %d", got, want, want)
+			t.Fatalf("helloCount = %d on ladder attempt %d, want %d", got, i+1, want)
 		}
 		clk.advance(rung)
 		seq, now = nextSeq, deadline
@@ -359,9 +370,20 @@ func TestSessionExhaustionRetriesRatherThanSurrendering(t *testing.T) {
 			"unbound address are dropped, so that fallback cannot work here", got)
 	}
 
-	// Then the whole ladder runs again.
+	// Then the whole ladder runs again -- on a FRESHLY DIALED socket. The
+	// exhausted ladder means the server never bound this source address, so
+	// re-running from the same port would just repeat a conversation that
+	// has already been shown not to work; §7.3 calls for a new source port.
+	staleAddr := ts.lastHelloFrom()
+	if staleAddr == "" {
+		t.Fatal("fixture recorded no HELLO source address")
+	}
 	clk.advance(specRetry)
 	waitFor(t, "the ladder to re-run", func() bool { return ts.helloCount() >= len(ladderRungs)+1 })
+	if got := ts.lastHelloFrom(); got == staleAddr {
+		t.Fatalf("the retried ladder came from %s again; an exhausted ladder must "+
+			"re-dial on a fresh source port", got)
+	}
 
 	if rec.saw(StateClosed) {
 		t.Fatal("session closed itself on exhaustion; it must keep retrying")
@@ -379,6 +401,16 @@ func TestSessionBindingLossTriggersReHello(t *testing.T) {
 	s := dialTestSession(t, ts, goodSecret, testOptions(clk, rec))
 	start := clk.peek()
 	waitFor(t, "StateConnected", func() bool { return rec.saw(StateConnected) })
+
+	// The source address the server bound on the handshake. A re-HELLO after
+	// binding loss must arrive from this same address: the binding may have
+	// died server-side (a restart, a cleanup sweep) while the source address
+	// is still perfectly good, and re-dialing first would throw away a
+	// working port and a round trip for nothing.
+	boundAddr := ts.lastHelloFrom()
+	if boundAddr == "" {
+		t.Fatal("fixture recorded no HELLO source address")
+	}
 
 	// The handshake consumed wait #1 (the first ladder rung, satisfied by the
 	// ACK); wait #2 onwards are keepalive intervals.
@@ -431,10 +463,24 @@ func TestSessionBindingLossTriggersReHello(t *testing.T) {
 		seq, now = nextSeq, deadline
 	}
 	waitFor(t, "a re-HELLO after unanswered keepalives", func() bool { return ts.helloCount() >= 2 })
+	if got := ts.lastHelloFrom(); got != boundAddr {
+		t.Fatalf("the re-HELLO came from %s, want the original %s: binding loss must "+
+			"re-HELLO on the SAME socket before it re-dials", got, boundAddr)
+	}
 	if !rec.saw(StateRebinding) {
 		t.Fatal("no StateRebinding delivered on binding loss")
 	}
+
+	// Everything measured against the lost binding must be dropped with it.
+	seenBefore := len(ts.observedKeepalives())
 	waitFor(t, "recovery to StateConnected", func() bool { return s.State() == StateConnected })
+	waitFor(t, "the first keepalive after recovery", func() bool {
+		return len(ts.observedKeepalives()) > seenBefore
+	})
+	if got := ts.observedKeepalives()[seenBefore].payload; len(got) != 0 {
+		t.Fatalf("the first keepalive after recovery echoed %v; a pre-outage timestamp "+
+			"records one hugely inflated sample in the server's latency map", got)
+	}
 }
 
 func TestSessionRTTMeasured(t *testing.T) {
@@ -447,6 +493,64 @@ func TestSessionRTTMeasured(t *testing.T) {
 
 	waitFor(t, "StateConnected", func() bool { return rec.saw(StateConnected) })
 	waitFor(t, "a keepalive round trip", func() bool { return s.RTT() > 0 })
+
+	// Non-zero on its own proves very little: with a stepping clock any two
+	// reads differ, so measuring against the socket's opening time -- or
+	// against the handshake -- would also produce a positive number. Push
+	// the session several keepalive intervals away from both. A loopback
+	// round trip stays a few clock reads long however old the session is, so
+	// an RTT that has grown to the interval itself is being measured from
+	// the wrong instant.
+	for i := 0; i < 3; i++ {
+		before := ts.keepaliveCount()
+		clk.advance(specKeepalive)
+		waitFor(t, "another keepalive round trip", func() bool { return ts.keepaliveCount() > before })
+		settle()
+		if got := s.RTT(); got >= specKeepalive {
+			t.Fatalf("RTT = %v after %d keepalive intervals: a loopback round trip cannot "+
+				"grow with the session's age unless it is measured from the wrong instant",
+				got, i+1)
+		}
+	}
+}
+
+// TestSessionRTTMatchesTheKeepaliveItAnswers pins the matching rule directly,
+// without a socket: a reply that arrives after the NEXT keepalive has already
+// gone out must still be timed against the keepalive it answers. Measuring it
+// against the most recent send instead yields a small residue, or a negative
+// that a "> 0" guard silently discards -- so RTT would read low, or freeze,
+// on exactly the high-latency links where it is worth having.
+func TestSessionRTTMatchesTheKeepaliveItAnswers(t *testing.T) {
+	s := &Session{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	base := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+	s.mu.Lock()
+	s.noteKeepaliveSentLocked(base)                      // keepalive #1
+	s.noteKeepaliveSentLocked(base.Add(5 * time.Second)) // keepalive #2, unanswered
+	s.mu.Unlock()
+
+	// The reply to #1 comes home 6 s after it was sent -- a second after #2
+	// went out.
+	s.recordKeepalive(event{kind: evKeepaliveReply, at: base.Add(6 * time.Second), serverTS: 42})
+	if got, want := s.RTT(), 6*time.Second; got != want {
+		t.Fatalf("RTT = %v, want %v (the round trip of the keepalive being answered)", got, want)
+	}
+	if got := s.lastServerTS; got != 42 {
+		t.Fatalf("lastServerTS = %d, want 42", got)
+	}
+
+	// The reply to #2, 500 ms after it went out.
+	s.recordKeepalive(event{kind: evKeepaliveReply, at: base.Add(5500 * time.Millisecond), serverTS: 43})
+	if got, want := s.RTT(), 500*time.Millisecond; got != want {
+		t.Fatalf("RTT = %v after the second reply, want %v", got, want)
+	}
+
+	// A third reply with nothing outstanding carries no timing at all, and
+	// must not be allowed to invent one.
+	s.recordKeepalive(event{kind: evKeepaliveReply, at: base.Add(time.Hour), serverTS: 44})
+	if got, want := s.RTT(), 500*time.Millisecond; got != want {
+		t.Fatalf("RTT = %v after an unsolicited reply, want the last measured %v", got, want)
+	}
 }
 
 func TestSessionCloseSendsBye(t *testing.T) {
@@ -467,10 +571,226 @@ func TestSessionCloseSendsBye(t *testing.T) {
 	if s.State() != StateClosed {
 		t.Fatalf("State after Close = %v, want closed", s.State())
 	}
-	if !rec.saw(StateClosed) {
-		t.Fatal("no StateClosed delivered to OnState")
-	}
+	// The final callback is delivered on the session's delivery goroutine,
+	// so it can land just after Close returns. Close cannot wait for it:
+	// OnState is allowed to be the caller.
+	waitFor(t, "StateClosed to be delivered to OnState", func() bool { return rec.saw(StateClosed) })
 	if err := s.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestSessionKeepaliveEchoesServerTimestamp pins §7.2: the echoed timestamp
+// is the ONLY input to the server's per-client latency map. A keepalive that
+// carries no echo, or one that carries anything other than the timestamp the
+// server last sent, is not a cheaper keepalive -- it silently blanks or
+// corrupts the latency the server shows everyone else for this client.
+func TestSessionKeepaliveEchoesServerTimestamp(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+	clk := newFakeClock()
+	rec := newStateRecorder()
+
+	s := dialTestSession(t, ts, goodSecret, testOptions(clk, rec))
+	waitFor(t, "StateConnected", func() bool { return rec.saw(StateConnected) })
+
+	// The priming keepalive: nothing has been received yet, so there is
+	// nothing to echo and the payload must be empty rather than zeros.
+	waitFor(t, "the priming keepalive", func() bool { return len(ts.observedKeepalives()) >= 1 })
+	first := ts.observedKeepalives()[0]
+	if len(first.payload) != 0 {
+		t.Fatalf("the priming keepalive carried %v, want an empty payload: nothing has "+
+			"been received yet, so there is nothing to echo", first.payload)
+	}
+	if first.prevTS != 0 {
+		t.Fatalf("fixture had already sent timestamp %d before the first keepalive", first.prevTS)
+	}
+
+	// The fixture answered it with a timestamp of its own. The next
+	// keepalive must carry that exact value back, as 8 big-endian bytes.
+	seq, _ := s.waitingOn()
+	clk.advance(specKeepalive)
+	parkedAfter(t, s, seq)
+	waitFor(t, "the second keepalive", func() bool { return len(ts.observedKeepalives()) >= 2 })
+
+	second := ts.observedKeepalives()[1]
+	if second.prevTS == 0 {
+		t.Fatal("fixture never sent a timestamp to echo")
+	}
+	if len(second.payload) != 8 {
+		t.Fatalf("second keepalive payload = %v (%d bytes), want the 8-byte echo of %d",
+			second.payload, len(second.payload), second.prevTS)
+	}
+	if got := int64(binary.BigEndian.Uint64(second.payload)); got != second.prevTS {
+		t.Fatalf("second keepalive echoed %d, want %d, the timestamp the server last sent",
+			got, second.prevTS)
+	}
+}
+
+// TestSessionBindingLossEscalatesWithoutWaiting pins §7.3's escalation
+// timing. Once the re-HELLO ladder has also failed, the binding is gone for
+// good and the only move left is a fresh source port -- immediately. Routing
+// that through the exhaustion handler's 15 s pause instead adds a quarter of
+// a minute of dead audio to an outage that already cost 37.5 s, which
+// overruns the server's 60 s liveness sweep: the client can be culled while
+// it is still politely waiting to recover.
+func TestSessionBindingLossEscalatesWithoutWaiting(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+	clk := newFakeClock()
+	rec := newStateRecorder()
+
+	s := dialTestSession(t, ts, goodSecret, testOptions(clk, rec))
+	start := clk.peek()
+	waitFor(t, "StateConnected", func() bool { return rec.saw(StateConnected) })
+	boundAddr := ts.lastHelloFrom()
+
+	// A source-address change: the server now ignores this client entirely,
+	// keepalives and HELLOs alike, and every write still succeeds.
+	ts.setDropKeepalive(true)
+	ts.setDropHello(true)
+
+	// Run keepalive intervals until the session declares the binding lost
+	// and parks on the first rung of the re-HELLO ladder. The rung is 1.5 s
+	// where a keepalive interval is 5 s, so the park itself says which one
+	// we are looking at.
+	seq, now := uint64(1), start
+	for i := 0; ; i++ {
+		if i > 10 {
+			t.Fatal("no re-HELLO ladder after ten keepalive intervals")
+		}
+		nextSeq, deadline := parkedAfter(t, s, seq)
+		if deadline.Sub(now) == ladderRungs[0] {
+			break // the ladder has started; leave seq/now on the last keepalive
+		}
+		if got := deadline.Sub(now); got != specKeepalive {
+			t.Fatalf("keepalive interval = %v, want %v", got, specKeepalive)
+		}
+		clk.advance(deadline.Sub(now))
+		seq, now = nextSeq, deadline
+	}
+	if got := ts.lastHelloFrom(); got != boundAddr {
+		t.Fatalf("the re-HELLO came from %s, want the original %s", got, boundAddr)
+	}
+
+	// The whole re-HELLO ladder now fails too.
+	_, exhausted := walkLadderFrom(t, s, ts, clk, seq, now, 1)
+	if got := clk.peek(); got != exhausted {
+		t.Fatalf("clock at %v, expected the ladder walk to leave it at %v", got, exhausted)
+	}
+
+	// Without advancing the clock by so much as a millisecond, a HELLO must
+	// go out from a NEW source port.
+	want := 1 + len(ladderRungs) + 1
+	waitFor(t, "an immediate re-dial on a fresh source port", func() bool {
+		return ts.helloCount() >= want && ts.lastHelloFrom() != boundAddr
+	})
+	if got := clk.peek(); got != exhausted {
+		t.Fatalf("clock moved to %v during the escalation; it must not have to wait at all", got)
+	}
+	if got := rec.count(StateRetrying); got != 0 {
+		t.Fatalf("StateRetrying delivered %d times on the binding-loss path: that is the "+
+			"exhaustion handler, and it idles for %v before re-dialing", got, specRetry)
+	}
+}
+
+// TestSessionCloseFromStateCallbackReturns pins the wiring Task 11 will
+// write: "on disconnect, tear the session down". If Close is delivered on a
+// goroutine Close itself joins, that one line freezes the app on every voice
+// disconnect, with no recovery short of killing it -- and it wedges every
+// other caller's Close too, because the first one holds the once.
+func TestSessionCloseFromStateCallbackReturns(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+	clk := newFakeClock()
+	rec := newStateRecorder()
+
+	ready := make(chan *Session, 1)
+	returned := make(chan error, 1)
+	var once sync.Once
+
+	opt := testOptions(clk, rec)
+	opt.OnState = func(st State, err error) {
+		rec.on(st, err)
+		if st != StateConnected {
+			return
+		}
+		once.Do(func() {
+			select {
+			case s := <-ready:
+				returned <- s.Close()
+			case <-time.After(3 * time.Second):
+				returned <- errors.New("test never handed over the session")
+			}
+		})
+	}
+
+	s := dialTestSession(t, ts, goodSecret, opt)
+	ready <- s
+
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("Close from inside OnState: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() called from inside OnState never returned")
+	}
+
+	if got := s.State(); got != StateClosed {
+		t.Fatalf("State = %v after Close from OnState, want closed", got)
+	}
+	waitFor(t, "StateClosed to be delivered", func() bool { return rec.saw(StateClosed) })
+
+	// And the socket really was released: a second Close from another
+	// goroutine is not wedged behind the first.
+	done := make(chan error, 1)
+	go func() { done <- s.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second Close() is wedged behind the one OnState called")
+	}
+	waitFor(t, "a BYE from the bound address", func() bool {
+		total, fromBound := ts.byeCounts()
+		return total >= 1 && fromBound >= 1
+	})
+}
+
+// TestSessionRejectsWrongLengthSecret: the server compares
+// payload[0:VoiceSecretLen] byte for byte, so a secret of any other length
+// can never match. Accepting one turns a configuration mistake into an
+// eternal retry loop whose only diagnostic is "no HELLO_ACK after 5
+// attempts" -- the silent-failure class this state machine exists to end.
+func TestSessionRejectsWrongLengthSecret(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+
+	for _, tc := range []struct {
+		name   string
+		secret string
+	}{
+		{"empty", ""},
+		{"truncated", goodSecret[:VoiceSecretLen-1]},
+		{"overlong", goodSecret + "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := newFakeClock()
+			rec := newStateRecorder()
+			s, err := Dial(Sources{Update: ts.addr()}, uuid.New(), tc.secret, testOptions(clk, rec))
+			if err == nil {
+				s.Close()
+				t.Fatalf("Dial accepted a %d-byte secret, want %d", len(tc.secret), VoiceSecretLen)
+			}
+			if !errors.Is(err, ErrSecretLength) {
+				t.Fatalf("Dial error = %v, want one wrapping ErrSecretLength", err)
+			}
+			if s != nil {
+				t.Fatal("Dial returned a session alongside an error")
+			}
+		})
+	}
+	settle()
+	if got := ts.helloCount(); got != 0 {
+		t.Fatalf("helloCount = %d, want 0: a secret that cannot match must never be sent", got)
 	}
 }

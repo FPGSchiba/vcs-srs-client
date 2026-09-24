@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// keepaliveObservation is one keepalive as the fixture saw it, paired with
+// the timestamp the fixture had most recently sent out before it arrived.
+// The pairing is captured under the fixture's lock, so a test can assert
+// "this keepalive echoed the timestamp we last sent" without racing the
+// reply the fixture is about to send for this very packet.
+type keepaliveObservation struct {
+	payload []byte // the payload exactly as received
+	prevTS  int64  // the last timestamp this server sent before this arrived
+}
+
 // testServer is a minimal UDP responder for SESSION STATE-MACHINE tests
 // only: the retry ladder, the unanswered-keepalive counter, and re-HELLO
 // recovery, none of which can be provoked against a real server without
@@ -29,7 +39,10 @@ type testServer struct {
 	helloes    int
 	keepalives int
 	byes       int
-	byesBound  int // BYEs that arrived from an address this server had bound
+	byesBound  int    // BYEs that arrived from an address this server had bound
+	lastHello  string // source address of the most recent HELLO
+	lastSentTS int64  // the timestamp most recently sent in a keepalive reply
+	kaSeen     []keepaliveObservation
 }
 
 func newTestServer(t *testing.T, secret string) *testServer {
@@ -51,10 +64,28 @@ func (ts *testServer) setDropKeepalive(v bool) { ts.mu.Lock(); ts.dropKeep = v; 
 
 func (ts *testServer) helloCount() int { ts.mu.Lock(); defer ts.mu.Unlock(); return ts.helloes }
 
+// lastHelloFrom returns the source address the most recent HELLO arrived
+// from. The server binds a session to its source address, so this is how a
+// test tells a re-HELLO on the SAME socket apart from one on a freshly
+// dialed socket.
+func (ts *testServer) lastHelloFrom() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.lastHello
+}
+
 func (ts *testServer) keepaliveCount() int {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.keepalives
+}
+
+// observedKeepalives returns a copy of every keepalive seen so far, in
+// arrival order.
+func (ts *testServer) observedKeepalives() []keepaliveObservation {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return append([]keepaliveObservation(nil), ts.kaSeen...)
 }
 
 // byeCounts returns the total number of BYEs seen and how many of those
@@ -80,6 +111,7 @@ func (ts *testServer) loop() {
 		switch pkt.Type {
 		case PacketTypeHello:
 			ts.helloes++
+			ts.lastHello = from.String()
 			ok := len(pkt.Payload) >= VoiceSecretLen &&
 				string(pkt.Payload[:VoiceSecretLen]) == ts.acceptSec
 			drop := ts.dropHello
@@ -94,12 +126,20 @@ func (ts *testServer) loop() {
 			continue
 		case PacketTypeKeepalive:
 			ts.keepalives++
+			ts.kaSeen = append(ts.kaSeen, keepaliveObservation{
+				payload: append([]byte(nil), pkt.Payload...),
+				prevTS:  ts.lastSentTS,
+			})
 			bound, drop := ts.bound[from.String()], ts.dropKeep
-			ts.mu.Unlock()
 			if bound && !drop {
-				reply := NewKeepalive(pkt.SenderID, time.Now().UnixMilli())
+				sent := time.Now().UnixMilli()
+				ts.lastSentTS = sent
+				ts.mu.Unlock()
+				reply := NewKeepalive(pkt.SenderID, sent)
 				ts.conn.WriteToUDP(reply.AppendTo(nil), from)
+				continue
 			}
+			ts.mu.Unlock()
 			continue
 		case PacketTypeBye:
 			ts.byes++
