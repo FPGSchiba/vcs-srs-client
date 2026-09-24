@@ -15,6 +15,9 @@
 These apply to **every** task. They are not repeated per task.
 
 - **Every Go invocation carries `-tags purego`.** `go build -tags purego ./...`, `go vet -tags purego ./...`, `go test -tags purego -race ./...`. A command without it is wrong even if it passes.
+- **A package with a cgo file and a `!cgo` stub must also pass `CGO_ENABLED=0 go vet` and `CGO_ENABLED=0 go test`, not just `CGO_ENABLED=0 go build`.** `go build` does not compile `_test.go` files, so a test referencing cgo-only symbols passes the build and still breaks vet and test. Current CI runs everything with cgo enabled, so CI will not catch it — only a developer without a C toolchain will, as a hard repo-wide failure. This cost a fix round in Task 1.
+- **The sandbox blocks `bind(2)`** — all sockets, TCP and UDP, even on loopback (`operation not permitted`). Any test that opens a socket must be run with the sandbox disabled. Do not mistake this for a defect in your own code. See `.superpowers/sdd/ENVIRONMENT.md`.
+- **gopls in this repo emits false positives** (unresolved `C.` constants in cgo packages, bogus generic-instantiation errors). Always confirm against the actual compiler before acting on a diagnostic.
 - **Frontend typecheck is `(cd frontend && npx tsc --noEmit)`.** `npx --prefix frontend tsc --noEmit` silently prints a help banner and exits 0 without checking anything. Never use it.
 - **Codec geometry is a wire contract, not a preference:** Opus 48 kHz, 20 ms (960 samples), mono, `OPUS_APPLICATION_AUDIO`, bitrate 48000, FEC off, **DTX off**. The C# peer hard-normalises every decoded frame to exactly 960 samples. Changing any of this breaks interop silently.
 - **DTX must never be enabled.** Opus DTX emits 1–2 byte frames; the server drops any voice payload of **5 bytes or fewer** without relaying it.
