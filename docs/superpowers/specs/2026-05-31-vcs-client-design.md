@@ -440,7 +440,7 @@ Tracked in [`docs/PROTO_GAPS.md`](../../PROTO_GAPS.md). Summary:
 |---|---|---|---|
 | R1 | ~~Wails v3 pre-stable; API churn breaks builds~~ **RETIRED 2026-09-15** | — | Upgraded to `v3.0.0-beta.22`, which ships a stable desktop API and an explicit compatibility promise. Version stays pinned in `go.mod` and both CI workflows; the thin windowing adapter (`internal/app/windows.go`) is kept regardless |
 | R2 | UDP voice protocol unknown — Phase 5 blocked | H | Phase 1 – 4 don't touch voice; `internal/voice` ships as interface-only; spec defers Phase 5 until user provides server-side reference |
-| R3 | malgo native deps complicate cross-platform builds | M | Add a CI job that compiles the audio package per platform in Phase 3 (one phase before audio lands) to surface toolchain issues early |
+| R3 | ~~malgo native deps complicate cross-platform builds~~ **RETIRED 2026-09-24** | — | Phase 4's per-OS CI matrix (`test.yml`, `{ubuntu-latest, macos-latest, windows-latest}`) landed in Task 1 and is green with both cgo dependencies — malgo and the vendored RNNoise C sources. It did its job: it caught a Linux-only libm link failure that macOS and Windows both hid, which is exactly the toolchain-divergence risk this mitigation existed to surface |
 | R4 | Session token persisted to disk without OS-keychain protection in v1 | M | Document trade-off; `os.Chmod(0600)` on Unix; ticket a follow-up to use a keychain library in Phase 7 |
 | R5 | gRPC insecure transport during dev → secrets in cleartext | M | Insecure permitted only for literal `127.0.0.1` / `localhost`; fail-closed on remote hosts; switch to TLS in Phase 7 |
 | R6 | TanStack Query + gRPC streaming awkward fit | L | Query only wraps unary calls; streams feed Zustand via events |

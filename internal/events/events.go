@@ -40,6 +40,20 @@ const (
 	// fires, i.e. the backend gave up waiting for EndCapture and tore the
 	// capture down itself.
 	EventCaptureExpired = "keybinds:capture_expired"
+	// EventAudioDevicesChanged carries the FULL input and output device
+	// lists, not a single device -- which is why it is plural, departing
+	// from the master spec §5.4's predicted "audio:device_changed".
+	EventAudioDevicesChanged = "audio:devices_changed"
+	// EventAudioVU is the ~20 Hz meter update. It is SUPPRESSED WHEN
+	// UNCHANGED: an idle or muted mic emitting twenty identical zeros per
+	// second to every open window is pure bus noise.
+	EventAudioVU = "audio:vu"
+	// EventAudioState is the audio subsystem's health, the sibling of
+	// EventHotkeysState and EventJoystickState. Phase 7's notification
+	// channel absorbs all three uniformly, so the shape stays parallel.
+	EventAudioState = "audio:state"
+	// EventAudioMicMuted reports the push-to-mute / mute-toggle state.
+	EventAudioMicMuted = "audio:mic_muted"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -266,4 +280,24 @@ func (t *Tagged) HotkeysState(registered bool, errMsg string, failed map[string]
 		Failed:     failed,
 		Permission: permission,
 	})
+}
+
+// AudioDevicesChanged emits EventAudioDevicesChanged with the full device list.
+func (t *Tagged) AudioDevicesChanged(payload any) {
+	t.em.Emit(EventAudioDevicesChanged, payload)
+}
+
+// AudioVU emits EventAudioVU with meter levels (suppressed when unchanged).
+func (t *Tagged) AudioVU(payload any) {
+	t.em.Emit(EventAudioVU, payload)
+}
+
+// AudioState emits EventAudioState with subsystem health.
+func (t *Tagged) AudioState(payload any) {
+	t.em.Emit(EventAudioState, payload)
+}
+
+// AudioMicMuted emits EventAudioMicMuted with mute state.
+func (t *Tagged) AudioMicMuted(muted bool) {
+	t.em.Emit(EventAudioMicMuted, muted)
 }

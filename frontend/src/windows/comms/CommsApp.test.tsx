@@ -6,6 +6,9 @@ const getSettings = vi.fn();
 const getKeybinds = vi.fn();
 const getHotkeyState = vi.fn();
 const getJoystickState = vi.fn();
+const getAudioDevices = vi.fn();
+const getAudioState = vi.fn();
+const getAudioEffectPresets = vi.fn();
 
 vi.mock("../../shared/api/client", () => ({
   api: {
@@ -14,6 +17,9 @@ vi.mock("../../shared/api/client", () => ({
     getKeybinds: () => getKeybinds(),
     getHotkeyState: () => getHotkeyState(),
     getJoystickState: () => getJoystickState(),
+    getAudioDevices: () => getAudioDevices(),
+    getAudioState: () => getAudioState(),
+    getAudioEffectPresets: () => getAudioEffectPresets(),
     closeWindow: vi.fn(),
     updateRadioInfo: vi.fn(),
   },
@@ -57,6 +63,11 @@ describe("CommsApp settings sync", () => {
     getKeybinds.mockReset().mockResolvedValue([]);
     getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
     getJoystickState.mockReset().mockResolvedValue({ supported: false, error: "", devices: [] });
+    getAudioDevices.mockReset().mockResolvedValue({ inputs: [], outputs: [] });
+    getAudioState.mockReset().mockResolvedValue({
+      running: false, input_error: "", output_error: "", overruns: 0, underruns: 0,
+    });
+    getAudioEffectPresets.mockReset().mockResolvedValue({ voice: [], clipping: [] });
     useSettings.setState({
       settings: null, keybinds: [],
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },

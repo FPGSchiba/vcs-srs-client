@@ -12,7 +12,10 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
-require github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
+require (
+	github.com/gen2brain/malgo v0.11.26
+	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
+)
 
 require (
 	github.com/adrg/xdg v0.5.3 // indirect

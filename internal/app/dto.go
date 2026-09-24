@@ -86,13 +86,166 @@ func SnapshotFromProto(clients map[string]*srspb.ClientInfo, radios map[string]*
 	return snap
 }
 
-// SettingsDTO is the binding-facing shape of config.General.
+// SettingsDTO is the binding-facing shape of config.General plus
+// config.Audio (Audio). One settings path, one settings:changed event -- see
+// audio.go's package doc for why Audio does not get its own
+// Get/SetAudioSettings pair.
 type SettingsDTO struct {
 	StartMinimized       bool `json:"start_minimized"`
 	MinimizeToTray       bool `json:"minimize_to_tray"`
 	ShowTransmitterName  bool `json:"show_transmitter_name"`
 	PlayConnectionSounds bool `json:"play_connection_sounds"`
 	RadioSwitchAsPTT     bool `json:"radio_switch_as_ptt"`
+
+	Audio AudioSettingsDTO `json:"audio"`
+}
+
+// AudioSettingsDTO is the binding-facing shape of config.Audio. Levels and
+// the VOX threshold are normalized 0-1 here; the UI renders the design's
+// 0-100 scale. Keeping the scale conversion in one place (the React
+// component) stops the two representations from drifting.
+type AudioSettingsDTO struct {
+	InputDevice       string                    `json:"input_device"`
+	OutputDevice      string                    `json:"output_device"`
+	InputDeviceName   string                    `json:"input_device_name"`
+	OutputDeviceName  string                    `json:"output_device_name"`
+	MicPassthrough    bool                      `json:"mic_passthrough"`
+	AGC               bool                      `json:"agc"`
+	NoiseSuppression  bool                      `json:"noise_suppression"`
+	VOX               bool                      `json:"vox"`
+	VOXThreshold      float32                   `json:"vox_threshold"`
+	VOXMinLengthMS    int                       `json:"vox_min_length_ms"`
+	VOXHangMS         int                       `json:"vox_hang_ms"`
+	VOXNoiseCancel    bool                      `json:"vox_noise_cancel"`
+	PTTStartDelayMS   int                       `json:"ptt_start_delay_ms"`
+	PTTReleaseDelayMS int                       `json:"ptt_release_delay_ms"`
+	VoiceEffect       string                    `json:"voice_effect"`
+	ClippingEffect    string                    `json:"clipping_effect"`
+	Levels            AudioLevelsDTO            `json:"levels"`
+	Effects           map[string]AudioEffectDTO `json:"effects"`
+	// EffectOrder is Effects' keys in the manifest's display order (see
+	// audio.SFX.EffectIDs' doc) -- a JSON object's key order is not
+	// guaranteed (and encoding/json sorts map keys alphabetically in
+	// practice), so a stable render order for the frontend's Radio Effects
+	// panel has to travel as its own array. Derived and read-only, like
+	// Label/Available: not persisted, and configAudioFromDTO ignores it.
+	EffectOrder []string `json:"effect_order"`
+}
+
+// AudioLevelsDTO holds the four mixer bus positions, 0-1.
+type AudioLevelsDTO struct {
+	Master       float32 `json:"master"`
+	Voice        float32 `json:"voice"`
+	SFX          float32 `json:"sfx"`
+	Notification float32 `json:"notification"`
+}
+
+// AudioEffectDTO is one Radio Effects slot's persisted state, merged with
+// its live manifest metadata: Enabled/File round-trip through
+// config.Audio.Effects (SetSettings persists them), while Label/Available
+// are read fresh off audio.Manager's SFX manifest on every GetSettings
+// call (audioSettingsDTO) and are NOT persisted -- config.Audio.Effects has
+// no fields for them, and configAudioFromDTO ignores them on the way back.
+//
+// Available is false for every slot today: the SFX sample pack
+// (internal/audio/assets/README.md) has not landed, so nothing is
+// available regardless of id -- that is the true, unfaked answer, not a
+// placeholder. When no audio backend is wired at all (main.go's
+// NewMalgoBackend failed, or a test never called SetAudioBackend), Label
+// falls back to the slot id and Available stays false, since there is no
+// Manager to ask.
+type AudioEffectDTO struct {
+	Enabled bool   `json:"enabled"`
+	File    string `json:"file"`
+	Label   string `json:"label"`
+	// Available is false when no sample is behind the slot -- expected
+	// until the sample pack lands. The UI greys the row rather than
+	// presenting a PREVIEW button that does nothing.
+	Available bool `json:"available"`
+}
+
+// AudioEffectPresetDTO is one selectable DSP preset (a Voice Effect or
+// Clipping Effect dropdown option), mirroring audio.EffectPreset. Value is
+// what SetSettings persists into AudioSettingsDTO.VoiceEffect/
+// ClippingEffect; Label is display-only.
+type AudioEffectPresetDTO struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+// AudioEffectPresetsDTO carries both built-in DSP preset lists in one
+// binding call, mirroring AudioDevicesDTO's inputs/outputs pairing for the
+// same reason: the frontend's Radio Effects screen always wants both
+// together. This is static data (internal/audio's voiceBands/
+// clippingDrives), not per-Manager state, so it is available even when no
+// audio backend is wired -- unlike GetAudioDevices/GetAudioState.
+type AudioEffectPresetsDTO struct {
+	Voice    []AudioEffectPresetDTO `json:"voice"`
+	Clipping []AudioEffectPresetDTO `json:"clipping"`
+}
+
+// AudioDeviceDTO is one selectable endpoint.
+type AudioDeviceDTO struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"is_default"`
+}
+
+// AudioDevicesDTO is the full enumerated device list for both directions.
+type AudioDevicesDTO struct {
+	Inputs  []AudioDeviceDTO `json:"inputs"`
+	Outputs []AudioDeviceDTO `json:"outputs"`
+}
+
+// AudioStateDTO reports the audio subsystem's health, mirroring
+// HotkeyStateDTO and JoystickStateDTO so Phase 7's notification channel can
+// absorb all three the same way.
+//
+// InputError/OutputError are shared by two very different failure modes,
+// and Running is what tells them apart -- consumers MUST check Running
+// before rendering either error:
+//
+//   - Running == false: there is no audio engine at all. This is main.go's
+//     whole-backend construction failure path (audio.NewMalgoBackend
+//     returned an error, e.g. no sound card, a denied OS permission, a
+//     broken driver) -- there was never a Manager to report per-direction
+//     health, so both InputError and OutputError carry the SAME
+//     backend-level error message. A UI that shows InputError here as "your
+//     microphone failed" is wrong: the honest message is "no audio backend
+//     is available on this machine" (nothing works, not just the mic).
+//   - Running == true: a real Manager is up and polling. InputError and
+//     OutputError are now independent per-direction results -- either can
+//     be set on its own (one direction opened fine, the other didn't) or
+//     both, and any message here is specific to that one direction (e.g.
+//     "device busy", a saved device that vanished and had no fallback).
+//     THIS is the "your microphone failed to open" case.
+//
+// InputDevice/OutputDevice/InputSubstituted/OutputSubstituted/Starting are
+// carried straight off audio.State. They were dropped here once already, and
+// that dropped exactly the thing Task 10's review had just been fixed to
+// produce: spec 13's "record the substitution in State". A saved device that
+// no longer enumerates, or an open device that vanished mid-session, is
+// silently replaced by the default -- InputSubstituted is the ONLY signal
+// that the user is not on the device they picked, and InputDevice is the only
+// way to say which one they are on instead. Without both, the poll loop's
+// fallback and the device picker's reopen are invisible to the user.
+type AudioStateDTO struct {
+	Running     bool   `json:"running"`
+	Starting    bool   `json:"starting"`
+	InputError  string `json:"input_error"`
+	OutputError string `json:"output_error"`
+	Overruns    uint64 `json:"overruns"`
+	Underruns   uint64 `json:"underruns"`
+	// InputDevice/OutputDevice are the device ids actually in use, which is
+	// not necessarily what the settings asked for -- see the Substituted
+	// pair.
+	InputDevice  string `json:"input_device"`
+	OutputDevice string `json:"output_device"`
+	// InputSubstituted/OutputSubstituted report that the id above differs
+	// from the configured one because resolveDevice fell back to the
+	// default.
+	InputSubstituted  bool `json:"input_substituted"`
+	OutputSubstituted bool `json:"output_substituted"`
 }
 
 // CaptureDTO is a raw {code, modifiers} capture from the frontend's keydown

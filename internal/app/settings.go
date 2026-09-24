@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/chord"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
@@ -78,6 +79,13 @@ type settingsBackend struct {
 	// joy is the joystick manager. Optional: tests and any build without a
 	// backend leave it nil, so every use site must check.
 	joy *joystick.Manager
+	// audio is the audio engine manager. Optional, same discipline as joy:
+	// nil until SetAudioBackend is called (main.go's malgo construction can
+	// fail, and most tests never call it), so every use site -- GetAudio*,
+	// StartMicTest/StopMicTest, PreviewEffect, and the PTT/mute action
+	// wiring in audio.go -- must check for nil and degrade to a documented
+	// no-op or ErrAudioUnavailable rather than assume it is set.
+	audio *audio.Manager
 	// presses joins keyboard and joystick edges into one press/release pair
 	// per action. See presscount.go.
 	presses *pressCount
@@ -191,14 +199,21 @@ func (a *App) GetJoystickState() JoystickStateDTO {
 func (a *App) GetSettings() SettingsDTO {
 	sb := a.settings
 	sb.mu.Lock()
-	defer sb.mu.Unlock()
 	g := sb.cfg.General
+	ac := sb.cfg.Audio
+	m := sb.audio
+	sb.mu.Unlock()
+	// audioSettingsDTO calls Manager accessors (EffectIDs/EffectLabel/
+	// EffectAvailable) below -- deliberately AFTER releasing sb.mu, per
+	// audioManager's own doc: never call a Manager method while holding
+	// sb.mu, Manager has its own independent locking.
 	return SettingsDTO{
 		StartMinimized:       g.StartMinimized,
 		MinimizeToTray:       g.MinimizeToTray,
 		ShowTransmitterName:  g.ShowTransmitterName,
 		PlayConnectionSounds: g.PlayConnectionSounds,
 		RadioSwitchAsPTT:     g.RadioSwitchAsPTT,
+		Audio:                audioSettingsDTO(ac, m),
 	}
 }
 
@@ -225,16 +240,27 @@ func (a *App) SetSettings(s SettingsDTO) error {
 		PlayConnectionSounds: s.PlayConnectionSounds,
 		RadioSwitchAsPTT:     s.RadioSwitchAsPTT,
 	}
+	next.Audio = configAudioFromDTO(s.Audio)
+	audioCfg := next.Audio
 	var saveErr error
 	if sb.cfgPath != "" {
 		saveErr = config.Save(sb.cfgPath, &next)
 	}
+	var mgr *audio.Manager
 	if saveErr == nil {
 		sb.cfg = &next
+		mgr = sb.audio
 	}
 	sb.mu.Unlock()
 	if saveErr != nil {
 		return fmt.Errorf("save settings: %w", saveErr)
+	}
+	// Push the newly-persisted audio config into the running engine. Done
+	// AFTER sb.mu.Unlock() -- Manager has its own independent locking, and
+	// calling into it while still holding sb.mu would invite a deadlock
+	// against anything that takes the locks in the opposite order.
+	if mgr != nil {
+		mgr.SetConfig(audioManagerConfig(audioCfg))
 	}
 	sb.em.SettingsChanged(s)
 	return nil
@@ -977,6 +1003,7 @@ func (a *App) Pressed(actionID string) {
 		return // already held by another input source
 	}
 	a.logger.Info("hotkey fired", "action", actionID, "edge", "down")
+	a.dispatchAudioPressed(actionID)
 	a.settings.em.HotkeyPressed(actionID)
 }
 
@@ -990,6 +1017,7 @@ func (a *App) Released(actionID string) {
 		return // another input source still holds it
 	}
 	a.logger.Info("hotkey fired", "action", actionID, "edge", "up")
+	a.dispatchAudioReleased(actionID)
 	a.settings.em.HotkeyReleased(actionID)
 }
 

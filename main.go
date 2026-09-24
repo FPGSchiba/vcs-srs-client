@@ -9,7 +9,9 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
+	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	vcsevents "github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
@@ -42,11 +44,12 @@ func main() {
 		}
 	}
 
-	appLog := logger.New(logger.Options{
+	appLog, closeLog := logger.New(logger.Options{
 		Level:    logger.ParseLevel(cfg.LogLevel),
 		JSON:     true,
 		FilePath: logPath, // empty if resolution failed → logger uses its default
 	})
+	defer closeLog.Close() //nolint:errcheck // process is exiting either way; nothing left to report to
 
 	// Install appLog as the slog default so packages that log through
 	// slog.Default() reach the rotating FILE, not just stderr.
@@ -142,6 +145,76 @@ func main() {
 		defer jm.Close()
 	}
 
+	// Audio engine. Exactly the same optional-dependency discipline as
+	// joystick input just above: NewMalgoBackend can fail for reasons that
+	// have nothing to do with whether the rest of the app should run -- no
+	// sound card, a denied OS permission, a broken driver -- and none of
+	// them may stop the user from connecting, seeing the UI, or using
+	// keybinds and joystick input. internal/app's audio bindings are all
+	// documented no-ops (or ErrAudioUnavailable) when SetAudioBackend is
+	// never called, so a nil manager here is a fully supported path, not a
+	// degraded one.
+	//
+	// Unlike the joystick manager, a failed construction here leaves nothing
+	// behind that can ever emit audio:state on its own -- there is no
+	// Manager -- so this pushes one audio:state event by hand, carrying the
+	// error, so the frontend gets an honest answer instead of silence
+	// indistinguishable from "audio hasn't started reporting yet".
+	audioEvents := vcsevents.New(emitter)
+	if backend, err := audio.NewMalgoBackend(); err != nil {
+		appLog.Warn("audio backend unavailable; audio features are disabled", "err", err)
+		audioEvents.AudioState(app.AudioStateDTO{
+			InputError:  err.Error(),
+			OutputError: err.Error(),
+		})
+	} else {
+		am := audio.NewManager(backend, audio.ManagerOptions{
+			Log: appLog,
+			// OnDevices/OnState/OnVU are handed straight to the typed
+			// emitter: events.Tagged.Emit forwards to the Wails
+			// EventManager, whose EventProcessor.Emit only reads a
+			// (locked) listener map and hands the payload to an internal
+			// mailbox -- safe to call from more than one goroutine at
+			// once, which is exactly what OnState/OnVU's doc comments say
+			// Manager will do (Start's tail call and the poll/DSP
+			// goroutines can all reach these concurrently).
+			OnDevices: func(inputs, outputs []audio.DeviceInfo) {
+				audioEvents.AudioDevicesChanged(app.AudioDevicesDTO{
+					Inputs:  app.AudioDeviceDTOs(inputs),
+					Outputs: app.AudioDeviceDTOs(outputs),
+				})
+			},
+			OnState: func(st audio.State) {
+				// One shared converter with GetAudioState (see
+				// app.AudioStateDTOFrom): a hand-written mapping here is
+				// what silently dropped the device/substitution fields
+				// from the event path while State carried them.
+				audioEvents.AudioState(app.AudioStateDTOFrom(st))
+			},
+			OnVU: func(v audio.VU) {
+				audioEvents.AudioVU(audioVUPayload{Input: v.Input, Output: v.Output})
+			},
+		})
+		// SetAudioBackend BEFORE Start, not after: it is what pushes the
+		// user's PERSISTED audio settings (device ids included) into the
+		// manager. Starting first would resolve both devices against
+		// NewManager's built-in default Config, whose InputDevice/
+		// OutputDevice are "" -- i.e. the saved device selection would be
+		// ignored on every single launch, and only take effect after the
+		// poll loop's next tick noticed the mismatch. Configure, then start.
+		gui.SetAudioBackend(am)
+		if err := am.Start(); err != nil {
+			appLog.Warn("audio engine failed to start; audio features are disabled", "err", err)
+		}
+		// Backend ownership lives HERE, with the code that constructed it --
+		// Manager.Stop() deliberately no longer closes it (see Stop's doc:
+		// Close is terminal, so a Stop/Start cycle would have nil-deref'd
+		// the malgo context). Registered before the am.Stop() defer so that
+		// LIFO order runs Stop first and Close second.
+		defer backend.Close()
+		defer am.Stop()
+	}
+
 	// Main window: frameless + transparent, fixed 1440x900, loads the main entry.
 	// Named so the tray (internal/app/tray.go) can resolve it back out of the
 	// Wails window manager for show/hide.
@@ -186,4 +259,20 @@ func main() {
 	if err := wailsApp.Run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// The device-list and state converters both live in internal/app
+// (AudioDeviceDTOs / AudioStateDTOFrom) rather than being duplicated here.
+// The duplicate this replaced is precisely how the "System Default" sentinel
+// could have reached GetAudioDevices' consumers while the hot-plug event
+// path kept handing out lists without it.
+
+// audioVUPayload is the audio:vu event's wire shape. audio.VU itself carries
+// no json tags (it is an internal engine type, not a wire DTO), so its
+// exported Go field names ("Input"/"Output") would leak onto the wire
+// verbatim without this -- and Task 16's frontend store is specified to read
+// lowercase `input`/`output`.
+type audioVUPayload struct {
+	Input  float32 `json:"input"`
+	Output float32 `json:"output"`
 }

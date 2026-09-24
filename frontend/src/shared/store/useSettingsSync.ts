@@ -2,7 +2,15 @@ import { useEffect } from "react";
 import { api } from "../api/client";
 import { on, EV } from "../api/events";
 import { useSettings } from "./settings";
-import type { Settings, Keybind, HotkeyState, JoystickState } from "./settings";
+import type {
+  Settings,
+  Keybind,
+  HotkeyState,
+  JoystickState,
+  AudioDevices,
+  AudioState,
+  AudioVU,
+} from "./settings";
 
 /**
  * useSettingsSync hydrates the shared settings store from the backend and
@@ -56,6 +64,33 @@ export function useSettingsSync(): void {
         // explain why.
         console.error("getJoystickState failed; joystick support is unknown", err);
       });
+    api
+      .getAudioDevices()
+      .then((d) => useSettings.getState().setAudioDevices(d))
+      .catch(() => {
+        /* not available yet — ignore, the store's empty-list default already
+         * renders no devices */
+      });
+    api
+      .getAudioState()
+      .then((a) => useSettings.getState().setAudioState(a))
+      .catch((err) => {
+        // Logged for the same reason as getHotkeyState/getJoystickState
+        // above: the store's honest `running: false` default already hides
+        // any claim of health, so a rejection here silently leaves that in
+        // place with nothing but this line to explain why.
+        console.error("getAudioState failed; audio health is unknown", err);
+      });
+    // Static data (internal/audio's own preset tables), not per-Manager
+    // state -- fetched once here, not re-pushed on any event, unlike
+    // audioDevices/audioState above.
+    api
+      .getAudioEffectPresets()
+      .then((p) => useSettings.getState().setAudioEffectPresets(p))
+      .catch(() => {
+        /* not available yet -- the store's empty-lists default already
+         * renders no preset options */
+      });
 
     const offs = [
       on<Settings>(EV.settingsChanged, (s) => useSettings.getState().setSettings(s)),
@@ -68,6 +103,10 @@ export function useSettingsSync(): void {
       // ever had, so a device attached after Settings mounted stayed invisible
       // and one bad poll pinned "Joystick unavailable" for the session.
       on<JoystickState>(EV.joystickState, (j) => useSettings.getState().setJoystickState(j)),
+      on<AudioDevices>(EV.audioDevicesChanged, (d) => useSettings.getState().setAudioDevices(d)),
+      on<AudioState>(EV.audioState, (a) => useSettings.getState().setAudioState(a)),
+      on<AudioVU>(EV.audioVU, (v) => useSettings.getState().setVU(v)),
+      on<boolean>(EV.audioMicMuted, (m) => useSettings.getState().setMicMuted(m)),
     ];
     return () => offs.forEach((off) => off());
   }, []);

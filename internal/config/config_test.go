@@ -395,6 +395,100 @@ func TestSaveLoadRoundTripsAControlCharacterInAnUnknownKeybind(t *testing.T) {
 	}
 }
 
+func TestDefaultAudioMatchesTheSpec(t *testing.T) {
+	a := config.Default().Audio
+	if a.Levels.Master != 0.75 || a.Levels.Voice != 1.0 || a.Levels.SFX != 0.8 || a.Levels.Notification != 0.8 {
+		t.Fatalf("default levels = %+v", a.Levels)
+	}
+	if !a.AGC || !a.NoiseSuppression {
+		t.Fatal("AGC and noise suppression must default on")
+	}
+	if a.VOX {
+		t.Fatal("VOX must default off")
+	}
+	if a.PTTReleaseDelayMS != 120 {
+		t.Fatalf("ptt_release_delay_ms = %d, want 120", a.PTTReleaseDelayMS)
+	}
+	if a.Effects != nil {
+		t.Fatal("Effects must default nil, not an empty map -- see the KeybindDevices comment")
+	}
+}
+
+func TestLoadConfigWithoutAudioTableGetsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// A pre-Phase-4 config file.
+	if err := os.WriteFile(path, []byte("log_level = \"INFO\"\nserver_url = \"\"\nping_interval_seconds = 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audio.Levels.Master != 0.75 {
+		t.Fatalf("missing [audio] did not fall back to defaults: %+v", cfg.Audio)
+	}
+}
+
+func TestAudioRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	in := config.Default()
+	in.Audio.InputDevice = "mic-7"
+	in.Audio.InputDeviceName = "Procyon Headset"
+	in.Audio.VOX = true
+	in.Audio.VOXThreshold = 0.42
+	in.Audio.Levels.SFX = 0.5
+	in.Audio.Effects = map[string]config.AudioEffect{"tx_start": {Enabled: false, File: "custom.wav"}}
+	if err := config.Save(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Audio.InputDevice != "mic-7" || out.Audio.VOXThreshold != 0.42 || out.Audio.Levels.SFX != 0.5 {
+		t.Fatalf("round trip lost values: %+v", out.Audio)
+	}
+	if e := out.Audio.Effects["tx_start"]; e.Enabled || e.File != "custom.wav" {
+		t.Fatalf("effect round trip = %+v", e)
+	}
+}
+
+// TestAudioEffectsTableAbsentWhenNil is an explicit guard for Audio.Effects,
+// which -- like KeybindDevices below -- must default nil rather than an
+// empty map: the TOML encoder writes a bare "[audio.effects]" table header
+// for an empty-but-non-nil map and omits it entirely for a nil one, so a
+// non-nil default would add a noise diff to every user's config on their
+// first save after upgrading.
+//
+// This exact trap already shipped once in this repo with KeybindDevices (see
+// TestRewritingAKeyboardOnlyConfigIsByteIdentical immediately below, whose
+// keybind_devices check already guards Audio.Effects TRANSITIVELY: a non-nil
+// Effects map would break that test's byte-identity assertion too). This
+// test exists so that guard is not the only place the reasoning survives --
+// someone repairing the keybind-only test later would otherwise have no way
+// to know audio depends on it as well.
+func TestAudioEffectsTableAbsentWhenNil(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	cfg := config.Default()
+	if cfg.Audio.Effects != nil {
+		t.Fatal("Default().Audio.Effects must be nil for this test to prove anything")
+	}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after Save: %v", err)
+	}
+	if strings.Contains(string(saved), "[audio.effects]") {
+		t.Errorf("a config with nil Audio.Effects must not contain an [audio.effects] table, got:\n%s", saved)
+	}
+}
+
 // TestRewritingAKeyboardOnlyConfigIsByteIdentical is the M1 guard.
 //
 // Default() used to initialise KeybindDevices to an empty, non-nil map. The

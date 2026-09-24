@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { General } from "./sections/General";
 import { Keybinds } from "./sections/Keybinds";
+import { Audio } from "./sections/Audio";
+import { Effects } from "./sections/Effects";
 import { Deferred } from "./sections/Deferred";
 
 interface SettingsSection {
@@ -26,9 +28,9 @@ function renderSection(key: string) {
     case "keybinds":
       return <Keybinds />;
     case "audio":
-      return <Deferred phase={4} items={["Device selection", "AGC", "Noise suppression", "VU metering"]} />;
+      return <Audio />;
     case "effects":
-      return <Deferred phase={4} items={["Radio FX", "Squelch", "Static", "TX/RX tones"]} />;
+      return <Effects />;
     case "profiles":
       return <Deferred phase={7} items={["Save/load profiles", "Import & export", "Window layouts"]} />;
     case "notif":
@@ -58,8 +60,8 @@ function renderSection(key: string) {
  * the store's liveness to this screen being open, which is why keybind and
  * settings changes never reached the Comms popout (spec DoD 10).
  *
- * General and Keybinds render live controls; the remaining sections render an
- * honest `Deferred` stub until their subsystems land.
+ * General, Keybinds, Audio and Effects render live controls; the remaining
+ * sections render an honest `Deferred` stub until their subsystems land.
  */
 export function SettingsScreen() {
   const [section, setSection] = useState("general");

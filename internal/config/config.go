@@ -43,6 +43,67 @@ type Config struct {
 	// entries are harmless: the UI falls back to the id and the binding
 	// stays valid either way.
 	KeybindDevices map[string]string `toml:"keybind_devices"`
+
+	// Audio holds Settings > Audio & Sounds. It is a raw-values layer, same
+	// discipline as Keybinds/KeybindDevices above: internal/config does not
+	// import internal/audio, so this stays plain fields with TOML tags and
+	// no knowledge of engine semantics.
+	Audio Audio `toml:"audio"`
+}
+
+// AudioLevels holds the four mixer bus positions from Settings > Audio.
+// These are KNOB POSITIONS in [0,1], not gains: internal/audio applies the
+// perceptual taper. Storing gains here would bake a UI decision into the
+// file format.
+type AudioLevels struct {
+	Master       float32 `toml:"master"`
+	Voice        float32 `toml:"voice"`
+	SFX          float32 `toml:"sfx"`
+	Notification float32 `toml:"notification"`
+}
+
+// AudioEffect is one Radio Effects slot's persisted state.
+type AudioEffect struct {
+	Enabled bool   `toml:"enabled"`
+	File    string `toml:"file"`
+}
+
+// Audio holds Settings > Audio & Sounds.
+//
+// Device identity is stored as ID PLUS display name, the same shape as
+// KeybindDevices and for the same reason: a device that is unplugged right
+// now must still render a meaningful name rather than a raw id. An EMPTY
+// device id means "follow the system default" and is a real choice, not a
+// missing value.
+type Audio struct {
+	InputDevice      string `toml:"input_device"`
+	OutputDevice     string `toml:"output_device"`
+	InputDeviceName  string `toml:"input_device_name"`
+	OutputDeviceName string `toml:"output_device_name"`
+
+	MicPassthrough   bool `toml:"mic_passthrough"`
+	AGC              bool `toml:"agc"`
+	NoiseSuppression bool `toml:"noise_suppression"`
+
+	VOX            bool    `toml:"vox"`
+	VOXThreshold   float32 `toml:"vox_threshold"`
+	VOXMinLengthMS int     `toml:"vox_min_length_ms"`
+	VOXNoiseCancel bool    `toml:"vox_noise_cancel"`
+	VOXHangMS      int     `toml:"vox_hang_ms"`
+
+	PTTStartDelayMS   int `toml:"ptt_start_delay_ms"`
+	PTTReleaseDelayMS int `toml:"ptt_release_delay_ms"`
+
+	VoiceEffect    string `toml:"voice_effect"`
+	ClippingEffect string `toml:"clipping_effect"`
+
+	Levels AudioLevels `toml:"levels"`
+
+	// Effects is nil until the user customises a slot. Deliberately NOT an
+	// empty map: the TOML encoder writes table headers for an empty-but-
+	// non-nil map, which would add noise to every config file on first save
+	// for no gain. Same reasoning as KeybindDevices.
+	Effects map[string]AudioEffect `toml:"effects"`
 }
 
 // KeybindValue is one action's trigger list on disk. It accepts a bare string
@@ -167,6 +228,29 @@ func Default() *Config {
 		// nil-safe), and rememberDevice -- the only writer -- allocates a
 		// fresh map before copying into it.
 		KeybindDevices: nil,
+		Audio: Audio{
+			AGC:               true,
+			NoiseSuppression:  true,
+			VOX:               false,
+			VOXThreshold:      0.35,
+			VOXMinLengthMS:    220,
+			VOXHangMS:         300,
+			VOXNoiseCancel:    true,
+			PTTStartDelayMS:   0,
+			PTTReleaseDelayMS: 120,
+			VoiceEffect:       "comms_filter_mid",
+			ClippingEffect:    "",
+			Levels: AudioLevels{
+				Master:       0.75,
+				Voice:        1.0,
+				SFX:          0.8,
+				Notification: 0.8,
+			},
+			// Effects is deliberately left NIL, not an empty map -- see the
+			// field comment on Audio.Effects for why (same trap as
+			// KeybindDevices above).
+			Effects: nil,
+		},
 	}
 }
 

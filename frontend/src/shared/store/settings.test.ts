@@ -4,6 +4,16 @@ import { useSettings } from "./settings";
 const blank = {
   start_minimized: false, minimize_to_tray: true, show_transmitter_name: true,
   play_connection_sounds: true, radio_switch_as_ptt: false,
+  audio: {
+    input_device: "", output_device: "", input_device_name: "", output_device_name: "",
+    mic_passthrough: false, agc: true, noise_suppression: true,
+    vox: false, vox_threshold: 0.35, vox_min_length_ms: 220, vox_hang_ms: 300,
+    vox_noise_cancel: true, ptt_start_delay_ms: 0, ptt_release_delay_ms: 120,
+    voice_effect: "", clipping_effect: "",
+    levels: { master: 0.75, voice: 1, sfx: 0.8, notification: 0.8 },
+    effects: {},
+    effect_order: [],
+  },
 };
 
 describe("settings store", () => {

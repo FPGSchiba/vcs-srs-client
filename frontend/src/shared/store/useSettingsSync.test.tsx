@@ -5,6 +5,9 @@ const getSettings = vi.fn();
 const getKeybinds = vi.fn();
 const getHotkeyState = vi.fn();
 const getJoystickState = vi.fn();
+const getAudioDevices = vi.fn();
+const getAudioState = vi.fn();
+const getAudioEffectPresets = vi.fn();
 
 vi.mock("../api/client", () => ({
   api: {
@@ -12,6 +15,9 @@ vi.mock("../api/client", () => ({
     getKeybinds: () => getKeybinds(),
     getHotkeyState: () => getHotkeyState(),
     getJoystickState: () => getJoystickState(),
+    getAudioDevices: () => getAudioDevices(),
+    getAudioState: () => getAudioState(),
+    getAudioEffectPresets: () => getAudioEffectPresets(),
   },
 }));
 
@@ -54,6 +60,11 @@ describe("useSettingsSync", () => {
     getKeybinds.mockReset().mockResolvedValue([]);
     getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
     getJoystickState.mockReset().mockResolvedValue({ supported: false, error: "", devices: [] });
+    getAudioDevices.mockReset().mockResolvedValue({ inputs: [], outputs: [] });
+    getAudioState.mockReset().mockResolvedValue({
+      running: false, input_error: "", output_error: "", overruns: 0, underruns: 0,
+    });
+    getAudioEffectPresets.mockReset().mockResolvedValue({ voice: [], clipping: [] });
     useSettings.setState({
       settings: null, keybinds: [],
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
@@ -158,5 +169,27 @@ describe("useSettingsSync", () => {
 
     render(<Probe />);
     await waitFor(() => expect(err).toHaveBeenCalled());
+  });
+
+  it("hydrates audio effect presets on mount", async () => {
+    // Static data (internal/audio's own preset tables) -- fetched once here,
+    // not re-pushed on any event, unlike audioDevices/audioState above. This
+    // is the one hydrate call whose result Effects.test.tsx never actually
+    // observes: that test seeds the store directly via useSettings.setState,
+    // bypassing this wiring entirely, so nothing else in the suite proves
+    // getAudioEffectPresets' resolved value ever reaches the store.
+    getAudioEffectPresets.mockResolvedValue({
+      voice: [{ value: "wide", label: "Wide Band" }],
+      clipping: [{ value: "soft", label: "Soft Clip" }],
+    });
+
+    render(<Probe />);
+
+    await waitFor(() =>
+      expect(useSettings.getState().audioEffectPresets).toEqual({
+        voice: [{ value: "wide", label: "Wide Band" }],
+        clipping: [{ value: "soft", label: "Soft Clip" }],
+      }),
+    );
   });
 });

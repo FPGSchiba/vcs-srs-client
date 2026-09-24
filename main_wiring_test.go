@@ -57,9 +57,9 @@ func TestSlogDefaultIsInstalled(t *testing.T) {
 	// constructed nearby: the whole point is that the line reaches the log
 	// file a user can send us.
 	setIdx := strings.Index(text, "slog.SetDefault(appLog)")
-	newIdx := strings.Index(text, "appLog := logger.New(")
+	newIdx := strings.Index(text, "appLog, closeLog := logger.New(")
 	if newIdx < 0 || setIdx < 0 || setIdx < newIdx {
-		t.Error("slog.SetDefault(appLog) must come after appLog := logger.New(...)")
+		t.Error("slog.SetDefault(appLog) must come after appLog, closeLog := logger.New(...)")
 	}
 }
 
@@ -96,5 +96,86 @@ func TestStdlogLevelIsPinnedBeforeSetDefault(t *testing.T) {
 	if setIdx < 0 || pinIdx > setIdx {
 		t.Error("slog.SetLogLoggerLevel(slog.LevelError) must come BEFORE " +
 			"slog.SetDefault(appLog) -- it configures the stdlib bridge SetDefault installs")
+	}
+}
+
+// readMainGo is a small helper shared by the audio-wiring tests below --
+// unlike TestJoystickBackendIsWired and its siblings above, which each
+// re-read the file inline, these three all need the same source text more
+// than once per test.
+func readMainGo(t *testing.T) string {
+	t.Helper()
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	return string(src)
+}
+
+// TestAudioBackendIsWired guards the exact failure mode
+// TestJoystickBackendIsWired documents: Phase 4's audio engine, config
+// schema, event channel and frontend bindings can all be complete and
+// individually tested while main.go never actually constructs the malgo
+// backend or hands a Manager to App -- leaving the whole subsystem inert in
+// the shipped binary.
+func TestAudioBackendIsWired(t *testing.T) {
+	text := readMainGo(t)
+	for _, want := range []string{
+		"audio.NewMalgoBackend()",
+		"audio.NewManager(",
+		"gui.SetAudioBackend(",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("main.go does not call %s -- the audio subsystem would be inert", want)
+		}
+	}
+}
+
+// TestAudioBackendFailureDoesNotAbortStartup guards the rule that matters
+// most for this wiring: NewMalgoBackend can fail for reasons that have
+// nothing to do with whether the rest of the app should run -- no sound
+// card, a denied OS permission, a broken driver -- exactly like
+// joystick.NewOSSource failing on a machine with no joystick. The client
+// must still launch, connect, and let the user use every non-audio feature,
+// with the failure surfaced to the frontend rather than swallowed.
+//
+// The search window is bounded to just after the NewMalgoBackend() call
+// rather than the whole file, because main.go legitimately calls
+// log.Fatal(err) at the very bottom for wailsApp.Run() failing -- that is
+// an unrelated, correct use of log.Fatal this test must not flag.
+func TestAudioBackendFailureDoesNotAbortStartup(t *testing.T) {
+	text := readMainGo(t)
+	idx := strings.Index(text, "audio.NewMalgoBackend()")
+	if idx < 0 {
+		t.Fatal("main.go does not call audio.NewMalgoBackend()")
+	}
+	end := idx + 700
+	if end > len(text) {
+		end = len(text)
+	}
+	block := text[idx:end]
+
+	if !strings.Contains(block, "Warn(") {
+		t.Error("a failed audio.NewMalgoBackend() is not logged -- the failure would be silent")
+	}
+	if strings.Contains(block, "log.Fatal") {
+		t.Error("a failed audio.NewMalgoBackend() must not abort startup via log.Fatal -- " +
+			"the client is a voice-comms app first and must still run with no audio device")
+	}
+	if !strings.Contains(block, "AudioState(") {
+		t.Error("a failed audio.NewMalgoBackend() must still emit an audio:state event -- " +
+			"the frontend needs an honest answer, not silence, when there is no manager at all " +
+			"to ask")
+	}
+}
+
+// TestAudioManagerStopIsRegisteredForShutdown guards device cleanup: Stop()
+// must run when the app exits so devices are released, mirroring
+// `defer jm.Close()` for the joystick manager just above it in main.go.
+func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
+	text := readMainGo(t)
+	if !strings.Contains(text, "defer am.Stop()") {
+		t.Error("main.go does not defer the audio manager's Stop() -- devices would " +
+			"never be released cleanly on shutdown")
 	}
 }

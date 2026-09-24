@@ -23,5 +23,7 @@
             <string>true</string>
         <key>NSHumanReadableCopyright</key>
             <string>(c) 2026, FPG Schiba</string>
+        <key>NSMicrophoneUsageDescription</key>
+            <string>VCS needs microphone access to transmit your voice over the radio.</string>
     </dict>
 </plist>
