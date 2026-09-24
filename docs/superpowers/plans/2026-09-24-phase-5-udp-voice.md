@@ -1986,6 +1986,8 @@ Create `internal/voice/rx_test.go` covering:
 Structure, from spec §8.2:
 
 - `rxLoop` only parses and enqueues — it must never block, or the kernel drops datagrams.
+
+> **Do not introduce a pooled or reused payload buffer here.** `Parse` copies each payload out of the reused read buffer, and the jitter buffer then stores that slice **by reference** — deliberately, so the receive path allocates once per packet rather than twice. A pooled buffer would silently corrupt frames still sitting in a jitter buffer for up to 500 ms, and the symptom would look like a codec bug rather than a lifetime bug. Surfaced by the Task 5 review as the forward risk of that ownership contract.
 - `decodeLoop` keeps each stream's PCM ring topped up to a target depth, woken by packet arrival and by ring drain, **never by a ticker of its own**.
 - Each stream owns its own `opus.Decoder` and its own `audio.Effect` (biquad state is per-stream).
 - `ReadInto` only sums pre-decoded rings.
