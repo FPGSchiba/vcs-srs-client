@@ -2,6 +2,7 @@ package voice
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 	"time"
 )
@@ -214,6 +215,198 @@ func TestJitter(t *testing.T) {
 			if !bytes.Equal(payload, want) {
 				t.Fatalf("pop: payload = %v, want %v -- 0x000000 must sort AFTER 0xFFFFFF, not before 0xFFFFFE", payload, want)
 			}
+		}
+	})
+
+	// Regression test for Finding 1: a total empty-buffer underrun must not
+	// permanently collapse the grace window. After recovery, an ordinary
+	// in-budget reorder must still be absorbed, not conceded and concealed.
+	t.Run("resyncs the playout schedule after a total underrun, preserving grace for a later reorder", func(t *testing.T) {
+		j := newJitter(testTarget, testMax, testFrameDur)
+
+		if !j.push(1, []byte{1}, base) {
+			t.Fatalf("push(1) = false, want true")
+		}
+
+		// Prime and play seq 1. nextExpected becomes 2, playoutBase becomes
+		// base+target+frameDur.
+		payload, lost, ok := j.pop(base.Add(testTarget))
+		if !ok || lost || !bytes.Equal(payload, []byte{1}) {
+			t.Fatalf("pop seq 1: got (%v, lost=%v, ok=%v), want ([1], false, true)", payload, lost, ok)
+		}
+
+		// A total outage: the buffer goes empty and stays empty far longer
+		// than one frameDur -- e.g. a radio dropping out of range for a
+		// couple hundred ms. dspLoop's ticker (the only clock, per D8) keeps
+		// calling pop on schedule throughout, observing the empty buffer.
+		outageEnd := base.Add(testTarget).Add(300 * time.Millisecond)
+		if _, _, ok := j.pop(outageEnd); ok {
+			t.Fatalf("pop during outage: ok = true, want false (empty-buffer underrun)")
+		}
+
+		// Traffic resumes, but seq 3 -- an ordinary, in-budget reorder ahead
+		// of the still-missing seq 2 -- arrives first.
+		resumeAt := outageEnd.Add(5 * time.Millisecond)
+		if !j.push(3, []byte{3}, resumeAt) {
+			t.Fatalf("push(3) = false, want true")
+		}
+
+		// A pop shortly after recovery, with seq 2 still missing. Without
+		// the resync, playoutBase would still be anchored at
+		// base+target+frameDur -- hundreds of ms in the past relative to
+		// resumeAt -- so the grace check would already be false and this
+		// call would wrongly concede seq 2 as lost right away. With the
+		// resync, seq 2 still gets a frameDur's grace from the moment
+		// traffic resumed, so this must NOT concede loss yet.
+		soonAfterResume := resumeAt.Add(time.Millisecond)
+		if _, _, ok := j.pop(soonAfterResume); ok {
+			t.Fatalf("pop just after resync: ok = true, want false (seq 2 must still get its grace window)")
+		}
+
+		// seq 2 arrives, still within its (resynced) grace budget.
+		if !j.push(2, []byte{2}, soonAfterResume.Add(time.Millisecond)) {
+			t.Fatalf("push(2) = false, want true")
+		}
+
+		// It must be handed out in order, not concealed.
+		payload, lost, ok = j.pop(soonAfterResume.Add(2 * time.Millisecond))
+		if !ok || lost || !bytes.Equal(payload, []byte{2}) {
+			t.Fatalf("pop seq 2: got (%v, lost=%v, ok=%v), want ([2], false, true) -- the reorder should have been absorbed, not concealed", payload, lost, ok)
+		}
+
+		// And seq 3 follows normally.
+		payload, lost, ok = j.pop(soonAfterResume.Add(2 * time.Millisecond))
+		if !ok || lost || !bytes.Equal(payload, []byte{3}) {
+			t.Fatalf("pop seq 3: got (%v, lost=%v, ok=%v), want ([3], false, true)", payload, lost, ok)
+		}
+	})
+
+	// Regression test for Finding 2: push must reject a sequence implausibly
+	// far ahead of its reference point, both before and after priming.
+	t.Run("rejects a sequence implausibly far ahead", func(t *testing.T) {
+		j := newJitter(testTarget, testMax, testFrameDur)
+
+		if !j.push(1, []byte{1}, base) {
+			t.Fatalf("push(1) = false, want true")
+		}
+
+		// Just under half the 24-bit sequence space ahead: seqDiff/seqLess
+		// and oldestSeqLocked's pairwise minimum are only well-defined
+		// within 2^23 of the reference sequence (see seqDiff's doc
+		// comment), and 2^23-1 is the largest offset seqDiff still resolves
+		// unambiguously as "ahead" rather than sign-flipping to "behind". A
+		// sequence this far out must be rejected outright instead of being
+		// admitted and corrupting the wraparound ordering.
+		farAhead := uint32(1) + (1<<23 - 1)
+		if j.push(farAhead, []byte{0xFF}, base.Add(time.Millisecond)) {
+			t.Fatalf("push(%d) = true, want false (implausibly far ahead, unprimed)", farAhead)
+		}
+		if got := j.depth(); got != 1 {
+			t.Fatalf("depth() = %d, want 1 (far-ahead push must not have been admitted)", got)
+		}
+
+		// An ordinary within-budget push must still be accepted.
+		if !j.push(2, []byte{2}, base.Add(2*time.Millisecond)) {
+			t.Fatalf("push(2) = false, want true")
+		}
+
+		// Prime and play seq 1, moving nextExpected to 2, then repeat the
+		// far-ahead check against the primed (nextExpected-relative) branch.
+		payload, lost, ok := j.pop(base.Add(testTarget))
+		if !ok || lost || !bytes.Equal(payload, []byte{1}) {
+			t.Fatalf("pop seq 1: got (%v, lost=%v, ok=%v), want ([1], false, true)", payload, lost, ok)
+		}
+
+		farAheadPrimed := uint32(2) + (1<<23 - 1)
+		if j.push(farAheadPrimed, []byte{0xEE}, base.Add(testTarget).Add(time.Millisecond)) {
+			t.Fatalf("push(%d) = true, want false (implausibly far ahead, primed)", farAheadPrimed)
+		}
+		if got := j.depth(); got != 1 {
+			t.Fatalf("depth() after primed far-ahead push = %d, want 1 (only seq 2 buffered)", got)
+		}
+	})
+
+	// Regression test for Finding 4a: eviction combined with wraparound was
+	// previously unexercised -- "bounds depth" never wraps, and "wraps at
+	// 2^24" never overflows.
+	t.Run("evicts correctly across the 2^24 wraparound boundary", func(t *testing.T) {
+		j := newJitter(testTarget, testMax, testFrameDur)
+
+		const (
+			pushCount = 30
+			startSeq  = uint32(0xFFFFF0) // 16 values remain before wrapping to 0x000000
+		)
+
+		for i := 0; i < pushCount; i++ {
+			seq := startSeq + uint32(i) // push masks internally via seq &= wireMask24
+			now := base.Add(time.Duration(i) * testFrameDur)
+			if !j.push(seq, []byte{byte(i)}, now) {
+				t.Fatalf("push(seq=%#x, i=%d) = false, want true", seq&wireMask24, i)
+			}
+		}
+
+		if got := j.depth(); got != 25 {
+			t.Fatalf("depth() after %d pushes crossing the wraparound boundary = %d, want 25", pushCount, got)
+		}
+
+		// The 5 oldest in wraparound order (i = 0..4, seq 0xFFFFF0..0xFFFFF4)
+		// must have been evicted, leaving i = 5..29 (seq 0xFFFFF5 wrapping
+		// through 0x00000D). Prime and pop once to confirm the survivor at
+		// the front is i=5, not i=0 -- i.e. eviction picked the
+		// wraparound-oldest sequence, not the smallest raw uint32 value.
+		primeAt := base.Add(time.Duration(pushCount) * testFrameDur).Add(testTarget)
+		payload, lost, ok := j.pop(primeAt)
+		if !ok || lost {
+			t.Fatalf("pop after priming: got (%v, lost=%v, ok=%v)", payload, lost, ok)
+		}
+		if !bytes.Equal(payload, []byte{5}) {
+			t.Fatalf("first surviving payload = %v, want [5] (i=0..4 should have been evicted across the wraparound boundary)", payload)
+		}
+		if got := j.depth(); got != 24 {
+			t.Fatalf("depth() after one pop = %d, want 24", got)
+		}
+	})
+
+	// Regression test for Finding 4b: the type carries a mutex and a doc
+	// comment promising concurrent-use safety, but all other subtests are
+	// single-goroutine. This exercises push and pop concurrently and must
+	// pass under -race.
+	t.Run("push and pop are safe for concurrent use", func(t *testing.T) {
+		j := newJitter(testTarget, testMax, testFrameDur)
+
+		const frameCount = 500
+		// A fixed, generous instant far beyond priming and every pushed
+		// frame's nominal slot -- passed to every pop call. This is still a
+		// plain parameter built from base via Add(), never time.Now().
+		farFuture := base.Add(time.Duration(frameCount+1) * testFrameDur).Add(testTarget)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			for seq := 0; seq < frameCount; seq++ {
+				now := base.Add(time.Duration(seq) * testFrameDur)
+				j.push(uint32(seq), []byte{byte(seq)}, now)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			for i := 0; i < frameCount*2; i++ {
+				j.pop(farFuture)
+				j.depth()
+			}
+		}()
+
+		wg.Wait()
+
+		// The point of this test is that it runs clean under -race, not a
+		// specific interleaving (the two goroutines race by design, so the
+		// exact outcome depends on scheduling). Just confirm the buffer is
+		// left internally consistent: bounded depth, no panic.
+		if depth := j.depth(); depth < 0 || depth > 25 {
+			t.Fatalf("depth() after concurrent push/pop = %d, want within [0, 25]", depth)
 		}
 	})
 }

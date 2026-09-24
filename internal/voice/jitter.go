@@ -44,6 +44,11 @@ type jitter struct {
 	primed       bool      // true once playout has started
 	nextExpected uint32    // next sequence pop() will try to hand out
 	playoutBase  time.Time // the expected playout instant of nextExpected
+
+	// underrun is true once pop has observed a totally empty buffer while
+	// primed, and stays true until resyncLocked next re-anchors playoutBase
+	// to real time. See resyncLocked's doc comment (Finding 1).
+	underrun bool
 }
 
 // newJitter builds a buffer that holds `target` of audio before playout
@@ -65,21 +70,57 @@ func newJitter(target, max time.Duration, frameDur time.Duration) *jitter {
 	}
 }
 
+// maxAheadMultiplier bounds, as a multiple of the buffer's own maxFrames,
+// how far ahead of its current reference sequence (nextExpected once
+// primed, or the oldest already-buffered sequence before priming) push will
+// accept a new sequence. seqDiff/seqLess and oldestSeqLocked's
+// pairwise-minimum are only well-defined for sequences within 2^23 of each
+// other (see seqDiff's doc comment); without this bound, a malformed or
+// hostile peer forwarded by the relay could push a sequence roughly half
+// the 24-bit space away, corrupt that ordering invariant, and make eviction
+// discard the wrong frame (Finding 2). A small multiple of the buffer's own
+// depth is already far more slack than any legitimate amount of jitter
+// would ever produce.
+const maxAheadMultiplier = 8
+
 // push admits an encoded frame at sequence seq. It returns false, refusing
-// the frame, in exactly two cases: the sequence is a duplicate of one still
-// buffered, or (once primed) the sequence is behind nextExpected -- i.e. its
-// playout slot has already passed, so accepting it would mean replaying
-// stale audio out of order. It never blocks and never returns false merely
-// because the buffer is full; instead, once depth would exceed the
-// configured max, the oldest buffered frame is discarded to make room.
+// the frame, in exactly three cases: the sequence is a duplicate of one
+// still buffered; (once primed) the sequence is behind nextExpected -- i.e.
+// its playout slot has already passed, so accepting it would mean replaying
+// stale audio out of order; or the sequence is implausibly far ahead of the
+// buffer's current reference point (see maxAheadMultiplier). It never
+// blocks and never returns false merely because the buffer is full;
+// instead, once depth would exceed the configured max, the oldest buffered
+// frame is discarded to make room.
+//
+// push takes ownership of payload: it stores the slice by reference without
+// copying, so the caller must not retain or mutate it afterwards. That is
+// safe and deliberately allocation-free because Parse (packet.go) already
+// copies each payload out of its reused read buffer before returning a
+// Packet, so every parsed packet already owns a private slice by the time
+// it reaches push -- no second copy is needed here. Do not add a defensive
+// copy: that would allocate on every packet on the receive path for no
+// benefit. If a future caller ever wants to hand push a pooled or reused
+// buffer, that caller must copy before calling push, not the other way
+// around (Finding 3).
 func (j *jitter) push(seq uint32, payload []byte, now time.Time) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
 	seq &= wireMask24
 
-	if j.primed && seqLess(seq, j.nextExpected) {
-		return false
+	maxAhead := int32(j.maxFrames) * maxAheadMultiplier
+	if j.primed {
+		if seqLess(seq, j.nextExpected) {
+			return false
+		}
+		if seqDiff(seq, j.nextExpected) > maxAhead {
+			return false
+		}
+	} else if oldest, found := j.oldestSeqLocked(); found {
+		if seqDiff(seq, oldest) > maxAhead {
+			return false
+		}
 	}
 	if _, duplicate := j.frames[seq]; duplicate {
 		return false
@@ -140,17 +181,24 @@ func (j *jitter) pop(now time.Time) (payload []byte, lost bool, ok bool) {
 		j.playoutBase = deadline
 	}
 
+	if len(j.frames) == 0 {
+		// Nothing buffered at all: an underrun, not a confirmed loss. Don't
+		// advance the schedule so we don't drift ahead of frames that may
+		// still arrive. Remember it: once frames start showing up again,
+		// resyncLocked re-anchors playoutBase to real time instead of
+		// leaving it stuck wherever the outage started (Finding 1).
+		j.underrun = true
+		return nil, false, false
+	}
+
+	if j.underrun {
+		j.resyncLocked(now)
+	}
+
 	if frame, present := j.frames[j.nextExpected]; present {
 		delete(j.frames, j.nextExpected)
 		j.advanceLocked()
 		return frame.payload, false, true
-	}
-
-	if len(j.frames) == 0 {
-		// Nothing buffered at all: an underrun, not a confirmed loss. Don't
-		// advance the schedule so we don't drift ahead of frames that may
-		// still arrive.
-		return nil, false, false
 	}
 
 	if now.Before(j.playoutBase) {
@@ -170,6 +218,37 @@ func (j *jitter) pop(now time.Time) (payload []byte, lost bool, ok bool) {
 func (j *jitter) advanceLocked() {
 	j.nextExpected = (j.nextExpected + 1) & wireMask24
 	j.playoutBase = j.playoutBase.Add(j.frameDur)
+}
+
+// resyncLocked re-anchors the playout schedule to real time after pop has
+// observed a totally empty buffer (the `len(j.frames) == 0` branch in pop).
+//
+// Without this, playoutBase is left wherever advanceLocked last put it
+// before the outage -- exactly one frameDur past the last successfully
+// played frame. If the outage runs longer than that (a radio dropping out
+// of range for a couple hundred milliseconds, a momentary Wi-Fi blip),
+// playoutBase ends up permanently stuck behind now by the outage's full
+// duration. From then on, pop's `now.Before(j.playoutBase)` grace check --
+// whose whole purpose is to give a merely-late packet time to arrive
+// before conceding loss -- is false on the very first evaluation, so every
+// subsequent reorder gets conceded and concealed instead of absorbed, for
+// the rest of the stream's life. See Finding 1.
+//
+// The fix re-anchors playoutBase to `now.Add(frameDur)` the moment traffic
+// resumes: nextExpected's deadline becomes one frameDur out from the
+// instant recovery was detected -- the same budget every frame gets
+// relative to the one before it in steady state. nextExpected itself is
+// left unchanged: push already refuses anything behind it, so whatever is
+// buffered is already at or after nextExpected, and jumping to some other
+// sequence here would either skip audio that is still valid or invent a
+// gap that was never confirmed lost. This runs only post-priming (the
+// `!j.primed` branch above returns before this is ever reached), so the
+// original priming logic and its own deadline math are untouched -- this
+// only restores, after a later outage, the same kind of grace window that
+// priming establishes for a fresh stream. Callers must hold j.mu.
+func (j *jitter) resyncLocked(now time.Time) {
+	j.playoutBase = now.Add(j.frameDur)
+	j.underrun = false
 }
 
 // oldestSeqLocked returns the sequence among the currently buffered frames
@@ -205,6 +284,7 @@ func (j *jitter) reset() {
 	j.primed = false
 	j.nextExpected = 0
 	j.playoutBase = time.Time{}
+	j.underrun = false
 }
 
 // seqDiff returns the signed distance from b to a on the 24-bit wraparound
