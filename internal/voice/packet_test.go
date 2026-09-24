@@ -74,6 +74,49 @@ func TestParseRoundTrip(t *testing.T) {
 	}
 }
 
+// TestParseAsymmetricValues ensures Parse correctly decodes non-palindromic
+// sequence and frequency values. The round-trip test above uses 0xFFFFFF for
+// both fields, which is byte-order-invariant, so a byte-order bug would pass.
+// This test catches that regression by using the golden vector's deliberately
+// asymmetric values: sequence 0x010203 (wire bytes 01 02 03) and frequency
+// 251300 kHz (wire bytes 03 D5 A4).
+func TestParseAsymmetricValues(t *testing.T) {
+	raw := NewVoice(goldenSender, 0x010203, KHz(251300), []byte{0xAA, 0xBB, 0xCC}, true, false).AppendTo(nil)
+	got, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Sequence != 0x010203 {
+		t.Errorf("Sequence = %#x, want 0x010203", got.Sequence)
+	}
+	if got.Frequency != KHz(251300) {
+		t.Errorf("Frequency = %d, want %d", got.Frequency, KHz(251300))
+	}
+}
+
+// TestParsePayloadNotAliased ensures Parse copies the payload out of the
+// caller's buffer, not returning a subslice. The receive loop reuses one read
+// buffer across all datagrams, so a subslice would be overwritten by the next
+// datagram while a jitter buffer still holds the packet — audio corruption.
+func TestParsePayloadNotAliased(t *testing.T) {
+	raw := NewVoice(goldenSender, 0x010203, KHz(251300), []byte{0xAA, 0xBB, 0xCC}, true, false).AppendTo(nil)
+	got, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	before := append([]byte(nil), got.Payload...)
+
+	// Mutate the caller's buffer
+	for i := HeaderSize; i < len(raw); i++ {
+		raw[i] ^= 0xFF
+	}
+
+	// The parsed payload must be unaffected
+	if !bytes.Equal(got.Payload, before) {
+		t.Fatal("Parse returned a payload aliasing the caller's buffer; the RX loop reuses one read buffer, so this corrupts audio already queued in a jitter buffer")
+	}
+}
+
 // TestHelloCarriesSecretAtOffsetZero pins the one thing that decides whether
 // the server accepts us at all. The secret is 43 raw UTF-8 bytes at payload
 // [0:43]; the server reads exactly that slice and constant-time-compares it.

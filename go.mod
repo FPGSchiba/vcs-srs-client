@@ -14,6 +14,7 @@ require (
 
 require (
 	github.com/gen2brain/malgo v0.11.26
+	github.com/google/uuid v1.6.0
 	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
 )
 
@@ -23,7 +24,6 @@ require (
 	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/jezek/xgb v1.3.1 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
