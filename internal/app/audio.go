@@ -220,6 +220,13 @@ func (a *App) audioManager() *audio.Manager {
 func (a *App) dispatchAudioPressed(actionID string) {
 	if id, ok := radioSelectID(actionID); ok {
 		a.st.SetSelectedRadio(id)
+		// Best-effort persist (M4 fix), matching the SelectRadio binding.
+		// Swallowed rather than propagated: dispatchAudioPressed has no
+		// error return, and a failed persist must never undo the
+		// in-memory selection the user just made with a keypress.
+		if err := a.persistSelectedRadio(id); err != nil {
+			a.logger.Warn("voice: failed to persist selected radio", "err", err)
+		}
 		return
 	}
 

@@ -28,6 +28,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -419,9 +420,15 @@ func (a *App) txRelease(actionID string) (targets []voice.TXTarget, held bool) {
 // (clicking a radio tile). It is independent of the audio backend and of
 // PTT state -- selecting a radio while nothing is held merely changes what
 // the NEXT global.ptt press targets.
+//
+// It also persists the selection to local config (M4 fix): without this,
+// state.Store.selectedRadio was in-memory only, so the tuned frequency
+// survived a restart but which radio was selected did not -- global.ptt
+// resolved to nothing on every fresh launch until the user clicked a radio
+// card again.
 func (a *App) SelectRadio(id uint32) error {
 	a.st.SetSelectedRadio(id)
-	return nil
+	return a.persistSelectedRadio(id)
 }
 
 // VoiceState is the Wails binding for the voice session's current snapshot.
@@ -637,4 +644,88 @@ func (a *App) pushPersistedRadios(ctx context.Context) {
 	if err := a.sess.UpdateRadioInfo(ctx, info); err != nil {
 		a.logger.Warn("voice: failed to push persisted radios on connect", "err", err)
 	}
+}
+
+// persistRadios writes the DTO radios the frontend just sent through
+// UpdateRadioInfo into local config as the new, authoritative radio set,
+// converting each RadioDTO.Frequency (float32 MHz, the wire/UI form) back to
+// canonical kHz -- config.Radio's own doc explains why kHz, not MHz, is the
+// only form this client stores.
+//
+// This is the write-through half of the C1 fix: resolveTXTarget and
+// refreshRXContext both read sb.cfg.Radios directly, and UpdateRadioInfo
+// used to only push to the server -- so after a UI tune, this client kept
+// transmitting on and accepting the OLD frequency forever, no matter how
+// many times the server echoed the new one back (the echo just re-read the
+// same stale config). It must run BEFORE the server push: a failed local
+// persist must not be masked by a successful server round trip that this
+// client itself cannot then act on correctly.
+//
+// A no-op (nil error) when a.settings is nil, the same discipline every
+// other settings-writing method in this file/package follows so tests that
+// build an App with no settings backend keep working.
+func (a *App) persistRadios(dtos []RadioDTO) error {
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+	radios := make([]config.Radio, 0, len(dtos))
+	for _, d := range dtos {
+		radios = append(radios, config.Radio{
+			ID:           d.ID,
+			Name:         d.Name,
+			FrequencyKHz: uint32(voice.KHzFromMHz32(d.Frequency)),
+			Enabled:      d.Enabled,
+			IsIntercom:   d.IsIntercom,
+		})
+	}
+
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.Radios = radios
+	var saveErr error
+	if sb.cfgPath != "" {
+		saveErr = config.Save(sb.cfgPath, &next)
+	}
+	if saveErr == nil {
+		sb.cfg = &next
+	}
+	sb.mu.Unlock()
+	if saveErr != nil {
+		return fmt.Errorf("save radios: %w", saveErr)
+	}
+	return nil
+}
+
+// persistSelectedRadio writes the newly selected radio id to local config
+// (M4 fix). Called from both SelectRadio (the UI binding) and the
+// radio.<n>.select hotkey action, so either path survives a restart. Same
+// nil-settings no-op discipline as persistRadios above.
+func (a *App) persistSelectedRadio(id uint32) error {
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.SelectedRadioID = id
+	var saveErr error
+	if sb.cfgPath != "" {
+		saveErr = config.Save(sb.cfgPath, &next)
+	}
+	if saveErr == nil {
+		sb.cfg = &next
+	}
+	sb.mu.Unlock()
+	if saveErr != nil {
+		return fmt.Errorf("save selected radio: %w", saveErr)
+	}
+	return nil
 }

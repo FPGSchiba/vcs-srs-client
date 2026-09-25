@@ -576,6 +576,48 @@ func TestRadiosRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSelectedRadioIDRoundTrip pins the M4 fix: the persisted radio
+// selection must survive a save/load cycle, or a fresh launch can never
+// restore what global.ptt targeted before the restart.
+func TestSelectedRadioIDRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := config.Default()
+	cfg.SelectedRadioID = 3
+
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.SelectedRadioID != 3 {
+		t.Errorf("SelectedRadioID round trip = %d, want 3", got.SelectedRadioID)
+	}
+}
+
+// TestLoadWithoutSelectedRadioIDGetsZero pins backward compatibility with
+// every config.toml written before this fix: no selected_radio_id key must
+// load as 0 ("none selected"), not fail to load.
+func TestLoadWithoutSelectedRadioIDGetsZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	old := "log_level = \"DEBUG\"\nserver_url = \"localhost:5002\"\nping_interval_seconds = 7\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SelectedRadioID != 0 {
+		t.Errorf("SelectedRadioID = %d, want 0 for a config predating this field", cfg.SelectedRadioID)
+	}
+}
+
 // TestLoadWithoutRadiosSectionGetsDefaults pins backward compatibility with
 // every config.toml written before this phase: no [voice] table, no
 // [[radios]] array.

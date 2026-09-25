@@ -127,6 +127,11 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 		holds:          map[string]bool{},
 		deviceNames:    deviceNames,
 	}
+	// Restore the persisted radio selection (M4 fix): without this,
+	// state.Store.selectedRadio starts every fresh launch at its zero value
+	// no matter what config.toml says, and global.ptt -- the primary PTT --
+	// silently resolves to nothing until the user clicks a radio card.
+	a.st.SetSelectedRadio(cfg.SelectedRadioID)
 	// Per-radio actions are derived from the local client's radios, which are
 	// empty at this point and only arrive at connect time. Observe the store
 	// so the keybind list and the OS registrations follow them (I2); without

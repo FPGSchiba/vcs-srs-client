@@ -1,15 +1,73 @@
 package app
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
+	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
+
+// newTestAppWithConfig is newTestAppWithPath but takes an explicit cfg,
+// instead of always building config.Default() -- so a test can simulate a
+// fresh launch reading back whatever an earlier App instance persisted to
+// cfgPath (newTestAppWithPath ignores the file's contents entirely, since
+// it only threads cfgPath through for the SAVE side).
+func newTestAppWithConfig(t *testing.T, cfg *config.Config, cfgPath string) *App {
+	t.Helper()
+	a := NewForTest(state.New(), nil, nil)
+	kb := keybinds.New()
+	kb.Load(map[string][]string{})
+	hk := hotkeys.New(&countingRegistrar{}, a)
+	a.SetSettingsBackend(cfg, cfgPath, kb, hk, &recordingEmitter{})
+	return a
+}
+
+// fakeControlSession is a minimal sessionAPI double recording every
+// UpdateRadioInfo push, so the C1/I1 write-through and re-push tests can
+// assert against exactly what reached the "server" without opening a
+// socket.
+type fakeControlSession struct {
+	mu      sync.Mutex
+	updates []*srspb.RadioInfo
+}
+
+func (f *fakeControlSession) Connect(context.Context, string, string, string, string) error {
+	return nil
+}
+func (f *fakeControlSession) Disconnect(context.Context) error { return nil }
+func (f *fakeControlSession) Reconnect(context.Context) error  { return nil }
+
+func (f *fakeControlSession) UpdateRadioInfo(_ context.Context, info *srspb.RadioInfo) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updates = append(f.updates, info)
+	return nil
+}
+
+func (f *fakeControlSession) updateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.updates)
+}
+
+func (f *fakeControlSession) lastUpdate() *srspb.RadioInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.updates) == 0 {
+		return nil
+	}
+	return f.updates[len(f.updates)-1]
+}
 
 // fakeVoiceSession is a voiceSessionAPI recording every call, so the TX
 // routing tests can assert against the exact frequency lists the App layer
@@ -519,6 +577,207 @@ func TestSettingsChangeRefreshesRXContext(t *testing.T) {
 		t.Fatalf("test freqs = %v, want [100500]", last.test)
 	}
 }
+
+// --- C1: UpdateRadioInfo write-through --------------------------------------
+
+// TestUpdateRadioInfo_WritesThroughLocalConfig is the C1 regression. Before
+// this fix, UpdateRadioInfo only pushed to the server: resolveTXTarget and
+// refreshRXContext both read sb.cfg.Radios directly and neither was ever
+// written, so a UI tune from 251.000 to 130.000 left TX targeting 251000 kHz
+// and the RX accept list at [251000] forever -- exactly the divergence the
+// whole-branch review's reviewer captured empirically. This test asserts the
+// RESOLVED values, not just that config was written, because a half-fix that
+// persists to disk but leaves the in-memory sb.cfg pointer stale would still
+// pass a config-file-only assertion.
+func TestUpdateRadioInfo_WritesThroughLocalConfig(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	fc := &fakeControlSession{}
+	a.sess = fc
+	sess := wireTestVoice(t, a, []config.Radio{
+		{ID: 1, Name: "Radio 1", FrequencyKHz: 251000, Enabled: true},
+	})
+	a.st.SetSelectedRadio(1)
+
+	// Confirm the PRE-tune baseline actually resolves the OLD frequency, so
+	// this test cannot pass vacuously.
+	if target := a.resolveTXTarget("radio.1.ptt"); target == nil || target.Freq != voice.KHz(251000) {
+		t.Fatalf("pre-tune resolveTXTarget = %+v, want 251000 kHz", target)
+	}
+
+	if err := a.UpdateRadioInfo(RadioInfoDTO{Radios: []RadioDTO{
+		{ID: 1, Name: "Radio 1", Frequency: 130.000, Enabled: true},
+	}}); err != nil {
+		t.Fatalf("UpdateRadioInfo: %v", err)
+	}
+
+	// TX: resolveTXTarget must resolve the NEW frequency immediately --
+	// no server round trip, no OnRadiosChanged echo required.
+	target := a.resolveTXTarget("radio.1.ptt")
+	if target == nil || target.Freq != voice.KHz(130000) {
+		t.Fatalf("resolveTXTarget after tune = %+v, want 130000 kHz", target)
+	}
+
+	// RX: refreshRXContext must produce the NEW accept list.
+	a.refreshRXContext()
+	last := sess.lastRX()
+	if len(last.accept) != 1 || last.accept[0] != voice.KHz(130000) {
+		t.Fatalf("refreshRXContext accept list = %v, want [130000]", last.accept)
+	}
+
+	// The server push still happens, unchanged from before this fix.
+	if got := fc.updateCount(); got != 1 {
+		t.Fatalf("UpdateRadioInfo pushed to the server %d times, want 1", got)
+	}
+	if got := fc.lastUpdate().GetRadios()[0].GetFrequency(); got != 130.000 {
+		t.Fatalf("pushed frequency = %v, want 130.000", got)
+	}
+}
+
+// TestUpdateRadioInfo_PersistsToDisk proves the write-through survives a
+// fresh App built from the same config path -- i.e. it goes through
+// config.Save, not just an in-memory sb.cfg swap -- matching the "persist
+// locally" half of design §9.2 and DoD 7.
+func TestUpdateRadioInfo_PersistsToDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	a, _, _ := newTestAppWithPath(t, path)
+	a.sess = &fakeControlSession{}
+
+	if err := a.UpdateRadioInfo(RadioInfoDTO{Radios: []RadioDTO{
+		{ID: 7, Name: "Rescue", Frequency: 121.500, Enabled: true, IsIntercom: false},
+	}}); err != nil {
+		t.Fatalf("UpdateRadioInfo: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if len(loaded.Radios) != 1 || loaded.Radios[0].ID != 7 || loaded.Radios[0].FrequencyKHz != 121500 {
+		t.Fatalf("loaded.Radios = %+v, want one radio at 121500 kHz", loaded.Radios)
+	}
+}
+
+// TestUpdateRadioInfo_NoSettingsBackendIsANoOp proves UpdateRadioInfo never
+// panics on an App built with no settings backend (e.g. an early test
+// double), matching persistRadios'/persistSelectedRadio's documented nil
+// no-op discipline.
+func TestUpdateRadioInfo_NoSettingsBackendIsANoOp(t *testing.T) {
+	a := NewForTest(state.New(), &fakeControlSession{}, nil)
+	if err := a.UpdateRadioInfo(RadioInfoDTO{Radios: []RadioDTO{
+		{ID: 1, Name: "Radio 1", Frequency: 30.000, Enabled: true},
+	}}); err != nil {
+		t.Fatalf("UpdateRadioInfo: %v", err)
+	}
+}
+
+// --- M4: selected-radio persistence -----------------------------------------
+
+// TestSelectRadio_PersistsSelection is the M4 regression: SelectRadio (the
+// UI binding, clicking a radio card) must persist the selection to local
+// config, not just state.Store, or global.ptt resolves to nothing on every
+// fresh launch until the user clicks a radio card again.
+func TestSelectRadio_PersistsSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	a, _, _ := newTestAppWithPath(t, path)
+
+	if err := a.SelectRadio(3); err != nil {
+		t.Fatalf("SelectRadio: %v", err)
+	}
+	if got := a.st.SelectedRadio(); got != 3 {
+		t.Fatalf("SelectedRadio() = %d, want 3", got)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if loaded.SelectedRadioID != 3 {
+		t.Fatalf("loaded.SelectedRadioID = %d, want 3", loaded.SelectedRadioID)
+	}
+
+	// A fresh App built from what's now ON DISK must restore the selection
+	// -- this is the actual "survives a restart" guarantee manual check 9
+	// expects. main.go's own startup does exactly this: config.Load(path)
+	// followed by SetSettingsBackend.
+	fresh := newTestAppWithConfig(t, loaded, path)
+	if got := fresh.st.SelectedRadio(); got != 3 {
+		t.Fatalf("fresh App's SelectedRadio() = %d, want 3 (restored from config)", got)
+	}
+}
+
+// TestRadioSelectAction_PersistsSelection proves the hotkey path
+// (radio.<n>.select) persists exactly like the SelectRadio binding does.
+func TestRadioSelectAction_PersistsSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	a, _, _ := newTestAppWithPath(t, path)
+
+	a.Pressed("radio.9.select")
+	if got := a.st.SelectedRadio(); got != 9 {
+		t.Fatalf("SelectedRadio() = %d, want 9", got)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if loaded.SelectedRadioID != 9 {
+		t.Fatalf("loaded.SelectedRadioID = %d, want 9", loaded.SelectedRadioID)
+	}
+}
+
+// --- I1: Reconnect re-pushes persisted radios -------------------------------
+
+// TestReconnect_RePushesPersistedRadios is the I1 regression. App.Connect
+// re-pushes the locally persisted radio set after a.sess.Connect
+// (pushPersistedRadios), because the server creates every client with zero
+// radios; App.Reconnect used to skip that call entirely, so after a
+// reconnect the server had nothing to relay to us and receive stayed dead
+// even though the control connection (and the UI's banner) reported
+// connected.
+func TestReconnect_RePushesPersistedRadios(t *testing.T) {
+	a, _, _ := newTestApp(t) // config.Default() seeds four radios
+	fc := &fakeControlSession{}
+	a.sess = fc
+
+	if err := a.Reconnect(); err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+
+	if got := fc.updateCount(); got != 1 {
+		t.Fatalf("UpdateRadioInfo pushed %d times on Reconnect, want 1", got)
+	}
+	if got := len(fc.lastUpdate().GetRadios()); got != 4 {
+		t.Fatalf("pushed %d radios on Reconnect, want the 4 seeded by config.Default()", got)
+	}
+}
+
+// TestReconnect_PropagatesSessionError proves a failed Reconnect still
+// returns the error (and never pushes radios against a session that just
+// failed to re-establish).
+func TestReconnect_PropagatesSessionError(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	fc := &fakeControlSession{}
+	a.sess = &failingReconnectSession{fakeControlSession: fc}
+
+	if err := a.Reconnect(); err == nil {
+		t.Fatal("Reconnect() = nil error, want the session's error")
+	}
+	if got := fc.updateCount(); got != 0 {
+		t.Fatalf("UpdateRadioInfo pushed %d times after a failed Reconnect, want 0", got)
+	}
+}
+
+// failingReconnectSession wraps fakeControlSession with a Reconnect that
+// always fails, for TestReconnect_PropagatesSessionError.
+type failingReconnectSession struct {
+	*fakeControlSession
+}
+
+func (f *failingReconnectSession) Reconnect(context.Context) error {
+	return errReconnectFailed
+}
+
+var errReconnectFailed = errors.New("reconnect failed")
 
 // --- Sink/Source wiring test -----------------------------------------------
 

@@ -60,6 +60,16 @@ type Config struct {
 	// connected client zero radios and that state does not survive
 	// disconnect, so without a local seed there is nothing to transmit on.
 	Radios []Radio `toml:"radios"`
+
+	// SelectedRadioID is the persisted radio id global.ptt targets, restored
+	// into state.Store at startup (internal/app.SetSettingsBackend) and
+	// kept current by every selection -- clicking a radio card
+	// (App.SelectRadio) and the radio.<n>.select hotkey action alike. Zero
+	// means "none selected", matching state.Store.SelectedRadio's own
+	// zero-value meaning. Without this, selectedRadio lived only in
+	// state.Store (in-memory), so global.ptt -- the primary PTT -- resolved
+	// to nothing on every fresh launch until the user clicked a radio card.
+	SelectedRadioID uint32 `toml:"selected_radio_id"`
 }
 
 // Voice holds Settings > Voice network/buffering tuning for the UDP voice

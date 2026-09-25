@@ -40,8 +40,21 @@ func (a *App) Disconnect() error {
 	return a.sess.Disconnect(context.Background())
 }
 
-// Reconnect re-establishes the control session.
-func (a *App) Reconnect() error { return a.sess.Reconnect(context.Background()) }
+// Reconnect re-establishes the control session, then re-pushes the locally
+// persisted radio set -- exactly what Connect does after a.sess.Connect
+// (see pushPersistedRadios' doc). Without this (I1), the server creates the
+// reconnected client with zero radios again and nothing ever re-pushes them:
+// the voice half recovers on its own (Session.Reconnect re-dials against the
+// fresh secret), but the server has nothing to relay to us, so receive stays
+// dead after every reconnect even though the banner reports connected.
+func (a *App) Reconnect() error {
+	ctx := context.Background()
+	if err := a.sess.Reconnect(ctx); err != nil {
+		return err
+	}
+	a.pushPersistedRadios(ctx)
+	return nil
+}
 
 // GetClientState returns the current snapshot for window hydration.
 func (a *App) GetClientState() ClientStateSnapshot {
@@ -55,8 +68,16 @@ func (a *App) GetClientState() ClientStateSnapshot {
 	return out
 }
 
-// UpdateRadioInfo pushes a radio config change through the live control client.
+// UpdateRadioInfo pushes a radio config change through the live control
+// client, but writes it through to local config FIRST (C1 fix -- see
+// persistRadios' doc in voice.go). Without the write-through,
+// resolveTXTarget and refreshRXContext -- which both read sb.cfg.Radios
+// directly, never the server's echo -- kept transmitting on and accepting
+// the OLD frequency after every UI tune, no matter what the server was told.
 func (a *App) UpdateRadioInfo(info RadioInfoDTO) error {
+	if err := a.persistRadios(info.Radios); err != nil {
+		return err
+	}
 	return a.sess.UpdateRadioInfo(context.Background(), RadioInfoToProto(info))
 }
 
