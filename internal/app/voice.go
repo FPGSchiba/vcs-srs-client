@@ -324,8 +324,11 @@ func (a *App) voiceSessionSwap(sess voiceSessionAPI, gen uint64) (old voiceSessi
 }
 
 // nextVoiceGeneration bumps and returns the voice-session epoch. Called by
-// startVoiceSession BEFORE it dials, so the returned value can be handed to
-// setVoiceSession/voiceSessionSwap afterward and compared against whatever
+// startVoiceSession and handleVoiceRedirect BEFORE the dial -- and, for
+// handleVoiceRedirect, before the dial is even scheduled onto its own
+// goroutine (see that function's doc for why the ordering matters) -- so
+// the returned value can be handed to startVoiceSessionWithGen and, from
+// there, setVoiceSession/voiceSessionSwap, and compared against whatever
 // the live generation has become by the time the dial completes.
 func (a *App) nextVoiceGeneration() uint64 {
 	a.voice.mu.Lock()
@@ -711,28 +714,51 @@ func (a *App) voiceDialOptions() voice.Options {
 }
 
 // startVoiceSession dials a fresh voice session against the store's current
-// credentials/addresses and installs it, refreshing the RX context
-// immediately afterward so a session that starts with radios already known
-// (a reconnect, e.g.) does not sit fail-closed (SetRXContext's default)
-// until the next unrelated radios-changed notification.
+// credentials/addresses and installs it. It captures the generation
+// (nextVoiceGeneration) itself and delegates to startVoiceSessionWithGen --
+// for Connect and Reconnect, the only remaining direct callers, there is no
+// ordered-goroutine race to preserve, so capturing here is equivalent to
+// capturing at the top of startVoiceSessionWithGen.
 //
-// The generation is captured (nextVoiceGeneration) BEFORE the dial, which
-// is network I/O outside any lock: if a concurrent Disconnect or
-// ServiceShutdown (or another, overlapping startVoiceSession -- e.g. two
-// redirects racing) runs while this dial is in flight, setVoiceSession
-// rejects the now-stale result instead of installing a session behind a
-// teardown's back. See voiceSessionSwap.
+// handleVoiceRedirect does NOT call this: it captures its own generation
+// and calls startVoiceSessionWithGen directly. See that function's doc.
+func (a *App) startVoiceSession() {
+	a.startVoiceSessionWithGen(a.nextVoiceGeneration())
+}
+
+// startVoiceSessionWithGen dials a fresh voice session against the store's
+// current credentials/addresses and installs it under the given generation,
+// refreshing the RX context immediately afterward so a session that starts
+// with radios already known (a reconnect, e.g.) does not sit fail-closed
+// (SetRXContext's default) until the next unrelated radios-changed
+// notification.
+//
+// gen must have been captured (nextVoiceGeneration) BEFORE this function
+// was scheduled to run -- NOT inside it. startVoiceSession (Connect/
+// Reconnect) captures it immediately before calling in, which is
+// equivalent since those callers run inline with nothing else able to
+// interleave. handleVoiceRedirect is different: it runs this on its own
+// goroutine (see its doc for why), but captures gen BEFORE spawning that
+// goroutine, on the ordered state.Store observer goroutine, so that two
+// redirects' generations are ordered the same way the redirects themselves
+// were delivered -- regardless of which goroutine's dial happens to finish
+// first. Capturing gen in here instead (i.e. after the scheduling hop)
+// would let generation order follow dial-completion order instead, which
+// can let a stale-address redirect win over a newer one, or let a
+// redirect's generation land after a concurrent Disconnect/ServiceShutdown
+// bump, installing a live session behind a teardown. voiceSessionSwap still
+// rejects a stale gen either way; only the ordering of what counts as
+// "stale" depends on where gen was captured.
 //
 // A dial failure is logged and swallowed, exactly like every other optional
 // subsystem in this app (audio, joystick): the control connection must stay
 // usable with no voice at all, the same discipline SetAudioBackend's
 // caller in main.go already follows for a missing sound card.
-func (a *App) startVoiceSession() {
+func (a *App) startVoiceSessionWithGen(gen uint64) {
 	self, secret, src, ok := a.voiceDialInputs()
 	if !ok {
 		return
 	}
-	gen := a.nextVoiceGeneration()
 	// Through a.voice.dial, not voice.Dial directly -- see voiceState.dial's
 	// doc for why (test seam; defaults to voice.Dial in initVoice). Read
 	// under the lock: dial itself is set once, at construction, and never
@@ -774,24 +800,31 @@ func (a *App) stopVoiceSession() { a.setVoiceSession(nil, 0) }
 // dial in startVoiceSession, not this observer, owns bringing a session up
 // for the first time.
 //
-// startVoiceSession -- specifically voice.Dial inside it -- runs on its OWN
-// goroutine, not this one. state.Store's observer contract (see
-// OnVoiceCredentialsChanged's doc) requires an observer not block: this is
-// called synchronously from route() on internal/control's ConsumeUpdates
-// goroutine, the same one that delivers every OTHER control update (client
-// list, radio echoes, connection state). voice.Dial can block up to
-// resolveTimeout (10s) resolving a blackholed hostname; running it inline
-// here used to stall that whole goroutine -- and therefore every other
-// control update -- for up to 10s on every redirect.
+// The dial itself -- specifically voice.Dial inside startVoiceSessionWithGen
+// -- runs on its OWN goroutine, not this one. state.Store's observer
+// contract (see OnVoiceCredentialsChanged's doc) requires an observer not
+// block: this is called synchronously from route() on internal/control's
+// ConsumeUpdates goroutine, the same one that delivers every OTHER control
+// update (client list, radio echoes, connection state). voice.Dial can
+// block up to resolveTimeout (10s) resolving a blackholed hostname; running
+// it inline here used to stall that whole goroutine -- and therefore every
+// other control update -- for up to 10s on every redirect.
 //
-// This is safe without the caller waiting on it: nextVoiceGeneration is
-// still taken (inside startVoiceSession, on this new goroutine) before the
-// dial, and voiceSessionSwap still compares against the live generation
-// immediately before installing -- so a late-arriving dial from an old
-// redirect race, or one that outlives a concurrent Disconnect/
-// ServiceShutdown, is still closed rather than installed exactly as
-// before. Moving the dial off this goroutine does not touch that gate at
-// all; it only stops THIS caller from being the one left waiting on it.
+// The generation, however, is captured RIGHT HERE -- on this goroutine,
+// before the `go` below schedules the dial -- not inside
+// startVoiceSessionWithGen. That is deliberate and load-bearing: this
+// function runs on the single ordered ConsumeUpdates goroutine, so two
+// redirects' calls here are always ordered the same way the redirects
+// themselves arrived. If gen were captured after the scheduling hop
+// instead (i.e. inside the spawned goroutine), two racing redirects could
+// take their generations in whichever order their goroutines happen to be
+// scheduled, not the order the redirects were delivered in -- letting a
+// stale-address redirect's session win over a newer one, or letting a
+// redirect's generation land after a concurrent Disconnect/
+// ServiceShutdown's teardown bump, installing a live session behind a
+// teardown (exactly the class voiceSessionSwap exists to prevent). Taking
+// gen here restores that ordering exactly as it was before the dial moved
+// off this goroutine, while still keeping the dial itself off it.
 func (a *App) handleVoiceRedirect() {
 	a.voice.mu.Lock()
 	live := a.voice.sess != nil
@@ -799,7 +832,8 @@ func (a *App) handleVoiceRedirect() {
 	if !live {
 		return
 	}
-	go a.startVoiceSession()
+	gen := a.nextVoiceGeneration()
+	go a.startVoiceSessionWithGen(gen)
 }
 
 // refreshRXContext recomputes the RX frequency filter -- the local client's

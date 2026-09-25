@@ -304,6 +304,20 @@ should confirm the *expected* behavior, not surface them as new bugs:
   key an old frequency with no key held); that fix does not enable VOX
   transmit, it only guarantees VOX's current no-op is a clean no-op rather
   than an invisible one.
+- **Selecting a radio and immediately quitting can lose that one selection
+  on restart.** `queueSelectedRadioPersist` (`internal/app/voice.go`)
+  deliberately moved the selected-radio `config.Save` off gohook's event-
+  reader goroutine and onto a fresh, unwaited goroutine per selection --
+  correctly, since a blocking save there can stall the OS key stream, which
+  `internal/hotkeys/dispatch.go` documents as a cause of a stranded-open
+  mic. The trade-off is that nothing waits for that goroutine: quitting
+  (or crashing) before it runs can cut the persist off entirely.
+  `config.Save` is write-temp-then-rename, so the worst case is bounded and
+  never corrupts the config -- either the rename already happened and the
+  selection is saved, or it did not and `config.toml` is untouched at its
+  previous, still-valid selection, at most leaving behind a stray `.tmp`
+  file. A tester who selects a radio and immediately quits may see that
+  selection not survive the restart; this is expected, not a bug.
 
 ## Four issues found during this phase that are OUTSIDE its scope
 

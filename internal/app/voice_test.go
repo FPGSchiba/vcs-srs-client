@@ -575,6 +575,63 @@ func TestHandleVoiceRedirectDoesNotBlockOnASlowDial(t *testing.T) {
 	close(release)
 }
 
+// TestHandleVoiceRedirectCapturesGenerationBeforeSpawningTheDial proves
+// handleVoiceRedirect takes its generation (nextVoiceGeneration) on ITS OWN
+// goroutine -- internal/control's single, ordered ConsumeUpdates goroutine
+// -- BEFORE scheduling the dial onto a separate goroutine via
+// startVoiceSessionWithGen, not inside that function.
+//
+// This restores pre-wave-C ordering. Wave C moved the dial off the ordered
+// observer goroutine (see TestHandleVoiceRedirectDoesNotBlockOnASlowDial
+// above), but if the generation capture had moved along with it -- onto the
+// spawned goroutine -- two redirects' generations would be taken in
+// whichever order their goroutines happened to be scheduled, not the order
+// the redirects were actually delivered in. An unlucky preemption could
+// then let a stale-address redirect's session win over a newer one, or let
+// a redirect's generation land after a concurrent Disconnect/
+// ServiceShutdown's teardown bump -- installing a live session behind a
+// teardown, exactly the class voiceSessionSwap exists to prevent.
+//
+// The assertion needs no synchronization with the spawned goroutine at all:
+// a.voice.gen must already be bumped the instant handleVoiceRedirect
+// returns, regardless of whether the dial goroutine has run yet. That is
+// the whole point -- generation order is decided on the calling goroutine,
+// not the spawned one. Moving nextVoiceGeneration back inside
+// startVoiceSessionWithGen (onto the spawned goroutine, as it ran before
+// this fix) makes this assertion depend on the Go scheduler running that
+// goroutine before this check runs, which it reliably does not: a `go`
+// statement does not yield the calling goroutine to the new one.
+func TestHandleVoiceRedirectCapturesGenerationBeforeSpawningTheDial(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	a.st.SetSelf("00000000-0000-0000-0000-000000000001", nil)
+	a.st.SetVoiceCredentials("secret", "10.0.0.9:5002", "")
+	wireTestVoice(t, a, nil) // a live session, so handleVoiceRedirect acts at all
+
+	block := make(chan struct{})
+	defer close(block) // let the fake dial's goroutine finish so it cannot leak past the test
+
+	a.voice.mu.Lock()
+	genBefore := a.voice.gen
+	a.voice.dial = func(voice.Sources, uuid.UUID, string, voice.Options) (*voice.Session, error) {
+		<-block
+		return nil, errors.New("fake dial: deliberately never completes within this test")
+	}
+	a.voice.mu.Unlock()
+
+	a.handleVoiceRedirect()
+
+	a.voice.mu.Lock()
+	genAfter := a.voice.gen
+	a.voice.mu.Unlock()
+
+	if genAfter != genBefore+1 {
+		t.Fatalf("a.voice.gen = %d immediately after handleVoiceRedirect returned, want %d -- "+
+			"the generation must be captured synchronously on the calling (ordered observer) "+
+			"goroutine, before the dial is scheduled onto its own goroutine, not inside it",
+			genAfter, genBefore+1)
+	}
+}
+
 // --- Generation-gated install/teardown race (task-11b Priority 1) ---------
 //
 // handleVoiceRedirect dials a replacement session with a.voice.mu released
