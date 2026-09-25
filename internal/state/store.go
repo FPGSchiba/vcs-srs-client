@@ -182,6 +182,17 @@ func (s *Store) VoiceCredentials() (secret, coalitionAddr, globalAddr string) {
 	return s.voiceSecret, s.coalitionVoiceAddr, s.globalVoiceAddr
 }
 
+// SetVoiceAddresses updates the coalition and global voice addresses without
+// overwriting the stored secret. This is used when a VoiceAddressUpdate arrives
+// with an empty secret (a sign of a malformed message) but valid addresses.
+// Empty strings are meaningful and stored as-is (see SetVoiceCredentials comment).
+func (s *Store) SetVoiceAddresses(coalitionAddr, globalAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.coalitionVoiceAddr = coalitionAddr
+	s.globalVoiceAddr = globalAddr
+}
+
 // SetSelectedRadio records which radio id global.ptt currently targets.
 func (s *Store) SetSelectedRadio(id uint32) {
 	s.mu.Lock()
