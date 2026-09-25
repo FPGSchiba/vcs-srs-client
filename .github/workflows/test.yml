@@ -88,17 +88,25 @@ jobs:
       # via `--version` there is just as deterministic as the direct
       # download used for Linux/macOS, without needing a bash-based zip
       # extraction step on a runner that doesn't reliably ship `unzip`.
+      # --proto '=https' is not belt-and-braces: -L follows redirects, and
+      # without it a redirect could downgrade the transfer to plain HTTP.
+      # The sha256 check is the part that actually matters -- a pinned
+      # version alone still trusts whatever bytes the release URL serves.
       - name: Install protoc · Linux
         if: matrix.os == 'ubuntu-latest'
         run: |
-          curl -fsSL -o protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip
+          curl -fsSL --proto '=https' --tlsv1.2 -o protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip
+          echo "121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278  protoc.zip" | sha256sum -c -
           sudo unzip -o protoc.zip -d /usr/local bin/protoc 'include/*'
           rm protoc.zip
 
       - name: Install protoc · macOS
         if: matrix.os == 'macos-latest'
         run: |
-          curl -fsSL -o protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-osx-universal_binary.zip
+          curl -fsSL --proto '=https' --tlsv1.2 -o protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-osx-universal_binary.zip
+          echo "83d0dc80672f53486f54299bca6177159f9cad1fd54d4d3143eeea53c4423e1b  protoc.zip" | shasum -a 256 -c -
           sudo unzip -o protoc.zip -d /usr/local bin/protoc 'include/*'
           rm protoc.zip
 
@@ -118,6 +126,9 @@ jobs:
           # (cmd/protoc-gen-go-grpc/vX.Y.Z), so there is no go.mod entry to
           # derive it from. Pinned explicitly; bump by hand, matching
           # whatever version the server repo's own CI pins, when needed.
+          # Exact tag, not a range or @latest. `go install` verifies the
+          # module against sum.golang.org before building it, so the version
+          # is both pinned and cryptographically checked.
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
 
       - name: Generate the VCS server's protobuf and GraphQL code
