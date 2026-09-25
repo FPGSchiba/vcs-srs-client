@@ -124,11 +124,19 @@ jobs:
           # module the server requires -- it ships from its own nested
           # go.mod in the grpc-go repo and is tagged independently
           # (cmd/protoc-gen-go-grpc/vX.Y.Z), so there is no go.mod entry to
-          # derive it from. Pinned explicitly; bump by hand, matching
-          # whatever version the server repo's own CI pins, when needed.
-          # Exact tag, not a range or @latest. `go install` verifies the
-          # module against sum.golang.org before building it, so the version
-          # is both pinned and cryptographically checked.
+          # derive it from. Pinned explicitly here and bumped by hand.
+          #
+          # NOTE: the server's own CI uses @latest for this tool, so this pin
+          # deliberately does NOT track it -- we would rather this workflow
+          # stay reproducible than follow an upstream floating version. We
+          # generate the server's code ourselves in the step below, so only
+          # this pin decides what runs.
+          #
+          # Sonar flags this as an unverified dependency (S8545). For Go
+          # modules that is not accurate: `go install` checks the module
+          # against sum.golang.org, and proxy.golang.org serves a published
+          # version immutably, so an upstream re-tag cannot change what this
+          # line fetches. Left as-is rather than pinned to a pseudo-version.
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
 
       - name: Generate the VCS server's protobuf and GraphQL code
