@@ -1,6 +1,8 @@
 package voice
 
 import (
+	"io"
+	"log/slog"
 	"math"
 	"sync"
 	"testing"
@@ -902,5 +904,84 @@ func TestRXSurvivesADecoderFactoryThatReturnsNothing(t *testing.T) {
 	}
 	if st.Opened != 0 {
 		t.Fatalf("%d streams were opened around a nil decoder, want 0", st.Opened)
+	}
+}
+
+// TestRXLateFrameWithinTheJitterTargetIsAbsorbedNotConcealed pins the
+// division of responsibility between the jitter buffer and the PCM ring:
+// the jitter buffer owns the late-arrival grace window, and the ring only
+// smooths the handoff to the DSP goroutine.
+//
+// aheadSamples was originally the whole jitter target. That drains the
+// jitter buffer into the ring as fast as pop() will yield, so playout
+// advances past a frame that is merely late and the frame is concealed
+// rather than absorbed -- the exact outcome the configured target exists to
+// prevent, and worst at the start of a transmission where it eats the first
+// word.
+//
+// The consumer drains from tick zero here, without a warm-up, because that
+// is what dspLoop really does: it calls ReadInto every 10 ms from the moment
+// the session starts, long before any audio arrives. A warm-up hides the
+// defect entirely -- with one, every candidate value conceals nothing.
+//
+// 41 ms is chosen as comfortably inside the 60 ms target and comfortably
+// outside one 20 ms frame, so neither bound makes the result accidental.
+func TestRXLateFrameWithinTheJitterTargetIsAbsorbedNotConcealed(t *testing.T) {
+	const (
+		lateIdx   = 20
+		lateBy    = 41 * time.Millisecond
+		totalPkts = 40
+	)
+
+	f := &decoderFactory{}
+	var r rxState
+	r.init(f.new, defaultJitterMS)
+
+	dec, err := r.newDecoder()
+	if err != nil {
+		t.Fatalf("newDecoder: %v", err)
+	}
+	st := &rxStream{
+		jit:  newJitter(r.jitterTarget, rxJitterMax, rxFrameDuration),
+		ring: audio.NewRing(r.ringFrames),
+		dec:  dec,
+		pcm:  make([]float32, opus.FrameSamples),
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	buf := make([]float32, audio.FrameSamples)
+	base := time.Unix(0, 0)
+	sent := make(map[int]bool, totalPkts)
+
+	for ms := 0; ms < 900; ms++ {
+		now := base.Add(time.Duration(ms) * time.Millisecond)
+		for i := 0; i < totalPkts; i++ {
+			at := time.Duration(i) * rxFrameDuration
+			if i == lateIdx {
+				at += lateBy
+			}
+			if !sent[i] && at <= time.Duration(ms)*time.Millisecond {
+				sent[i] = true
+				st.jit.push(uint32(i), []byte{1}, now)
+				st.topUp(now, &r, log)
+			}
+		}
+		if ms%10 == 0 { // dspLoop's tick, from the very first one
+			st.ring.Read(buf)
+			st.topUp(now, &r, log)
+		}
+	}
+
+	sd := dec.(*stubDecoder)
+	f.mu.Lock()
+	conceals, decodes := sd.conceals, sd.decodes
+	f.mu.Unlock()
+
+	if conceals != 0 {
+		t.Errorf("a frame %v late against a %v jitter target was concealed %d time(s); "+
+			"aheadSamples (%d) is consuming the grace window the jitter buffer owns",
+			lateBy, r.jitterTarget, conceals, r.aheadSamples)
+	}
+	if decodes != totalPkts {
+		t.Errorf("decoded %d of %d frames; the late frame should be absorbed, not dropped", decodes, totalPkts)
 	}
 }

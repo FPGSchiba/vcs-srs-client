@@ -212,16 +212,31 @@ type rxState struct {
 	// aheadSamples is how much decoded PCM the decode loop keeps in each
 	// stream's ring.
 	//
-	// It is set to the jitter target, and that is not arbitrary. Once a
-	// jitter buffer is primed, pop() hands out every contiguous frame it
-	// holds as fast as it is asked for one -- the PACING comes entirely from
-	// this threshold. So this number, not the jitter target, is what really
-	// decides how much late-arrival grace a stream has: a gap stalls pop
-	// until its playout deadline passes, and what covers the stall is the
-	// PCM already decoded. Setting it equal to the target keeps the
-	// end-to-end delay at the configured value while moving the buffered
-	// audio from the jitter map into the ring, which is where it has to be
-	// for ReadInto to stay decode-free.
+	// It is a SMALL CONSTANT -- two Opus frames -- and deliberately NOT the
+	// jitter target. The division of responsibility is:
+	//
+	//	the jitter buffer owns the late-arrival grace window;
+	//	this ring only smooths the handoff to the DSP goroutine.
+	//
+	// It was originally set equal to the jitter target, reasoning that since
+	// pop() hands out every contiguous frame as fast as it is asked once
+	// primed, this threshold rather than the target is what paces playout.
+	// The first half is true; the conclusion was backwards. A large value
+	// drains the jitter buffer into the ring immediately, so playout
+	// advances past a frame that is merely late and the frame is CONCEALED
+	// instead of absorbed -- precisely what the configured target exists to
+	// prevent.
+	//
+	// Measured, driving these same types, with the consumer draining from
+	// tick zero as dspLoop really does: against a 60 ms target, a frame
+	// arriving 41 ms late is concealed at 2880 samples (60 ms) and absorbed
+	// at both 960 and 1920. Short reads were identical across all three, so
+	// the smaller value costs no underrun margin. A warm-up before the first
+	// drain hides the defect entirely, which is why
+	// TestRXLateFrameWithinTheJitterTargetIsAbsorbedNotConcealed has none.
+	//
+	// Capped at the target so a deliberately tiny configured jitter buffer
+	// is still honoured, and floored at one whole frame.
 	aheadSamples int
 	ringFrames   int
 
@@ -268,14 +283,18 @@ func (r *rxState) init(newDecoder func() (rxDecoder, error), jitterMS int) {
 		r.newDecoder = newOpusDecoder
 	}
 
-	r.aheadSamples = jitterMS * (audio.SampleRate / 1000)
+	// See aheadSamples' doc: a small constant, not the jitter target.
+	r.aheadSamples = 2 * opus.FrameSamples
+	if target := jitterMS * (audio.SampleRate / 1000); r.aheadSamples > target {
+		r.aheadSamples = target
+	}
 	if r.aheadSamples < opus.FrameSamples {
 		// One whole Opus frame is the floor: a threshold below one frame
 		// would be satisfied by a partially drained ring and the loop would
 		// never decode ahead at all.
 		r.aheadSamples = opus.FrameSamples
 	}
-	// Room for the target plus two more frames, so the top-up loop's final
+	// Room for the threshold plus two more frames, so the top-up loop's final
 	// write always fits and Ring.Write -- which drops a chunk WHOLE rather
 	// than tearing a frame -- never has to refuse one.
 	r.ringFrames = (r.aheadSamples + 2*opus.FrameSamples + audio.FrameSamples - 1) / audio.FrameSamples
