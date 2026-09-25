@@ -49,6 +49,63 @@ type Config struct {
 	// import internal/audio, so this stays plain fields with TOML tags and
 	// no knowledge of engine semantics.
 	Audio Audio `toml:"audio"`
+
+	// Voice holds the UDP voice engine's network/buffering tuning. Same raw-
+	// values discipline as Audio above: internal/config does not import
+	// internal/voice.
+	Voice Voice `toml:"voice"`
+
+	// Radios is the persisted radio set. See the Radio type comment for why
+	// this exists at all -- in short, the server hands every freshly
+	// connected client zero radios and that state does not survive
+	// disconnect, so without a local seed there is nothing to transmit on.
+	Radios []Radio `toml:"radios"`
+}
+
+// Voice holds Settings > Voice network/buffering tuning for the UDP voice
+// engine. It is a raw-values layer, same discipline as Audio: internal/config
+// does not import internal/voice, so this stays plain fields with TOML tags
+// and no knowledge of engine semantics.
+//
+// Host and Port default to empty/0, which internal/voice reads as "derive
+// the voice endpoint from server_url, on the server's UDP voice port" --
+// what every standalone deployment needs with zero configuration. An
+// explicit host/port here overrides that derivation, for a deployment that
+// runs voice on a different host or port than the control connection.
+type Voice struct {
+	Host           string `toml:"host"`
+	Port           int    `toml:"port"`
+	JitterBufferMS int    `toml:"jitter_buffer_ms"`
+	MaxBufferMS    int    `toml:"max_buffer_ms"`
+}
+
+// Radio is one persisted radio preset.
+//
+// The server creates every client with ZERO radios (state.AddClient sets
+// Radios: []), and that state is scoped to the session -- it is gone the
+// moment the client disconnects. Nothing server-side, and nothing else in
+// the client, can create a radio, so without a local seed a freshly
+// connected user has literally nothing to transmit on. Radios therefore live
+// here and are re-pushed to the server on every connect; as a side effect
+// the radio stack now survives a client restart too, and this is the honest
+// seed for Phase 7's profiles without building profiles now.
+type Radio struct {
+	ID   uint32 `toml:"id"`
+	Name string `toml:"name"`
+
+	// FrequencyKHz is the canonical stored form: a plain integer, never a
+	// float. internal/voice.KHz is the canonical TYPE elsewhere in the
+	// client, but this package must not import internal/voice, so this is
+	// just a uint32 with the same meaning. It matters that it is an integer
+	// and not a float: the server decides whether to relay a transmission by
+	// comparing the frequency we advertise against the sender's using EXACT
+	// float32 equality, so the client must derive both wire forms it needs
+	// from this one integer rather than round-tripping a value through a
+	// float and risking a rounding difference that silently drops the radio
+	// out of range.
+	FrequencyKHz uint32 `toml:"frequency_khz"`
+	Enabled      bool   `toml:"enabled"`
+	IsIntercom   bool   `toml:"is_intercom"`
 }
 
 // AudioLevels holds the four mixer bus positions from Settings > Audio.
@@ -250,6 +307,25 @@ func Default() *Config {
 			// field comment on Audio.Effects for why (same trap as
 			// KeybindDevices above).
 			Effects: nil,
+		},
+		Voice: Voice{
+			// Host and Port are left at their zero values on purpose -- see
+			// the Voice type comment: empty/0 means "derive from
+			// server_url", which is what a standalone deployment needs.
+			JitterBufferMS: 60,
+			MaxBufferMS:    500,
+		},
+		// Radios seeds three ordinary radios plus an intercom so the Comms
+		// window is never empty on first run -- see the Radio type comment
+		// for why that seed has to happen at all. The IDs, names and
+		// frequencies below are only a STARTING POINT for the user to edit;
+		// they are not meaningful, standards-derived, or tied to anything
+		// server-side.
+		Radios: []Radio{
+			{ID: 1, Name: "Radio 1", FrequencyKHz: 30000, Enabled: true, IsIntercom: false},
+			{ID: 2, Name: "Radio 2", FrequencyKHz: 141000, Enabled: true, IsIntercom: false},
+			{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true, IsIntercom: false},
+			{ID: 4, Name: "Intercom", FrequencyKHz: 1000, Enabled: true, IsIntercom: true},
 		},
 	}
 }

@@ -496,6 +496,115 @@ func TestAudioEffectsTableAbsentWhenNil(t *testing.T) {
 // omits the key entirely for a nil map, so the first Save after upgrading
 // appended a table header to every existing keyboard-only config.toml -- a
 // diff on a file the user never asked to change.
+// TestDefaultSeedsRadios pins that a first run produces a usable radio set.
+// The server creates every client with ZERO radios (state.AddClient sets
+// Radios: []), and nothing else in the client can create one, so without a
+// seed there is nothing to transmit on and the Comms window stays empty
+// forever.
+func TestDefaultSeedsRadios(t *testing.T) {
+	c := config.Default()
+	if len(c.Radios) == 0 {
+		t.Fatal("Default() seeded no radios; there would be nothing to transmit on")
+	}
+	seen := map[uint32]bool{}
+	for _, r := range c.Radios {
+		if seen[r.ID] {
+			t.Fatalf("duplicate radio id %d", r.ID)
+		}
+		seen[r.ID] = true
+		if r.FrequencyKHz == 0 {
+			t.Errorf("radio %d has no frequency", r.ID)
+		}
+		if r.FrequencyKHz > 1<<24-1 {
+			t.Errorf("radio %d frequency %d does not fit the 24-bit wire field", r.ID, r.FrequencyKHz)
+		}
+		if r.Name == "" {
+			t.Errorf("radio %d has no name", r.ID)
+		}
+	}
+}
+
+func TestDefaultVoiceSettings(t *testing.T) {
+	c := config.Default()
+	if c.Voice.JitterBufferMS != 60 {
+		t.Errorf("JitterBufferMS = %d, want 60", c.Voice.JitterBufferMS)
+	}
+	if c.Voice.MaxBufferMS != 500 {
+		t.Errorf("MaxBufferMS = %d, want 500", c.Voice.MaxBufferMS)
+	}
+	// Host and Port are deliberately empty/zero: an unset [voice] table means
+	// "derive from server_url on port 5002", which is what every standalone
+	// deployment needs.
+	if c.Voice.Host != "" || c.Voice.Port != 0 {
+		t.Errorf("Voice host/port default to %q/%d, want empty/0 so resolution falls through to server_url", c.Voice.Host, c.Voice.Port)
+	}
+}
+
+// TestRadiosRoundTrip pins that an existing config without a [[radios]]
+// array still loads, and that a saved one comes back byte-identical in
+// value (every field of every radio, plus [voice]).
+func TestRadiosRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := config.Default()
+	cfg.Voice = config.Voice{
+		Host:           "voice.example.internal",
+		Port:           6002,
+		JitterBufferMS: 80,
+		MaxBufferMS:    750,
+	}
+	cfg.Radios = []config.Radio{
+		{ID: 1, Name: "Command", FrequencyKHz: 30000, Enabled: true, IsIntercom: false},
+		{ID: 2, Name: "Wing", FrequencyKHz: 141250, Enabled: false, IsIntercom: false},
+		{ID: 3, Name: "Intercom", FrequencyKHz: 1000, Enabled: true, IsIntercom: true},
+	}
+
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if got.Voice != cfg.Voice {
+		t.Errorf("Voice round trip = %+v, want %+v", got.Voice, cfg.Voice)
+	}
+	if !slices.Equal(got.Radios, cfg.Radios) {
+		t.Errorf("Radios round trip = %+v, want %+v", got.Radios, cfg.Radios)
+	}
+}
+
+// TestLoadWithoutRadiosSectionGetsDefaults pins backward compatibility with
+// every config.toml written before this phase: no [voice] table, no
+// [[radios]] array.
+func TestLoadWithoutRadiosSectionGetsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	old := "log_level = \"DEBUG\"\nserver_url = \"localhost:5002\"\nping_interval_seconds = 7\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	def := config.Default()
+	if !slices.Equal(cfg.Radios, def.Radios) {
+		t.Errorf("missing [[radios]] should fall back to defaults: got %+v, want %+v", cfg.Radios, def.Radios)
+	}
+	if cfg.Voice != def.Voice {
+		t.Errorf("missing [voice] should fall back to defaults: got %+v, want %+v", cfg.Voice, def.Voice)
+	}
+	// Existing values from before this phase must still survive.
+	if cfg.LogLevel != "DEBUG" || cfg.PingIntervalSeconds != 7 {
+		t.Errorf("existing values lost: %+v", cfg)
+	}
+}
+
 func TestRewritingAKeyboardOnlyConfigIsByteIdentical(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 
