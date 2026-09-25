@@ -52,6 +52,13 @@ type Store struct {
 	// downstream of stream.go's route (only the Wails event reaches the
 	// frontend). Mirrors radioObservers/OnRadiosChanged exactly.
 	voiceObservers []func()
+
+	// settingsObservers are notified after SetSettings replaces the server
+	// settings (the global/test frequency lists, in particular). This is
+	// what lets a live voice session refresh its RX filter when those lists
+	// change mid-session, rather than only on the next radios-driven
+	// refresh or reconnect. Mirrors radioObservers/OnRadiosChanged exactly.
+	settingsObservers []func()
 }
 
 // OnRadiosChanged registers fn to run after any mutation that can change the
@@ -99,6 +106,28 @@ func (s *Store) notifyVoiceCredentialsChanged() {
 	s.mu.RLock()
 	observers := make([]func(), len(s.voiceObservers))
 	copy(observers, s.voiceObservers)
+	s.mu.RUnlock()
+	for _, fn := range observers {
+		fn()
+	}
+}
+
+// OnSettingsChanged registers fn to run after SetSettings replaces the
+// server settings. See voiceObservers' doc for why this exists and
+// OnRadiosChanged for the identical contract: fn runs OUTSIDE the store
+// lock, synchronously on the mutating goroutine, so it must not block.
+func (s *Store) OnSettingsChanged(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settingsObservers = append(s.settingsObservers, fn)
+}
+
+// notifySettingsChanged calls every observer. MUST be called with the lock
+// released: observers read the store back (Settings, in particular).
+func (s *Store) notifySettingsChanged() {
+	s.mu.RLock()
+	observers := make([]func(), len(s.settingsObservers))
+	copy(observers, s.settingsObservers)
 	s.mu.RUnlock()
 	for _, fn := range observers {
 		fn()
@@ -175,11 +204,14 @@ func (s *Store) ClearSelf() {
 	s.notifyRadiosChanged()
 }
 
-// SetSettings overwrites the server settings.
+// SetSettings overwrites the server settings and notifies settings
+// observers (see OnSettingsChanged) so a live voice session can refresh its
+// RX filter when the global/test frequency lists change mid-session.
 func (s *Store) SetSettings(settings *srspb.ServerSettings) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.settings = settings
+	s.mu.Unlock()
+	s.notifySettingsChanged()
 }
 
 // Settings returns the current server settings, or nil if unset.

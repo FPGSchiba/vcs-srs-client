@@ -8,6 +8,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
+	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
 
 // fakeVoiceSession is a voiceSessionAPI recording every call, so the TX
@@ -78,6 +79,27 @@ func (f *fakeVoiceSession) endCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.endCalls
+}
+
+func (f *fakeVoiceSession) lastRX() rxCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.rxCalls) == 0 {
+		return rxCall{}
+	}
+	return f.rxCalls[len(f.rxCalls)-1]
+}
+
+func (f *fakeVoiceSession) rxCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.rxCalls)
+}
+
+func (f *fakeVoiceSession) closedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
 }
 
 // hasFreq reports whether targets contains freq, regardless of order --
@@ -352,6 +374,149 @@ func TestVoiceRedirectIsANoOpWhileDisconnected(t *testing.T) {
 	a.st.SetVoiceCredentials("secret", "10.0.0.9:5002", "")
 	if a.voiceSession() != nil {
 		t.Fatal("a live session appeared from nowhere")
+	}
+}
+
+// --- Generation-gated install/teardown race (task-11b Priority 1) ---------
+//
+// handleVoiceRedirect dials a replacement session with a.voice.mu released
+// (the dial is network I/O); a concurrent Disconnect or ServiceShutdown can
+// tear the live session down before that dial completes. Without a
+// generation check, setVoiceSession would install the stale dial's result
+// unconditionally afterward -- a live session reappearing, transmit-capable,
+// after the UI already reports disconnected. voiceSessionSwap is the seam
+// that decision lives in; it is exercised directly here with fakes, exactly
+// as the review asked for, since a real dial cannot run in this sandbox
+// (bind(2) is blocked).
+
+// TestVoiceSessionSwapRejectsAStaleGeneration proves a dial that captured
+// an old generation -- because a teardown or a newer start ran while it was
+// in flight -- is closed instead of installed, and the currently-live
+// session is left untouched.
+func TestVoiceSessionSwapRejectsAStaleGeneration(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	live := &fakeVoiceSession{}
+	a.voice.mu.Lock()
+	a.voice.sess = live
+	a.voice.gen = 5 // a teardown/newer start advanced past what the stale dial captured
+	a.voice.mu.Unlock()
+
+	stale := &fakeVoiceSession{}
+	old, installed := a.voiceSessionSwap(stale, 4)
+
+	if installed {
+		t.Fatal("installed = true, want false for a stale generation")
+	}
+	if old != nil {
+		t.Fatalf("old = %v, want nil when the dial is rejected", old)
+	}
+	if got := stale.closedCount(); got != 1 {
+		t.Fatalf("stale.closedCount() = %d, want 1 -- a rejected dial must be closed, not leaked", got)
+	}
+	if got := a.voiceSession(); got != live {
+		t.Fatal("the live session was replaced by a stale dial")
+	}
+}
+
+// TestVoiceSessionSwapInstallsOnTheCurrentGeneration is the happy-path
+// counterpart: a dial whose captured generation still matches installs
+// normally, is not closed, and reports the session it replaced.
+func TestVoiceSessionSwapInstallsOnTheCurrentGeneration(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	prior := &fakeVoiceSession{}
+	a.voice.mu.Lock()
+	a.voice.sess = prior
+	a.voice.gen = 5
+	a.voice.mu.Unlock()
+
+	fresh := &fakeVoiceSession{}
+	old, installed := a.voiceSessionSwap(fresh, 5)
+
+	if !installed {
+		t.Fatal("installed = false, want true for the current generation")
+	}
+	if old != voiceSessionAPI(prior) {
+		t.Fatalf("old = %v, want the previously-live session", old)
+	}
+	if got := fresh.closedCount(); got != 0 {
+		t.Fatalf("fresh.closedCount() = %d, want 0 -- an installed session must not be closed", got)
+	}
+	if got := a.voiceSession(); got != fresh {
+		t.Fatal("the current-generation session was not installed")
+	}
+}
+
+// TestStopVoiceSessionInvalidatesAnInFlightDial is the integration-shaped
+// version of the same race: it drives the exact sequence startVoiceSession
+// / stopVoiceSession / setVoiceSession would run across a real redirect,
+// through the same generation seam, and confirms a dial that "completes"
+// after a teardown never reinstalls a session.
+func TestStopVoiceSessionInvalidatesAnInFlightDial(t *testing.T) {
+	a, _, _ := newTestApp(t)
+
+	live := &fakeVoiceSession{}
+	a.voice.mu.Lock()
+	a.voice.sess = live
+	a.voice.mu.Unlock()
+
+	// A redirect captures the generation before its dial begins.
+	gen := a.nextVoiceGeneration()
+
+	// The user disconnects (or the app quits) while that dial is still in
+	// flight -- teardown bumps the generation and clears the live session.
+	a.stopVoiceSession()
+	if got := a.voiceSession(); got != nil {
+		t.Fatal("stopVoiceSession did not clear the live session")
+	}
+
+	// The stale dial "completes" and tries to install.
+	redialed := &fakeVoiceSession{}
+	old, installed := a.voiceSessionSwap(redialed, gen)
+
+	if installed {
+		t.Fatal("a dial captured before a teardown must not install afterward")
+	}
+	if old != nil {
+		t.Fatalf("old = %v, want nil", old)
+	}
+	if got := redialed.closedCount(); got != 1 {
+		t.Fatalf("redialed.closedCount() = %d, want 1", got)
+	}
+	if got := a.voiceSession(); got != nil {
+		t.Fatal("disconnected state must not have gained a live session")
+	}
+}
+
+// --- Server-settings-driven RX refresh (task-11b Priority 2) --------------
+
+// TestSettingsChangeRefreshesRXContext proves state.Store's new
+// OnSettingsChanged observer is wired to refreshRXContext: a server-side
+// change to the global/test frequency lists reaches a live session's RX
+// filter immediately, without needing a radios change or a reconnect
+// first (the gap Priority 2 of task-11b's review flagged).
+func TestSettingsChangeRefreshesRXContext(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	sess := wireTestVoice(t, a, []config.Radio{
+		{ID: 1, Name: "Radio 1", FrequencyKHz: 30000, Enabled: true},
+	})
+	before := sess.rxCallCount()
+
+	a.st.SetSettings(&srspb.ServerSettings{
+		GlobalFrequencies: []float32{251.000},
+		TestFrequencies:   []float32{100.500},
+	})
+
+	if got := sess.rxCallCount(); got != before+1 {
+		t.Fatalf("SetRXContext called %d times after SetSettings, want %d", got, before+1)
+	}
+	last := sess.lastRX()
+	if len(last.global) != 1 || last.global[0] != voice.KHz(251000) {
+		t.Fatalf("global freqs = %v, want [251000]", last.global)
+	}
+	if len(last.test) != 1 || last.test[0] != voice.KHz(100500) {
+		t.Fatalf("test freqs = %v, want [100500]", last.test)
 	}
 }
 

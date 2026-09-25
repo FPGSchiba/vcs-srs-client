@@ -150,6 +150,20 @@ type voiceState struct {
 	// drops the nil entries.
 	tx map[string]*voice.TXTarget
 
+	// gen is the voice-session epoch. It is bumped on every teardown
+	// (voiceSessionSwap's nil branch) and at the start of every new-session
+	// attempt, BEFORE the dial (nextVoiceGeneration, called from
+	// startVoiceSession). A dial that is still in flight when a later
+	// teardown or a later, overlapping start has already run captured a
+	// generation that no longer matches by the time it completes --
+	// voiceSessionSwap compares against the live value immediately before
+	// installing and rejects (closes, does not install) a stale dial. This
+	// is what closes the race where handleVoiceRedirect dials a
+	// replacement session, unlocked, while a concurrent Disconnect or
+	// ServiceShutdown tears the live one down: see Priority 1 of
+	// task-11b's review.
+	gen uint64
+
 	bridge *sessionBridge
 }
 
@@ -162,11 +176,13 @@ func (a *App) initVoice() {
 	// OnRadiosChanged already exists for the per-radio keybind refresh
 	// (app.go); it fires on SetRadios/SetSelf/ClearSelf/RemoveClient, which
 	// covers a CLIENT_RADIO_UPDATE echo of our own UpdateRadioInfo push at
-	// connect. OnVoiceCredentialsChanged is this task's addition (see
-	// internal/state/store.go) -- the redirect path this file's
-	// handleVoiceRedirect implements.
+	// connect. OnVoiceCredentialsChanged is the redirect path this file's
+	// handleVoiceRedirect implements. OnSettingsChanged (task-11b Priority
+	// 2) covers a server-side change to the global/test frequency lists
+	// mid-session -- see refreshRXContext's doc.
 	a.st.OnRadiosChanged(a.refreshRXContext)
 	a.st.OnVoiceCredentialsChanged(a.handleVoiceRedirect)
+	a.st.OnSettingsChanged(a.refreshRXContext)
 }
 
 // VoiceBridge returns the Sink/Source bridge main.go must register with the
@@ -185,28 +201,46 @@ func (a *App) voiceSession() voiceSessionAPI {
 // disconnect), keeping App.voice.sess and the bridge's atomic pointer in
 // lock step, and closes whatever session was live before.
 //
+// gen is the generation nextVoiceGeneration returned to the caller BEFORE
+// it dialed sess (meaningless, and ignored, when sess is nil -- a teardown
+// always proceeds). voiceSessionSwap compares gen against the live
+// generation immediately before installing; if a teardown or a newer,
+// overlapping start already ran while this dial was in flight, sess is
+// closed instead of installed and old/installed report that nothing
+// changed. This is the fix for Priority 1 of task-11b's review: without
+// it, a redirect's dial completing after a concurrent Disconnect or
+// ServiceShutdown would install a live session after teardown, silently
+// re-arming transmit.
+//
 // sess == nil is handled explicitly rather than falling into the ordinary
 // interface assignment: `a.voice.sess = sess` with a nil *voice.Session
 // would store a NON-NIL interface wrapping a nil pointer -- the identical
 // trap Manager.SetSource's doc warns about, one layer up. Every caller in
 // this file that needs "no session" MUST go through here rather than
 // assigning a.voice.sess directly.
-func (a *App) setVoiceSession(sess *voice.Session) {
-	a.voice.mu.Lock()
-	old := a.voice.sess
-	if sess == nil {
-		a.voice.sess = nil
-	} else {
-		a.voice.sess = sess
+func (a *App) setVoiceSession(sess *voice.Session, gen uint64) {
+	// api is left as the nil voiceSessionAPI interface value when sess is
+	// nil -- assigning sess directly (`api = sess`) unconditionally would
+	// reopen the exact typed-nil trap this function's doc warns about, one
+	// layer up in voiceSessionSwap/a.voice.sess.
+	var api voiceSessionAPI
+	if sess != nil {
+		api = sess
 	}
-	a.voice.mu.Unlock()
+
+	old, installed := a.voiceSessionSwap(api, gen)
+	if !installed {
+		// Stale generation: voiceSessionSwap already closed sess. It must
+		// never reach the bridge or a.voice.sess.
+		return
+	}
 
 	// bridge.sess is a POINTER (atomic.Pointer[rtSession]), not an
 	// interface value, so Store(nil) here is a genuine nil pointer -- never
 	// a typed-nil boxed inside a non-nil interface. The one place a value
 	// gets boxed into the rtSession interface is the `var rt rtSession =
 	// sess` line below, and it only ever runs when sess is already known
-	// non-nil (the else branch), so that box is never a typed nil either.
+	// non-nil, so that box is never a typed nil either.
 	if sess == nil {
 		a.voice.bridge.sess.Store(nil)
 	} else {
@@ -219,6 +253,48 @@ func (a *App) setVoiceSession(sess *voice.Session) {
 			oc.Close()
 		}
 	}
+}
+
+// voiceSessionSwap is setVoiceSession's generation-gated core. It works
+// against voiceSessionAPI, not *voice.Session, specifically so a test can
+// drive the exact install/reject decision with a fake -- no real dial (this
+// sandbox blocks bind(2)) and no realtime bridge involved.
+//
+// sess == nil is a teardown: it always proceeds, unconditionally bumping
+// the generation so it -- not gen, which is meaningless here -- invalidates
+// any dial already in flight. sess != nil is a new-session install: it
+// proceeds only if gen still matches the live generation; otherwise sess is
+// closed (outside a.voice.mu, since Close can block on network I/O) and
+// nothing is installed.
+//
+// Returns the session that was live immediately before a successful
+// install (nil if none, or if sess was rejected) for the caller to Close
+// AFTER releasing a.voice.mu, and whether sess was installed.
+func (a *App) voiceSessionSwap(sess voiceSessionAPI, gen uint64) (old voiceSessionAPI, installed bool) {
+	a.voice.mu.Lock()
+	if sess != nil && gen != a.voice.gen {
+		a.voice.mu.Unlock()
+		sess.Close()
+		return nil, false
+	}
+	if sess == nil {
+		a.voice.gen++
+	}
+	old = a.voice.sess
+	a.voice.sess = sess
+	a.voice.mu.Unlock()
+	return old, true
+}
+
+// nextVoiceGeneration bumps and returns the voice-session epoch. Called by
+// startVoiceSession BEFORE it dials, so the returned value can be handed to
+// setVoiceSession/voiceSessionSwap afterward and compared against whatever
+// the live generation has become by the time the dial completes.
+func (a *App) nextVoiceGeneration() uint64 {
+	a.voice.mu.Lock()
+	defer a.voice.mu.Unlock()
+	a.voice.gen++
+	return a.voice.gen
 }
 
 // radioActionID parses "radio.<n>.<suffix>" and returns n. Shared by the
@@ -418,6 +494,13 @@ func (a *App) voiceDialOptions() voice.Options {
 // (a reconnect, e.g.) does not sit fail-closed (SetRXContext's default)
 // until the next unrelated radios-changed notification.
 //
+// The generation is captured (nextVoiceGeneration) BEFORE the dial, which
+// is network I/O outside any lock: if a concurrent Disconnect or
+// ServiceShutdown (or another, overlapping startVoiceSession -- e.g. two
+// redirects racing) runs while this dial is in flight, setVoiceSession
+// rejects the now-stale result instead of installing a session behind a
+// teardown's back. See voiceSessionSwap.
+//
 // A dial failure is logged and swallowed, exactly like every other optional
 // subsystem in this app (audio, joystick): the control connection must stay
 // usable with no voice at all, the same discipline SetAudioBackend's
@@ -427,19 +510,22 @@ func (a *App) startVoiceSession() {
 	if !ok {
 		return
 	}
+	gen := a.nextVoiceGeneration()
 	sess, err := voice.Dial(src, self, secret, a.voiceDialOptions())
 	if err != nil {
 		a.logger.Warn("voice: dial failed; voice is unavailable for this session", "err", err)
 		return
 	}
-	a.setVoiceSession(sess)
+	a.setVoiceSession(sess, gen)
 	a.refreshRXContext()
 }
 
 // stopVoiceSession closes the live session (if any) and clears it, via
-// setVoiceSession(nil) -- see that method for why nil must be routed
-// through it rather than assigned directly.
-func (a *App) stopVoiceSession() { a.setVoiceSession(nil) }
+// setVoiceSession(nil, ...) -- see that method for why nil must be routed
+// through it rather than assigned directly. The generation argument is
+// ignored for a teardown (voiceSessionSwap's nil branch always proceeds and
+// bumps the generation itself), so 0 is passed.
+func (a *App) stopVoiceSession() { a.setVoiceSession(nil, 0) }
 
 // handleVoiceRedirect re-points the voice session at a fresh socket when a
 // VOICE_ADDRESS_UPDATE redirect changes the store's coalition/global
@@ -472,16 +558,10 @@ func (a *App) handleVoiceRedirect() {
 // no-op while disconnected.
 //
 // Registered as an OnRadiosChanged observer (fires on a CLIENT_RADIO_UPDATE
-// echo of our own UpdateRadioInfo push, among other radio-set mutations)
-// and called directly right after a session dials. Server-settings changes
-// (global/test frequency lists) have no equivalent in-Go notification
-// today -- state.Store has an observer for radios and now for voice
-// credentials (this task's addition) but not for SetSettings -- so a
-// server-side change to those lists only reaches a live session on its
-// NEXT radios-driven refresh or reconnect. Adding a third store observer
-// for that is a small, mechanical follow-up, out of this task's scope
-// (radios and voice-address redirects are what Task 11's brief names), and
-// is flagged here rather than silently assumed away.
+// echo of our own UpdateRadioInfo push, among other radio-set mutations),
+// an OnSettingsChanged observer (fires on SetSettings -- a server-side
+// change to the global/test frequency lists, task-11b Priority 2), and
+// called directly right after a session dials.
 func (a *App) refreshRXContext() {
 	sess := a.voiceSession()
 	if sess == nil {

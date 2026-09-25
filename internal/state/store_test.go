@@ -267,3 +267,45 @@ func TestStore_OnVoiceCredentialsChanged_ObserverCanReadTheStore(t *testing.T) {
 		t.Errorf("observer saw secret %q, want %q", seenSecret, strings.Repeat("C", 43))
 	}
 }
+
+// TestStore_OnSettingsChangedFiresOnSetSettings pins the observer contract a
+// live voice session's RX refresh depends on (task-11b Priority 2): a
+// server-side change to the global/test frequency lists must notify, the
+// same way SetRadios/SetVoiceCredentials already do for their own state.
+func TestStore_OnSettingsChangedFiresOnSetSettings(t *testing.T) {
+	s := state.New()
+	calls := 0
+	s.OnSettingsChanged(func() { calls++ })
+
+	s.SetSettings(&srspb.ServerSettings{GlobalFrequencies: []float32{251.000}})
+
+	if calls != 1 {
+		t.Errorf("SetSettings notified %d observers, want 1", calls)
+	}
+}
+
+// TestStore_OnSettingsChanged_ObserverCanReadTheStore mirrors
+// TestStore_ObserverCanReadTheStore for the settings observer: it must run
+// with the store lock released, since the whole point is that a live voice
+// session can call back into Settings() from inside it.
+func TestStore_OnSettingsChanged_ObserverCanReadTheStore(t *testing.T) {
+	s := state.New()
+	var seenGlobal []float32
+	s.OnSettingsChanged(func() {
+		seenGlobal = s.Settings().GetGlobalFrequencies()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		s.SetSettings(&srspb.ServerSettings{GlobalFrequencies: []float32{251.000}})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observer deadlocked against the store lock")
+	}
+	if len(seenGlobal) != 1 || seenGlobal[0] != 251.000 {
+		t.Errorf("observer saw global frequencies %v, want [251.000]", seenGlobal)
+	}
+}
