@@ -43,6 +43,15 @@ type Store struct {
 	// radioObservers are notified after any mutation that can change which
 	// radios the local client owns. See OnRadiosChanged.
 	radioObservers []func()
+
+	// voiceObservers are notified after SetVoiceCredentials or
+	// SetVoiceAddresses changes the live voice-plane secret/addresses. This
+	// is what lets a live voice session learn about a VOICE_ADDRESS_UPDATE
+	// redirect and re-point itself -- voice.Session has no socket of its
+	// own to poll for that, and there is otherwise no in-Go subscriber
+	// downstream of stream.go's route (only the Wails event reaches the
+	// frontend). Mirrors radioObservers/OnRadiosChanged exactly.
+	voiceObservers []func()
 }
 
 // OnRadiosChanged registers fn to run after any mutation that can change the
@@ -66,6 +75,30 @@ func (s *Store) notifyRadiosChanged() {
 	s.mu.RLock()
 	observers := make([]func(), len(s.radioObservers))
 	copy(observers, s.radioObservers)
+	s.mu.RUnlock()
+	for _, fn := range observers {
+		fn()
+	}
+}
+
+// OnVoiceCredentialsChanged registers fn to run after any mutation that can
+// change the live voice-plane secret or addresses: SetVoiceCredentials and
+// SetVoiceAddresses. See radioObservers' doc for why this exists and
+// OnRadiosChanged for the identical contract (lock released, synchronous,
+// must not block).
+func (s *Store) OnVoiceCredentialsChanged(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.voiceObservers = append(s.voiceObservers, fn)
+}
+
+// notifyVoiceCredentialsChanged calls every observer. MUST be called with
+// the lock released: observers read the store back (VoiceCredentials, in
+// particular).
+func (s *Store) notifyVoiceCredentialsChanged() {
+	s.mu.RLock()
+	observers := make([]func(), len(s.voiceObservers))
+	copy(observers, s.voiceObservers)
 	s.mu.RUnlock()
 	for _, fn := range observers {
 		fn()
@@ -167,10 +200,11 @@ func (s *Store) Settings() *srspb.ServerSettings {
 // substitutes a default.
 func (s *Store) SetVoiceCredentials(secret, coalitionAddr, globalAddr string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.voiceSecret = secret
 	s.coalitionVoiceAddr = coalitionAddr
 	s.globalVoiceAddr = globalAddr
+	s.mu.Unlock()
+	s.notifyVoiceCredentialsChanged()
 }
 
 // VoiceCredentials returns the current voice secret and addresses. All three
@@ -188,9 +222,10 @@ func (s *Store) VoiceCredentials() (secret, coalitionAddr, globalAddr string) {
 // Empty strings are meaningful and stored as-is (see SetVoiceCredentials comment).
 func (s *Store) SetVoiceAddresses(coalitionAddr, globalAddr string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.coalitionVoiceAddr = coalitionAddr
 	s.globalVoiceAddr = globalAddr
+	s.mu.Unlock()
+	s.notifyVoiceCredentialsChanged()
 }
 
 // SetSelectedRadio records which radio id global.ptt currently targets.

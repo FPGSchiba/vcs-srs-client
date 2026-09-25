@@ -62,16 +62,25 @@ type App struct {
 	// implementation unless a test has already injected a fake through
 	// setPermissionChecker. Written once, before anything reads it.
 	perm hotkeys.PermissionChecker
+
+	// voice is the App-level voice wiring: the live session, the refcounted
+	// TX set and the Sink/Source bridge main.go registers with the audio
+	// Manager exactly once, at startup. See voice.go.
+	voice voiceState
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.
 func NewApp(logger *slog.Logger) *App {
-	return &App{logger: logger, st: state.New()}
+	a := &App{logger: logger, st: state.New()}
+	a.initVoice()
+	return a
 }
 
 // NewForTest builds an App with injected fakes (no Wails app).
 func NewForTest(st *state.Store, sess sessionAPI, windows windowsAPI) *App {
-	return &App{logger: slog.Default(), st: st, sess: sess, windows: windows}
+	a := &App{logger: slog.Default(), st: st, sess: sess, windows: windows}
+	a.initVoice()
+	return a
 }
 
 // Store exposes the state store for wiring in main.go.
@@ -192,6 +201,13 @@ func (a *App) ServiceShutdown() error {
 	if a.settings != nil && a.settings.hk != nil {
 		a.settings.hk.Close()
 	}
+	// Stop any live voice session before the control disconnect, mirroring
+	// App.Disconnect's ordering -- ServiceShutdown is a SEPARATE quit path
+	// (tray Quit, Cmd+Q, closing the window with minimize-to-tray off) and
+	// does not go through the Disconnect binding, so it needs its own call
+	// or a voice session outlives the control connection it was dialed
+	// against, sending BYE nowhere and leaking its goroutines past quit.
+	a.stopVoiceSession()
 	if a.sess != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownDisconnectTimeout)
 		defer cancel()

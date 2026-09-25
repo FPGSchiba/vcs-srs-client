@@ -33,6 +33,18 @@ type ClientStateSnapshot struct {
 	Self     *ClientInfoDTO           `json:"self"`
 }
 
+// VoiceStateDTO is the binding-facing snapshot App.VoiceState returns.
+type VoiceStateDTO struct {
+	// SelectedRadio is the radio id global.ptt currently targets, 0 if none.
+	SelectedRadio uint32 `json:"selected_radio"`
+	// Connected reports whether a voice session is currently live. It is
+	// deliberately narrower than the control connection: the control plane
+	// can be connected while voice failed to dial (no secret yet, a bad
+	// self GUID, or a dial error -- see App.startVoiceSession in voice.go),
+	// and the UI needs to be able to tell the two apart.
+	Connected bool `json:"connected"`
+}
+
 // BuildInfoDTO carries version identifiers for display in the UI.
 type BuildInfoDTO struct {
 	ClientVersion   string `json:"client_version"`

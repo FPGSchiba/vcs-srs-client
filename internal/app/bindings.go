@@ -16,13 +16,29 @@ func (a *App) GetBuildInfo() BuildInfoDTO {
 	}
 }
 
-// Connect runs the guest connect sequence.
+// Connect runs the guest connect sequence, then re-pushes the locally
+// persisted radio set (the server creates every client with zero radios)
+// and dials the voice session now that SyncClient has populated the
+// store's voice_secret. A voice dial failure never fails Connect: the
+// control plane is fully usable with no voice, exactly like a missing
+// audio backend elsewhere in this app.
 func (a *App) Connect(serverURL, name, password, unitID string) error {
-	return a.sess.Connect(context.Background(), serverURL, name, password, unitID)
+	ctx := context.Background()
+	if err := a.sess.Connect(ctx, serverURL, name, password, unitID); err != nil {
+		return err
+	}
+	a.pushPersistedRadios(ctx)
+	a.startVoiceSession()
+	return nil
 }
 
-// Disconnect tears down the session.
-func (a *App) Disconnect() error { return a.sess.Disconnect(context.Background()) }
+// Disconnect tears down the voice session, THEN the control session -- so a
+// voice session never outlives the control connection it was dialed
+// against.
+func (a *App) Disconnect() error {
+	a.stopVoiceSession()
+	return a.sess.Disconnect(context.Background())
+}
 
 // Reconnect re-establishes the control session.
 func (a *App) Reconnect() error { return a.sess.Reconnect(context.Background()) }

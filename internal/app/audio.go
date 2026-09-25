@@ -206,10 +206,23 @@ func (a *App) audioManager() *audio.Manager {
 // these is ever reached. They add NO parallel dispatch path: they just give
 // three already-existing action IDs their first real consumer.
 //
-// Every case is a no-op when no audio backend is wired (m == nil), so every
-// pre-existing test that builds an App without SetAudioBackend keeps
+// radio.<n>.select is handled BEFORE the m == nil guard below: selecting a
+// radio only changes which radio global.ptt will target on its NEXT press
+// (state.Store.SetSelectedRadio), which has nothing to do with whether an
+// audio backend is wired. Gating it on m would silently strand selection at
+// whatever it last was on any machine with no sound card -- the same class
+// of "audio-only" bug the rest of this function's m == nil guard exists to
+// AVOID for the PTT/mute actions, which genuinely do need the manager.
+//
+// Every other case is a no-op when no audio backend is wired (m == nil), so
+// every pre-existing test that builds an App without SetAudioBackend keeps
 // passing unchanged.
 func (a *App) dispatchAudioPressed(actionID string) {
+	if id, ok := radioSelectID(actionID); ok {
+		a.st.SetSelectedRadio(id)
+		return
+	}
+
 	sb := a.settings
 	sb.mu.Lock()
 	m := sb.audio
@@ -220,6 +233,14 @@ func (a *App) dispatchAudioPressed(actionID string) {
 	}
 	switch {
 	case actionID == "global.ptt" || isRadioPTTAction(actionID):
+		// txPress resolves actionID (global.ptt against the SELECTED radio,
+		// radio.<n>.ptt against radio n) and ADDS it to the refcounted
+		// active-TX set -- see voice.go's txPress doc for why a press can
+		// never be the transition that fails to open the gate.
+		targets := a.txPress(actionID)
+		if sess := a.voiceSession(); sess != nil {
+			sess.SetTXFrequencies(targets)
+		}
 		m.SetPTT(true)
 	case actionID == "global.push_to_mute":
 		// Emit only on an actual transition -- see push_to_mute's Released
@@ -251,7 +272,22 @@ func (a *App) dispatchAudioReleased(actionID string) {
 	}
 	switch {
 	case actionID == "global.ptt" || isRadioPTTAction(actionID):
-		m.SetPTT(false)
+		// txRelease removes actionID from the active-TX set and reports
+		// whether ANY OTHER action is still held -- the exact Manager.SetPTT
+		// gate condition, independent of whether either action ever
+		// resolved to a real frequency (TestGateStaysOpenWhileAnyTargetIsHeld).
+		// Only a fully-emptied set ends the transmission outright; a set
+		// that merely shrank keeps transmitting on what remains
+		// (TestReleasingOneKeepsTheOther).
+		targets, held := a.txRelease(actionID)
+		if sess := a.voiceSession(); sess != nil {
+			if held {
+				sess.SetTXFrequencies(targets)
+			} else {
+				sess.EndTransmission()
+			}
+		}
+		m.SetPTT(held)
 	case actionID == "global.push_to_mute":
 		// Guarded the same way as the press half: emit the resulting state
 		// only when it actually changes, rather than on every release edge

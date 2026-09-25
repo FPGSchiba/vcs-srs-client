@@ -210,3 +210,60 @@ func TestStore_ObserverCanReadTheStore(t *testing.T) {
 		t.Errorf("observer saw %d radios, want 1", seen)
 	}
 }
+
+// TestStore_OnVoiceCredentialsChangedFiresForBothMutators pins the observer
+// contract the voice session's redirect handling depends on: a
+// VOICE_ADDRESS_UPDATE reaches the store through either SetVoiceCredentials
+// (non-blank secret) or SetVoiceAddresses (blank secret, see stream.go's
+// route case), and a live session must learn about both so it can re-point
+// itself at the fresh address.
+func TestStore_OnVoiceCredentialsChangedFiresForBothMutators(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*state.Store)
+	}{
+		{"SetVoiceCredentials", func(s *state.Store) {
+			s.SetVoiceCredentials(strings.Repeat("A", 43), "10.0.0.9:5002", "10.0.0.1:5002")
+		}},
+		{"SetVoiceAddresses", func(s *state.Store) {
+			s.SetVoiceAddresses("10.0.0.9:5002", "10.0.0.1:5002")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := state.New()
+			calls := 0
+			s.OnVoiceCredentialsChanged(func() { calls++ })
+			tt.mutate(s)
+			if calls != 1 {
+				t.Errorf("%s notified %d observers, want 1", tt.name, calls)
+			}
+		})
+	}
+}
+
+// TestStore_OnVoiceCredentialsChanged_ObserverCanReadTheStore mirrors
+// TestStore_ObserverCanReadTheStore for the voice-credentials observer: it
+// must run with the store lock released, since the whole point is that a
+// live voice session can call back into VoiceCredentials() from inside it.
+func TestStore_OnVoiceCredentialsChanged_ObserverCanReadTheStore(t *testing.T) {
+	s := state.New()
+	var seenSecret string
+	s.OnVoiceCredentialsChanged(func() {
+		seenSecret, _, _ = s.VoiceCredentials()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		s.SetVoiceCredentials(strings.Repeat("C", 43), "10.0.0.9:5002", "")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observer deadlocked against the store lock")
+	}
+	if seenSecret != strings.Repeat("C", 43) {
+		t.Errorf("observer saw secret %q, want %q", seenSecret, strings.Repeat("C", 43))
+	}
+}

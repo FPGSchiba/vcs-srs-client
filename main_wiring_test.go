@@ -207,3 +207,23 @@ func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
 		t.Fatalf("`defer backend.Close()` (offset %d) must be registered BEFORE `defer am.Stop()` (offset %d) so it runs after it; see Stop()'s doc on bounded joins", closeIdx, stopIdx)
 	}
 }
+
+// TestVoiceBridgeIsWiredAsBothSinkAndSource guards Task 11's own version of
+// the TestJoystickBackendIsWired failure mode, made worse: registering ONLY
+// AddSink wires transmit, and every test in the repo (including Task 9's own
+// RX suite, which exercises internal/voice directly rather than through the
+// Manager) stays green while received audio is silently discarded. There is
+// no failing test anywhere else that would catch a missing SetSource call --
+// this grep is it.
+func TestVoiceBridgeIsWiredAsBothSinkAndSource(t *testing.T) {
+	text := readMainGo(t)
+	for _, want := range []string{
+		"gui.VoiceBridge()",
+		"am.AddSink(",
+		"am.SetSource(",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("main.go does not call %s -- the voice Sink/Source bridge would be inert", want)
+		}
+	}
+}
