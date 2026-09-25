@@ -121,7 +121,11 @@ Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Au
 
 ## Phase 5 — UDP voice
 
-**Status:** `[~]` in progress — **unblocked 2026-09-24**. Design doc approved; implementation planning next.
+**Status:** `[x]` complete 2026-09-25 — custom UDP voice client, Opus encode/decode, per-frequency multiplex, PTT-gated TX with a jitter buffer on RX, reconnect/binding-loss recovery, voice-secret auth, and the minimal radio bootstrap all landed on `feat/phase-5-udp-voice`.
+
+**Verification status:** the full automated suite is green (`go build`/`go vet`/`go test -race ./...` across all packages, the integration suite driving a **real headless server** — 7/7 §11.1 cases passing, not just mocked — plus frontend `vitest`/`tsc --noEmit`/production build). **The phase has NOT been verified on real hardware, and more starkly than any prior phase, nothing in it has ever been heard by a human** — no audio device, no real microphone, no speakers, and no C# peer have been exercised anywhere in this phase's verification. A concrete manual checklist covering every hardware-dependent item — real mouth-to-ear latency measured against a stated target, the D7 radio-effect TX→RX move heard against a real listener, whether a quiet room sounds right given the server's sub-5-byte silent-frame drop, `maxCatchUpFrames = 3` against a real 10 ms tick budget, recovery from a genuine network change (Wi-Fi↔Ethernet, VPN toggle) within ~15 s, Star-Citizen coexistence with live two-way voice, PTT from keyboard and joystick including the Phase 3.5 refcount now carrying real audio, radio tuning surviving a restart, a 3+ participant multi-client session, and the test-frequency loopback as the cheapest single-person self-check — is written up and waiting for a human to run: [`2026-09-24-phase-5-manual-verification.md`](./superpowers/plans/2026-09-24-phase-5-manual-verification.md). Treat Phase 5 as code-complete, not field-verified, until that checklist has been executed.
+
+**Cross-client interop with the C# peer is BLOCKED, not merely untested.** `VNGD-SimpleRadioStandalone` PR #253's `CreateHelloPacket` sends no voice secret, so against the current server every HELLO from it is rejected and it never receives audio — there is no partial interop to observe. This unblocks only once that branch adds the secret to its HELLO, matching what this client already sends.
 
 **Design doc:** [`2026-09-24-vcs-client-phase-5-udp-voice-design.md`](./superpowers/specs/2026-09-24-vcs-client-phase-5-udp-voice-design.md)
 
@@ -141,6 +145,15 @@ Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Au
 **Blocking deps:** none remaining.
 
 **Carried risk:** the C# peer's `CreateHelloPacket` sends no voice secret, so PR #253 as it stands cannot complete a handshake against the current server. Cross-client interop testing is blocked on that branch, not on this one.
+
+### Four issues found during Phase 5 — outside this phase, awaiting the user's decision
+
+Found during implementation and review; deliberately **not fixed** as part of Phase 5, since each is either pre-existing, cross-repo, or a CI/build-config change requiring explicit approval per `CLAUDE.md`.
+
+1. **Windows release builds ship with no audio at all.** `build/windows/Taskfile.yml` defaults `CGO_ENABLED=0`, which selects the stub malgo backend, the no-op denoiser, and the stub Opus codec — on the only platform Star Citizen runs on. Pre-existing since Phase 4; Phase 5 changes the severity from "a quality feature is missing" to "the product cannot do its job."
+2. **`.github/workflows/release.yml` never runs `buf generate`**, so a release build cannot compile against the gitignored `srspb/`. Latent — no tag has ever been pushed, so the workflow has never run.
+3. **A cross-repo version landmine.** `vngd-srs-server/srs/utils.go:13` is `return version == "0.1.0"` — a hardcoded string equality, not a semver range. The client sends `version.Client`, currently exactly `"0.1.0"`. **Bumping the client version breaks every login**, and nothing in either repo signals that coupling.
+4. **The Windows CI leg has never run on a real runner**, and `protoc-gen-go-grpc`'s version pin has no automatic drift signal.
 
 ---
 
