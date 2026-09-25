@@ -35,6 +35,7 @@ export function RadioCard({ radio, allRadios, muted }: Props) {
   const [name, setName] = useState(radio.name);
   const selectedRadioId = useRadios((s) => s.selectedRadioId);
   const heldPTT = useRadios((s) => s.heldPTT);
+  const globalPttTargetId = useRadios((s) => s.globalPttTargetId);
 
   // Re-sync local draft when the upstream radio name changes (e.g. server echo).
   useEffect(() => setName(radio.name), [radio.name]);
@@ -50,14 +51,41 @@ export function RadioCard({ radio, allRadios, muted }: Props) {
   }
 
   const selected = selectedRadioId === radio.id;
+  // global.ptt's contribution uses the FROZEN press-time target
+  // (globalPttTargetId), not the live `selected` above -- see the
+  // globalPttTargetId doc comment in the radios store. Using `selected`
+  // here would let re-selecting a different radio mid-transmission
+  // retarget the indicator even though the backend keeps transmitting on
+  // whatever was selected when the key went down.
   const transmitting =
-    heldPTT.has(`radio.${radio.id}.ptt`) || (selected && heldPTT.has("global.ptt"));
+    heldPTT.has(`radio.${radio.id}.ptt`) ||
+    (heldPTT.has("global.ptt") && globalPttTargetId === radio.id);
 
   return (
     <div
       className="radio"
       onClick={select}
+      // `aria-selected` is only meaningful on a handful of roles (option,
+      // row, tab, treeitem, gridcell, ...) -- plain <div>s ignore it
+      // entirely, so it was orphaned. `option` fits (this is one card in a
+      // set of radios the user picks from; CommsApp's list wrapper carries
+      // the matching `role="listbox"`), and pairing it with a real
+      // tabIndex + Enter/Space handler makes selection keyboard-reachable
+      // too, not mouse-only.
+      role="option"
       aria-selected={selected}
+      tabIndex={0}
+      onKeyDown={(e) => {
+        // Only handle keys targeting the card itself -- the name input,
+        // toggles, and LCD are independently focusable/keyboard-operable
+        // children, and a bubbled Space from typing in the name input must
+        // not be hijacked into a card-select.
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          select();
+        }
+      }}
       style={{
         border: `1px solid ${selected ? "var(--ac-primary)" : "var(--bd-2)"}`,
         cursor: "pointer",
@@ -115,12 +143,21 @@ export function RadioCard({ radio, allRadios, muted }: Props) {
       </div>
 
       <div className="row acenter gap-5" style={{ justifyContent: "space-between" }}>
+        {/* Disabled on purpose: this is a live transmit INDICATOR, not a
+            click-to-talk control -- wiring a real click handler needs new
+            backend binding surface that doesn't exist yet. A native
+            disabled <button> never dispatches `click` at all (so no
+            stopPropagation is needed to keep the card from being
+            (re)selected), while still letting React restyle/re-text it via
+            `className`/children as transmit state changes, and it gets the
+            browser's native "this control does nothing" affordance instead
+            of silently swallowing input. */}
         <button
           className={`ptt ${transmitting ? "keyed" : ""}`.trim()}
           type="button"
           style={{ flex: 1, maxWidth: 160, height: 48 }}
-          title="Push to Talk"
-          onClick={(e) => e.stopPropagation()}
+          title="Push-to-talk is driven by your configured keybind, not this button"
+          disabled
         >
           <Icon name="mic" size={14} /> {transmitting ? "TRANSMIT" : "PUSH-TO-TALK"}
         </button>

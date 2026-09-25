@@ -25,6 +25,14 @@ function clampKhz(khz: number): number {
   return Math.min(MAX_KHZ, Math.max(MIN_KHZ, khz));
 }
 
+// NOTE: mhzToKhz(khzToMhz(k)) === k fails for ~192,000 of the 16,777,216
+// possible k (starting at k = 16,384,001): float32 runs out of mantissa to
+// separate adjacent 1 kHz steps once khzToMhz's result gets that large, so
+// the round trip through the wheel handler's `mhzToKhz(value)` can land on
+// a neighboring kHz step instead of the exact original. Deliberately not
+// restructured to avoid this -- real radio bands top out around 1 GHz
+// (1,000,000 kHz), nowhere near where this starts, and the MAX_KHZ ceiling
+// below bounds the worst case anyway.
 function mhzToKhz(mhz: number): number {
   return Math.round(mhz * 1000);
 }
@@ -87,6 +95,18 @@ export function LcdFreq({ value, className, onChange }: LcdFreqProps) {
     }
   }
 
+  // Discards (never commits) on blur. Blur isn't a purposeful commit
+  // gesture the way Enter is -- clicking away or tabbing out mid-edit is
+  // as likely to be "I changed my mind" as "I'm done", and committing
+  // would risk silently locking the radio to a wildly wrong frequency from
+  // a partially-typed draft (e.g. a single stray digit). Discarding also
+  // clears the draft so it stops shadowing `value`: leaving a draft open
+  // on blur means the LCD keeps showing stale typed digits forever and
+  // ignores a live server echo of `value` for that radio.
+  function handleBlur() {
+    setDraft(null);
+  }
+
   function handleWheel(e: WheelEvent<HTMLDivElement>) {
     if (!onChange) return;
     e.preventDefault();
@@ -103,6 +123,7 @@ export function LcdFreq({ value, className, onChange }: LcdFreqProps) {
       role={onChange ? "spinbutton" : undefined}
       aria-label={onChange ? "frequency" : undefined}
       onKeyDown={handleKeyDown}
+      onBlur={handleBlur}
       onWheel={handleWheel}
     >
       <span className="lcd-digits">

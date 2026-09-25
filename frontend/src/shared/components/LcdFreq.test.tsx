@@ -13,12 +13,15 @@ describe("LcdFreq", () => {
     render(<LcdFreq value={118.5} onChange={onChange} />);
     const lcd = screen.getByRole("spinbutton");
 
-    // Types "119000" (kHz) then commits.
-    for (const key of "119000") fireEvent.keyDown(lcd, { key });
+    // Types "119001" (kHz) then commits. 119001/1000 = 119.001, which is
+    // NOT exactly representable in float32 (unlike e.g. 119.0 or 119.25),
+    // so this actually exercises Math.fround: an implementation that
+    // dropped it would compute a different (float64) value here and fail.
+    for (const key of "119001") fireEvent.keyDown(lcd, { key });
     fireEvent.keyDown(lcd, { key: "Enter" });
 
     expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith(Math.fround(119000 / 1000));
+    expect(onChange).toHaveBeenCalledWith(Math.fround(119001 / 1000));
   });
 
   it("reverts on Escape", () => {
@@ -65,6 +68,36 @@ describe("LcdFreq", () => {
     fireEvent.keyDown(lcd, { key: "Enter" });
 
     expect(onChange).toHaveBeenCalledWith(Math.fround(16_777_215 / 1000));
+  });
+
+  it("discards (does not commit) a stuck draft on blur", () => {
+    const onChange = vi.fn();
+    render(<LcdFreq value={118.5} onChange={onChange} />);
+    const lcd = screen.getByRole("spinbutton");
+
+    // Types digits but never presses Enter/Escape -- e.g. the user clicked
+    // away or tabbed out.
+    for (const key of "999") fireEvent.keyDown(lcd, { key });
+    fireEvent.blur(lcd);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(lcd.textContent).toBe("118.500");
+  });
+
+  it("re-syncs to a new value prop after blur clears a stuck draft (e.g. a server echo)", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<LcdFreq value={118.5} onChange={onChange} />);
+    const lcd = screen.getByRole("spinbutton");
+
+    for (const key of "999") fireEvent.keyDown(lcd, { key });
+    expect(lcd.textContent).toBe("999");
+
+    fireEvent.blur(lcd);
+    // Someone else changed this radio's frequency server-side while the
+    // draft was stuck; without blur handling this update would be
+    // silently ignored because the draft kept shadowing `value`.
+    rerender(<LcdFreq value={121.0} onChange={onChange} />);
+    expect(lcd.textContent).toBe("121.000");
   });
 
   it("stays read-only when no onChange is given", () => {

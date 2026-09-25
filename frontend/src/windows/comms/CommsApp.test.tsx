@@ -79,7 +79,7 @@ describe("CommsApp settings sync", () => {
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
       joystick: { supported: false, error: "", devices: [] },
     });
-    useRadios.setState({ radios: {}, selectedRadioId: 0, heldPTT: new Set() });
+    useRadios.setState({ radios: {}, selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 });
     useSession.setState({ selfGuid: "" });
   });
 
@@ -138,7 +138,7 @@ describe("CommsApp radio selection", () => {
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
       joystick: { supported: false, error: "", devices: [] },
     });
-    useRadios.setState({ radios: {}, selectedRadioId: 0, heldPTT: new Set() });
+    useRadios.setState({ radios: {}, selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 });
     useSession.setState({ selfGuid: "" });
   });
 

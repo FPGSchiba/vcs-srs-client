@@ -120,7 +120,7 @@ export function CommsApp() {
             No radios — connect first
           </div>
         ) : (
-          <div className="col gap-4" style={{ padding: 12 }}>
+          <div className="col gap-4" role="listbox" aria-label="Radios" style={{ padding: 12 }}>
             {entry.radios.map((r) => (
               <RadioCard key={r.id} radio={r} allRadios={entry.radios} muted={entry.muted} />
             ))}

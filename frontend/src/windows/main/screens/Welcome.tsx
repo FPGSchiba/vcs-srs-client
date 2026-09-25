@@ -18,7 +18,11 @@ const UNIT_ID_PATTERN = /^[A-Z0-9]{2,4}$/;
 
 function unitIdError(unitId: string): string | null {
   if (!UNIT_ID_PATTERN.test(unitId)) {
-    return "FFID must be 2–4 characters, letters A–Z and digits 0–9 only (e.g. VG12).";
+    // The field auto-uppercases as the user types (see the FFID input's
+    // onChange below), so a rejection here is never a case mismatch --
+    // don't mention "A-Z" in a way that reads as "any letters" to someone
+    // who typed lowercase. What's left to explain is length/characters.
+    return "FFID must be 2–4 letters and digits only (e.g. VG12).";
   }
   return null;
 }
@@ -183,7 +187,11 @@ export function Welcome() {
                       id="ffid"
                       className="input mono"
                       value={ffid}
-                      onChange={(e) => setFfid(e.target.value)}
+                      // Auto-uppercase as typed -- matches how FFIDs are
+                      // normally presented and removes the lowercase
+                      // rejection failure mode entirely, instead of making
+                      // the user decode an ambiguous error message.
+                      onChange={(e) => setFfid(e.target.value.toUpperCase())}
                     />
                   </Field>
                   <Field label="Player Name" htmlFor="player" style={{ flex: 1 }}>
