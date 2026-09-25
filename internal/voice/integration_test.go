@@ -375,6 +375,23 @@ func TestIntegrationVoiceFromUnboundAddressDropped(t *testing.T) {
 		return sa.State() == StateConnected && sb.State() == StateConnected
 	})
 	sb.SetRXContext([]KHz{freq}, nil, nil)
+	sa.SetTXFrequencies([]TXTarget{{Freq: freq}})
+
+	// Positive control: prove Alice's REAL, bound session actually reaches
+	// Bob before trusting the negative assertion below. Without this, the
+	// "0 datagrams" assertion would pass just as well if relay were broken
+	// outright for this fixture instance, since nothing would ever have
+	// been relayed either way -- see TestIntegrationByeDisconnects, which
+	// uses the identical shape ("cannot test that BYE stops it").
+	transmitUntil(t, sa, 10*time.Second, "Bob to decode Alice's real, bound relay -- cannot test that a spoofed address is rejected without this working first", func() bool {
+		return sb.RXStats().Decoded > 0
+	})
+	// Let Alice's transmit queue (up to txQueueDepth frames, ~160 ms of
+	// buffered audio -- see tx.go) fully drain before taking the baseline,
+	// so an in-flight legitimate datagram is never mistaken for the
+	// spoofed one landing.
+	time.Sleep(300 * time.Millisecond)
+	baseline := sb.RXStats().Received
 
 	// A SECOND, unrelated socket presenting Alice's already-bound identity.
 	// voice/server.go's isBoundAddr keys on (clientID, source address)
@@ -394,8 +411,8 @@ func TestIntegrationVoiceFromUnboundAddressDropped(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if got := sb.RXStats().Received; got != 0 {
-		t.Fatalf("Bob's rxLoop saw %d datagrams; the server must not have relayed a spoofed, unbound-address VOICE packet at all", got)
+	if got := sb.RXStats().Received - baseline; got != 0 {
+		t.Fatalf("Bob's rxLoop saw %d MORE datagrams after the spoof (relay from Alice's real session already proven working above); the server must not have relayed a spoofed, unbound-address VOICE packet at all", got)
 	}
 }
 
