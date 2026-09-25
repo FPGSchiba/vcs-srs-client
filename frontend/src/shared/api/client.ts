@@ -40,6 +40,10 @@ export interface BuildInfo {
   protocol_version: string;
   build: string;
 }
+export interface VoiceStateDTO {
+  selected_radio: number;
+  connected: boolean;
+}
 
 export const api = {
   getBuildInfo: (): Promise<BuildInfo> => App.GetBuildInfo() as Promise<BuildInfo>,
@@ -50,6 +54,8 @@ export const api = {
   getClientState: (): Promise<ClientStateSnapshot> =>
     App.GetClientState() as Promise<ClientStateSnapshot>,
   updateRadioInfo: (info: RadioInfoDTO) => App.UpdateRadioInfo(info),
+  selectRadio: (id: number): Promise<void> => App.SelectRadio(id) as Promise<void>,
+  voiceState: (): Promise<VoiceStateDTO> => App.VoiceState() as Promise<VoiceStateDTO>,
   openWindow: (id: string) => App.OpenWindow(id),
   closeWindow: (id: string) => App.CloseWindow(id),
   toggleWindow: (id: string) => App.ToggleWindow(id),

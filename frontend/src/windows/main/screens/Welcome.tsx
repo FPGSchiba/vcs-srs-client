@@ -10,6 +10,19 @@ import { useBuildInfo } from "../../../shared/hooks/useBuildInfo";
 
 type Stage = "welcome" | "manual";
 
+// Mirrors the server's UnitId validation exactly (vngd-srs-server): 2-4
+// uppercase letters/digits. The server rejects anything else, including an
+// empty string, with no useful explanation surfaced to the user -- this
+// catches it client-side instead, before a round trip to the server.
+const UNIT_ID_PATTERN = /^[A-Z0-9]{2,4}$/;
+
+function unitIdError(unitId: string): string | null {
+  if (!UNIT_ID_PATTERN.test(unitId)) {
+    return "FFID must be 2–4 characters, letters A–Z and digits 0–9 only (e.g. VG12).";
+  }
+  return null;
+}
+
 /**
  * Extracts a human-readable message from a binding error. Wails serializes a Go
  * error as a JSON envelope ({message, cause, kind}); we surface only `message`.
@@ -51,6 +64,11 @@ export function Welcome() {
 
   async function connect() {
     setError(null);
+    const idError = unitIdError(ffid);
+    if (idError) {
+      setError(idError);
+      return;
+    }
     try {
       setSessionServer(server);
       setPhase("connecting");

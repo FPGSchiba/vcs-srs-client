@@ -28,9 +28,10 @@ describe("Welcome (guest)", () => {
     fireEvent.change(screen.getByLabelText(/Server Address/i), { target: { value: "localhost:5002" } });
     fireEvent.change(screen.getByLabelText(/Server Password/i), { target: { value: "pw" } });
     fireEvent.change(screen.getByLabelText(/Player Name/i), { target: { value: "Spacer" } });
+    fireEvent.change(screen.getByLabelText(/FFID/i), { target: { value: "VG12" } });
     fireEvent.click(screen.getByText(/^CONNECT$/i));
     await waitFor(() =>
-      expect(api.connect).toHaveBeenCalledWith("localhost:5002", "Spacer", "pw", ""),
+      expect(api.connect).toHaveBeenCalledWith("localhost:5002", "Spacer", "pw", "VG12"),
     );
   });
 
@@ -38,7 +39,34 @@ describe("Welcome (guest)", () => {
     (api.connect as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("login rejected"));
     render(<Welcome />);
     fireEvent.click(screen.getByText(/JOIN AS GUEST/i));
+    fireEvent.change(screen.getByLabelText(/FFID/i), { target: { value: "VG12" } });
     fireEvent.click(screen.getByText(/^CONNECT$/i));
     expect(await screen.findByText(/login rejected/i)).toBeInTheDocument();
+  });
+
+  // The server validates UnitId against ^[A-Z0-9]{2,4}$ and rejects
+  // anything else, including an empty string -- a user who leaves the FFID
+  // field blank used to get a login failure with no useful explanation.
+  it("shows a clear validation error and does not call api.connect when FFID is blank", async () => {
+    render(<Welcome />);
+    fireEvent.click(screen.getByText(/JOIN AS GUEST/i));
+    fireEvent.change(screen.getByLabelText(/Server Address/i), { target: { value: "localhost:5002" } });
+    fireEvent.change(screen.getByLabelText(/Player Name/i), { target: { value: "Spacer" } });
+    fireEvent.click(screen.getByText(/^CONNECT$/i));
+
+    expect(await screen.findByText(/FFID must be/i)).toBeInTheDocument();
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("shows a clear validation error when FFID does not match the server's pattern", async () => {
+    render(<Welcome />);
+    fireEvent.click(screen.getByText(/JOIN AS GUEST/i));
+    fireEvent.change(screen.getByLabelText(/Server Address/i), { target: { value: "localhost:5002" } });
+    fireEvent.change(screen.getByLabelText(/Player Name/i), { target: { value: "Spacer" } });
+    fireEvent.change(screen.getByLabelText(/FFID/i), { target: { value: "way-too-long-and-lowercase" } });
+    fireEvent.click(screen.getByText(/^CONNECT$/i));
+
+    expect(await screen.findByText(/FFID must be/i)).toBeInTheDocument();
+    expect(api.connect).not.toHaveBeenCalled();
   });
 });
