@@ -285,6 +285,25 @@ should confirm the *expected* behavior, not surface them as new bugs:
   checklists before this one). Phase 5 additionally requires a second
   client and, for the fullest coverage, a C# peer that cannot currently
   authenticate at all.
+- **Enabling VOX does not transmit in Phase 5.** Settings presents VOX as a
+  transmit mode, and internal/audio's gate genuinely opens for it
+  (`gate.go`: `pttOpen || voxOpen`), so `dspLoop` calls `Sink.WriteFrame` on
+  a VOX-opened gate exactly as it does for PTT. But
+  `App.SetTXFrequencies` is only ever driven by the PTT press/release path
+  (`internal/app/audio.go`'s `dispatchAudioPressed`/`dispatchAudioReleased`)
+  -- VOX never calls it. With no PTT ever pressed, the voice session has no
+  TX targets at all and every VOX-opened frame is silently dropped as
+  `DroppedNoTarget`: VOX transmits nothing. Wiring VOX to actually key the
+  radio is unplanned scope for this phase and was deliberately not done
+  (see the wave-B fix-round notes for I3). The gate-open path that DOES run
+  today for VOX exists for local metering and monitoring only (VU levels,
+  mic passthrough), not for transmission -- do not read a moving VU meter
+  under VOX as evidence that anyone else can hear it, they cannot.
+  Wave B's I3 fix additionally closes a related, more dangerous bug (a
+  stale PTT target surviving indefinitely and letting a LATER VOX trigger
+  key an old frequency with no key held); that fix does not enable VOX
+  transmit, it only guarantees VOX's current no-op is a clean no-op rather
+  than an invisible one.
 
 ## Four issues found during this phase that are OUTSIDE its scope
 

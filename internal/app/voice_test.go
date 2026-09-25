@@ -3,13 +3,16 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
@@ -81,6 +84,25 @@ type fakeVoiceSession struct {
 	rxCalls    []rxCall
 	effectsSet []effectsCall
 	closed     int
+	state      voice.State
+}
+
+// State implements voiceSessionAPI (I2 fix). Zero value is voice.StateIdle,
+// i.e. NOT connected by default -- a test that cares about
+// VoiceState().Connected must call setState explicitly, the same honesty
+// the production State()-derived check now requires of a real session.
+func (f *fakeVoiceSession) State() voice.State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state
+}
+
+// setState overrides the state State() reports, for tests exercising
+// VoiceState().Connected or the voice:state event wiring.
+func (f *fakeVoiceSession) setState(st voice.State) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state = st
 }
 
 type rxCall struct{ accept, global, test []voice.KHz }
@@ -280,8 +302,11 @@ func TestReleasingOneKeepsTheOther(t *testing.T) {
 	a.Pressed("radio.7.ptt")
 	a.Released("radio.7.ptt")
 
-	if sess.endCallCount() != 0 {
-		t.Fatalf("EndTransmission called %d times, want 0 -- global.ptt is still held", sess.endCallCount())
+	// The generation bumps once, on the initial press that started the
+	// transmission (M1 fix) -- not on the second press joining it, and not
+	// on this release, which merely shrinks the held set.
+	if sess.endCallCount() != 1 {
+		t.Fatalf("EndTransmission called %d times, want 1 (only the initial press bumps)", sess.endCallCount())
 	}
 	got := sess.lastTX()
 	if len(got) != 1 || got[0].Freq != voice.KHz(251000) {
@@ -305,21 +330,34 @@ func TestGateStaysOpenWhileAnyTargetIsHeld(t *testing.T) {
 	a.st.SetSelectedRadio(3)
 
 	a.Pressed("global.ptt")
+	// The generation bumps once, right here, on the press that started the
+	// transmission (M1 fix) -- see TestPTTGenerationBumpsOnThePressEdge for
+	// the dedicated coverage.
+	if sess.endCallCount() != 1 {
+		t.Fatalf("EndTransmission called %d times after the first press, want 1", sess.endCallCount())
+	}
 	a.Pressed("radio.7.ptt")
+	// A second action joining an ALREADY-live transmission must not reset
+	// the accumulator out from under the first.
+	if sess.endCallCount() != 1 {
+		t.Fatalf("EndTransmission called %d times after a second concurrent press, want 1", sess.endCallCount())
+	}
 	a.Released("global.ptt")
 	if !m.PTT() {
 		t.Fatal("PTT gate closed after releasing only ONE of two held actions")
 	}
-	if sess.endCallCount() != 0 {
-		t.Fatalf("EndTransmission called %d times, want 0", sess.endCallCount())
+	if sess.endCallCount() != 1 {
+		t.Fatalf("EndTransmission called %d times, want 1", sess.endCallCount())
 	}
 
 	a.Released("radio.7.ptt")
 	if m.PTT() {
 		t.Fatal("PTT gate stayed open after releasing the LAST held action")
 	}
+	// Release never bumps the generation any more (M1 fix): only a later
+	// fresh press does.
 	if sess.endCallCount() != 1 {
-		t.Fatalf("EndTransmission called %d times, want 1", sess.endCallCount())
+		t.Fatalf("EndTransmission called %d times after full release, want 1 (release never bumps)", sess.endCallCount())
 	}
 }
 
@@ -341,13 +379,21 @@ func TestPTTWithNoSelectionStillOpensTheGateButRoutesNowhere(t *testing.T) {
 	if got := sess.lastTX(); len(got) != 0 {
 		t.Fatalf("targets = %+v, want empty (nothing selected)", got)
 	}
+	// Still a fresh-start press even though it resolved to nothing -- the
+	// TX set transitioned empty -> non-empty (a nil-valued slot still
+	// occupies one; see txPress's doc), so the generation bumps here (M1
+	// fix).
+	if sess.endCallCount() != 1 {
+		t.Fatalf("EndTransmission called %d times after the press, want 1", sess.endCallCount())
+	}
 
 	a.Released("global.ptt")
 	if m.PTT() {
 		t.Error("PTT gate stayed open after releasing the only held action")
 	}
+	// Release never bumps the generation any more (M1 fix).
 	if sess.endCallCount() != 1 {
-		t.Fatalf("EndTransmission called %d times, want 1", sess.endCallCount())
+		t.Fatalf("EndTransmission called %d times after release, want 1 (release never bumps)", sess.endCallCount())
 	}
 }
 
@@ -410,12 +456,21 @@ func TestVoiceStateReportsSelectionAndConnection(t *testing.T) {
 		t.Error("Connected = true with no session wired")
 	}
 
+	sess := &fakeVoiceSession{}
 	a.voice.mu.Lock()
-	a.voice.sess = &fakeVoiceSession{}
+	a.voice.sess = sess
 	a.voice.mu.Unlock()
 
+	// A dialed-but-not-yet-handshaked session must still report
+	// disconnected (I2 fix) -- Connected derives from State(), not from
+	// mere non-nil-ness.
+	if a.VoiceState().Connected {
+		t.Error("Connected = true for a session that has not reached StateConnected")
+	}
+
+	sess.setState(voice.StateConnected)
 	if !a.VoiceState().Connected {
-		t.Error("Connected = false with a session wired")
+		t.Error("Connected = false with a StateConnected session wired")
 	}
 }
 
@@ -617,8 +672,12 @@ func TestUpdateRadioInfo_WritesThroughLocalConfig(t *testing.T) {
 		t.Fatalf("resolveTXTarget after tune = %+v, want 130000 kHz", target)
 	}
 
-	// RX: refreshRXContext must produce the NEW accept list.
-	a.refreshRXContext()
+	// RX: refreshRXContext must produce the NEW accept list SYNCHRONOUSLY
+	// with the write-through (residual fix from wave A's review) -- no
+	// manual refreshRXContext call, no server echo, no fresh dial required.
+	if got := sess.rxCallCount(); got != 1 {
+		t.Fatalf("refreshRXContext calls = %d, want 1 (UpdateRadioInfo must call it synchronously)", got)
+	}
 	last := sess.lastRX()
 	if len(last.accept) != 1 || last.accept[0] != voice.KHz(130000) {
 		t.Fatalf("refreshRXContext accept list = %v, want [130000]", last.accept)
@@ -880,5 +939,218 @@ func TestSinkAndSourceBothReachTheBridge(t *testing.T) {
 	}
 	if fake.readCount() == 0 {
 		t.Fatal("RECEIVE wiring is broken: the Manager never called ReadInto on the registered Source -- SetSource is missing (Task 9's own tests would not catch this)")
+	}
+}
+
+// TestVoiceDialOptionsEmitsVoiceStateEvents pins the I2 fix: voiceDialOptions
+// must wire OnState to the events emitter (the sibling of audio:state /
+// hotkeys:state / joystick:state), because before this nothing in the
+// shipped binary ever observed voice.Session's lifecycle at all -- a wrong
+// or missing voice secret failed the handshake with a descriptive error
+// that reached only slog, never the UI, in violation of Phase 5 DoD 4.
+func TestVoiceDialOptionsEmitsVoiceStateEvents(t *testing.T) {
+	a, em, _ := newTestApp(t)
+
+	opts := a.voiceDialOptions()
+	if opts.OnState == nil {
+		t.Fatal("voiceDialOptions().OnState is nil -- no consumer will ever observe the session's lifecycle")
+	}
+
+	wantErr := errors.New("voice: no HELLO_ACK after 5 attempts; retrying in 15s")
+	opts.OnState(voice.StateRetrying, wantErr)
+
+	payloads := em.payloadsFor(events.EventVoiceState)
+	if len(payloads) != 1 {
+		t.Fatalf("voice:state emitted %d times, want 1 (got events: %v)", len(payloads), em.names())
+	}
+	got, ok := payloads[0].(events.VoiceStatePayload)
+	if !ok {
+		t.Fatalf("payload type = %T, want events.VoiceStatePayload", payloads[0])
+	}
+	if got.State != "retrying" {
+		t.Errorf("State = %q, want %q", got.State, "retrying")
+	}
+	if got.Error != wantErr.Error() {
+		t.Errorf("Error = %q, want %q", got.Error, wantErr.Error())
+	}
+
+	// A clean transition (nil error) must carry an empty Error, not the
+	// zero value of some other representation.
+	opts.OnState(voice.StateConnected, nil)
+	last := em.payloadsFor(events.EventVoiceState)
+	got = last[len(last)-1].(events.VoiceStatePayload)
+	if got.State != "connected" || got.Error != "" {
+		t.Errorf("connected transition payload = %+v, want {connected }", got)
+	}
+}
+
+// TestVoiceDialOptionsOnStateNeverLeaksTheSecret is a regression guard for
+// I2's explicit warning: the emitted voice:state event must never carry the
+// voice secret, whatever the underlying error says. voice.Session's own
+// error strings never embed it today (a wrong-length secret is reported by
+// byte count -- see ErrSecretLength's wrapping in voice.Dial), and this
+// pins that OnState's wiring does not add a new way for one to leak: it
+// forwards err.Error() verbatim and nothing else, so as long as no
+// voice.Session error is ever built FROM the secret, the event is clean.
+func TestVoiceDialOptionsOnStateNeverLeaksTheSecret(t *testing.T) {
+	a, em, _ := newTestApp(t)
+	opts := a.voiceDialOptions()
+
+	const secret = "s3cr3t-do-not-leak-0123456789ab"
+	err := fmt.Errorf("%w: got %d bytes, want %d", voice.ErrSecretLength, len(secret), voice.VoiceSecretLen)
+	opts.OnState(voice.StateRetrying, err)
+
+	payloads := em.payloadsFor(events.EventVoiceState)
+	if len(payloads) != 1 {
+		t.Fatalf("voice:state emitted %d times, want 1", len(payloads))
+	}
+	got := payloads[0].(events.VoiceStatePayload)
+	if strings.Contains(got.Error, secret) {
+		t.Fatalf("voice:state error carried the raw secret: %q", got.Error)
+	}
+}
+
+// TestVoiceDialOptionsOnStateIsANoOpWithoutASettingsBackend proves the
+// OnState callback tolerates an App with no settings backend at all (e.g. an
+// early test double, or a real App whose SetSettingsBackend has not run
+// yet) rather than nil-deref'ing on sb.em.
+func TestVoiceDialOptionsOnStateIsANoOpWithoutASettingsBackend(t *testing.T) {
+	a := NewForTest(state.New(), nil, nil)
+	opts := a.voiceDialOptions()
+	if opts.OnState == nil {
+		t.Fatal("OnState is nil")
+	}
+	opts.OnState(voice.StateRetrying, errors.New("boom")) // must not panic
+}
+
+// TestPTTGenerationBumpsOnThePressEdge is the dedicated M1 regression test:
+// the accumulator generation must reset when a transmission STARTS (the TX
+// set's empty -> non-empty transition), not when the key comes up. Resetting
+// at release instead discards the accumulator at the START of the
+// ptt_release_delay_ms tail rather than at its end, so an ODD number of
+// 10 ms tail frames leaves a half-filled accumulator that glues onto the
+// FRONT of the next transmission, on that next press's frequency -- exactly
+// what the generation counter (design doc §8.1) exists to prevent.
+func TestPTTGenerationBumpsOnThePressEdge(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+	sess := wireTestVoice(t, a, []config.Radio{
+		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
+	})
+	a.st.SetSelectedRadio(3)
+
+	// Simulate an odd-parity tail: the key is up, but the gate (not modelled
+	// here -- this only exercises the App-level generation-bump decision)
+	// would still be feeding WriteFrame for ptt_release_delay_ms after this.
+	a.Pressed("global.ptt")
+	if sess.endCallCount() != 1 {
+		t.Fatalf("EndTransmission called %d times after the first press, want 1", sess.endCallCount())
+	}
+	a.Released("global.ptt")
+	if sess.endCallCount() != 1 {
+		t.Fatalf("EndTransmission called %d times after release, want 1 (release must never bump -- that is exactly M1)", sess.endCallCount())
+	}
+
+	// A fresh press -- even one that lands WHILE an odd-parity tail from the
+	// previous press would still be live on the wire -- must bump exactly
+	// once more, discarding whatever the accumulator was still holding.
+	a.Pressed("global.ptt")
+	if sess.endCallCount() != 2 {
+		t.Fatalf("EndTransmission called %d times after the second press, want 2", sess.endCallCount())
+	}
+}
+
+// TestVOXStaleTXTargetsAreClearedAfterTheReleaseTail is the I3 regression
+// test for the "open mic the user cannot see" bug: internal/audio's VOX
+// path calls Sink.WriteFrame independently of PTT (gate.go: `pttOpen ||
+// voxOpen`), and voice.Session.WriteFrame transmits on whatever
+// SetTXFrequencies last set -- forever, since EndTransmission never touched
+// it. Without a scheduled clear, a PTT press-then-release left the session's
+// TX targets pointing at that frequency permanently, so a LATER VOX trigger
+// with no key held at all would key the radio on it.
+func TestVOXStaleTXTargetsAreClearedAfterTheReleaseTail(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+	sess := wireTestVoice(t, a, []config.Radio{
+		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
+	})
+	a.st.SetSelectedRadio(3)
+	a.settings.mu.Lock()
+	a.settings.cfg.Audio.PTTReleaseDelayMS = 20
+	a.settings.mu.Unlock()
+
+	a.Pressed("global.ptt")
+	a.Released("global.ptt")
+
+	// Immediately after release the targets must still be live: the gate
+	// stays open for the release delay and the tail must keep transmitting
+	// on them (manual check 8) -- an immediate clear would silently cut it.
+	if got := sess.lastTX(); len(got) != 1 {
+		t.Fatalf("targets right after release = %+v, want the frequency still set for the tail", got)
+	}
+	// txCallCount is 1 here (the press). The scheduled clear's
+	// SetTXFrequencies(nil) is call #2 -- waited for by COUNT, not by
+	// lastTX() alone, because SetTXFrequencies(nil) records a nil slice,
+	// which lastTX() cannot distinguish from "no call happened yet".
+	preClearCalls := sess.txCallCount()
+
+	waitUntil(t, 2*time.Second, func() bool {
+		return sess.txCallCount() > preClearCalls
+	})
+	if got := sess.lastTX(); len(got) != 0 {
+		t.Fatalf("targets after the release tail = %+v, want empty (cleared)", got)
+	}
+}
+
+// TestVOXStaleTXTargetsClearIsCancelledByANewPress proves a press landing
+// before the scheduled clear fires wins: the clear must not wipe out a
+// transmission that has already resumed.
+func TestVOXStaleTXTargetsClearIsCancelledByANewPress(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+	sess := wireTestVoice(t, a, []config.Radio{
+		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
+	})
+	a.st.SetSelectedRadio(3)
+	a.settings.mu.Lock()
+	a.settings.cfg.Audio.PTTReleaseDelayMS = 30
+	a.settings.mu.Unlock()
+
+	a.Pressed("global.ptt")
+	a.Released("global.ptt")
+	time.Sleep(5 * time.Millisecond) // well inside the 30 ms release delay
+	a.Pressed("global.ptt")
+
+	// Give the (cancelled) timer plenty of time to have fired if it were
+	// still armed.
+	time.Sleep(120 * time.Millisecond)
+
+	got := sess.lastTX()
+	if len(got) != 1 || got[0].Freq != voice.KHz(251000) {
+		t.Fatalf("targets after the cancelled clear = %+v, want the resumed transmission's frequency still set", got)
+	}
+}
+
+// TestVoiceDialOptionsWiresJitterAndMaxBufferMS proves the App layer reads
+// BOTH [voice] tunables out of the persisted config and hands them to
+// voice.Options -- JitterBufferMS already did before this fix wave;
+// MaxBufferMS is the M2 fix (it used to be persisted, defaulted, and never
+// read by anything).
+func TestVoiceDialOptionsWiresJitterAndMaxBufferMS(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	a.settings.mu.Lock()
+	a.settings.cfg.Voice.JitterBufferMS = 90
+	a.settings.cfg.Voice.MaxBufferMS = 750
+	a.settings.mu.Unlock()
+
+	opts := a.voiceDialOptions()
+	if opts.JitterMS != 90 {
+		t.Errorf("JitterMS = %d, want 90", opts.JitterMS)
+	}
+	if opts.MaxBufferMS != 750 {
+		t.Errorf("MaxBufferMS = %d, want 750", opts.MaxBufferMS)
 	}
 }

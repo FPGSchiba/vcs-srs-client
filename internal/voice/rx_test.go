@@ -935,7 +935,7 @@ func TestRXLateFrameWithinTheJitterTargetIsAbsorbedNotConcealed(t *testing.T) {
 
 	f := &decoderFactory{}
 	var r rxState
-	r.init(f.new, defaultJitterMS)
+	r.init(f.new, defaultJitterMS, 0)
 
 	dec, err := r.newDecoder()
 	if err != nil {

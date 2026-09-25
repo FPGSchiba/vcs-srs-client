@@ -33,10 +33,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
@@ -51,6 +53,12 @@ type voiceSessionAPI interface {
 	EndTransmission()
 	SetRXContext(accept, global, testFreqs []voice.KHz)
 	SetEffects(voiceEffect, clippingEffect string)
+	// State reports the session's current lifecycle state (I2 fix).
+	// VoiceState's Connected field derives from this rather than from mere
+	// non-nil-ness, which used to report "connected" for a session that had
+	// dialed a socket but never completed a HELLO and would never carry
+	// audio.
+	State() voice.State
 	Close() error
 }
 
@@ -166,6 +174,23 @@ type voiceState struct {
 	gen uint64
 
 	bridge *sessionBridge
+
+	// clearTimer is the pending post-release TX-target clear, armed by
+	// scheduleTXTargetClear once the active-TX set empties and fired after
+	// ptt_release_delay_ms (I3 fix). Non-nil only while a clear is pending;
+	// any press cancels it (see txPress) so it can never wipe out a
+	// transmission that has resumed before it fires.
+	clearTimer *time.Timer
+}
+
+// cancelPendingTXClearLocked stops any TX-target clear scheduled by
+// scheduleTXTargetClear. Caller holds voiceState.mu. A no-op when nothing is
+// pending.
+func (v *voiceState) cancelPendingTXClearLocked() {
+	if v.clearTimer != nil {
+		v.clearTimer.Stop()
+		v.clearTimer = nil
+	}
 }
 
 // initVoice wires the voice subsystem's zero state. Called from NewApp and
@@ -388,10 +413,16 @@ func txTargetsLocked(tx map[string]*voice.TXTarget) []voice.TXTarget {
 
 // txPress adds actionID to the active-TX set (resolved target, or nil if it
 // cannot be resolved -- see resolveTXTarget) and returns the frequency list
-// to hand to SetTXFrequencies. The set is guaranteed non-empty after this
-// call, which is why dispatchAudioPressed does not need a "gate open"
-// return: a press can never be the transition that closes it.
-func (a *App) txPress(actionID string) []voice.TXTarget {
+// to hand to SetTXFrequencies, plus freshStart: whether the set was EMPTY
+// before this press, i.e. this press starts a brand-new transmission rather
+// than joining one already in progress. The set is guaranteed non-empty
+// after this call, which is why dispatchAudioPressed does not need a "gate
+// open" return: a press can never be the transition that closes it.
+//
+// A press also cancels any TX-target clear scheduled by an earlier
+// release's tail (see scheduleTXTargetClear, I3 fix): that clear must never
+// fire after a transmission has already resumed and wipe out its targets.
+func (a *App) txPress(actionID string) (targets []voice.TXTarget, freshStart bool) {
 	target := a.resolveTXTarget(actionID)
 
 	a.voice.mu.Lock()
@@ -399,8 +430,10 @@ func (a *App) txPress(actionID string) []voice.TXTarget {
 	if a.voice.tx == nil {
 		a.voice.tx = map[string]*voice.TXTarget{}
 	}
+	freshStart = len(a.voice.tx) == 0
+	a.voice.cancelPendingTXClearLocked()
 	a.voice.tx[actionID] = target
-	return txTargetsLocked(a.voice.tx)
+	return txTargetsLocked(a.voice.tx), freshStart
 }
 
 // txRelease removes actionID from the active-TX set and reports whether any
@@ -414,6 +447,68 @@ func (a *App) txRelease(actionID string) (targets []voice.TXTarget, held bool) {
 		delete(a.voice.tx, actionID)
 	}
 	return txTargetsLocked(a.voice.tx), len(a.voice.tx) > 0
+}
+
+// scheduleTXTargetClear arms a timer to clear the live voice session's TX
+// target set once the PTT release tail (ptt_release_delay_ms) has actually
+// finished (I3 fix). Called from dispatchAudioReleased exactly when the
+// active-TX set has just emptied.
+//
+// It cannot clear immediately: internal/audio's gate deliberately stays
+// open for the configured release delay after the key comes up (manual
+// check 8 expects that tail on the wire), and WriteFrame keeps running with
+// the OLD targets for exactly that long. Clearing here at the release edge
+// would silence the tail instead of merely ending it honestly.
+//
+// Left un-cleared at all (the bug this fixes), the session's TX target set
+// -- voice.Session.tx.targets, set only by SetTXFrequencies and never by
+// EndTransmission -- keeps holding the last-pressed frequency forever.
+// internal/audio's VOX path calls Sink.WriteFrame independently of PTT
+// (gate.go: `pttOpen || voxOpen`), so a LATER VOX trigger with no key held
+// at all would key the radio on that stale frequency with no transmit
+// indicator lit -- an open mic the user cannot see. VOX does not transmit
+// in Phase 5 by design (see docs/superpowers/plans/2026-09-24-phase-5-
+// manual-verification.md's known-gaps section), but the stale target must
+// still not exist for the day it does.
+//
+// Any timer already pending is replaced (there is at most one outstanding
+// transmission's tail to clear), and a subsequent press cancels it outright
+// (txPress) so a transmission that resumes before the clear fires is never
+// wiped out from under it.
+func (a *App) scheduleTXTargetClear() {
+	delayMS := 0
+	if sb := a.settings; sb != nil {
+		sb.mu.Lock()
+		delayMS = sb.cfg.Audio.PTTReleaseDelayMS
+		sb.mu.Unlock()
+	}
+	delay := time.Duration(delayMS) * time.Millisecond
+
+	a.voice.mu.Lock()
+	defer a.voice.mu.Unlock()
+	a.voice.cancelPendingTXClearLocked()
+	a.voice.clearTimer = time.AfterFunc(delay, a.clearTXTargetsIfStillIdle)
+}
+
+// clearTXTargetsIfStillIdle is scheduleTXTargetClear's deferred half. It
+// clears the live session's TX targets only if the active-TX set is STILL
+// empty by the time it runs -- a press that raced the timer and landed a
+// moment before this fired must not have its brand-new targets wiped from
+// under it (txPress's own cancel closes the more common ordering; this
+// double-check closes the one where the timer had already started running
+// when the press's cancel landed).
+func (a *App) clearTXTargetsIfStillIdle() {
+	a.voice.mu.Lock()
+	a.voice.clearTimer = nil
+	stillIdle := len(a.voice.tx) == 0
+	a.voice.mu.Unlock()
+
+	if !stillIdle {
+		return
+	}
+	if sess := a.voiceSession(); sess != nil {
+		sess.SetTXFrequencies(nil)
+	}
 }
 
 // SelectRadio is the Wails binding backing radio selection from the UI
@@ -433,10 +528,18 @@ func (a *App) SelectRadio(id uint32) error {
 
 // VoiceState is the Wails binding for the voice session's current snapshot.
 // See dto.go for VoiceStateDTO's shape.
+//
+// Connected derives from the session's actual lifecycle state (I2 fix), not
+// from mere non-nil-ness: a session that has dialed a socket but never
+// completed a HELLO -- a wrong or missing voice secret, e.g. -- used to
+// report Connected == true here from the instant voice.Dial returned, which
+// is exactly the honest-DoD-4 distinction VoiceStateDTO.Connected's own doc
+// says it exists to make.
 func (a *App) VoiceState() VoiceStateDTO {
+	sess := a.voiceSession()
 	return VoiceStateDTO{
 		SelectedRadio: a.st.SelectedRadio(),
-		Connected:     a.voiceSession() != nil,
+		Connected:     sess != nil && sess.State() == voice.StateConnected,
 	}
 }
 
@@ -485,14 +588,43 @@ func (a *App) voiceDialInputs() (self uuid.UUID, secret string, src voice.Source
 }
 
 // voiceDialOptions builds voice.Options from the persisted [voice] config.
+//
+// OnState is wired here (I2 fix): before this, nothing in the shipped
+// binary ever observed voice.Session's state machine at all -- the whole
+// deliverLoop/cbQueue delivery mechanism had zero production consumers, so
+// a wrong or missing voice secret failed the handshake silently as far as
+// the UI was concerned. It emits events.EventVoiceState, mirroring
+// audio:state/hotkeys:state (main.go's OnState wiring for the audio
+// Manager). err.Error() is safe to emit as-is: voice.Session never embeds
+// the secret in any error string it produces (a wrong-length secret is
+// reported by byte count, not value -- see ErrSecretLength's wrapping in
+// voice.Dial), so nothing here needs to scrub it.
 func (a *App) voiceDialOptions() voice.Options {
 	jitterMS := 0
+	maxBufferMS := 0
+	var em *events.Tagged
 	if sb := a.settings; sb != nil {
 		sb.mu.Lock()
 		jitterMS = sb.cfg.Voice.JitterBufferMS
+		maxBufferMS = sb.cfg.Voice.MaxBufferMS
+		em = sb.em
 		sb.mu.Unlock()
 	}
-	return voice.Options{Log: a.logger, JitterMS: jitterMS}
+	return voice.Options{
+		Log:         a.logger,
+		JitterMS:    jitterMS,
+		MaxBufferMS: maxBufferMS,
+		OnState: func(st voice.State, err error) {
+			if em == nil {
+				return
+			}
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			}
+			em.VoiceState(st.String(), msg)
+		},
+	}
 }
 
 // startVoiceSession dials a fresh voice session against the store's current

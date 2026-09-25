@@ -134,6 +134,14 @@ type Options struct {
 	Keepalive time.Duration    // 0 means 5s
 	JitterMS  int              // 0 means 60
 
+	// MaxBufferMS bounds the per-stream jitter buffer's depth: the oldest
+	// buffered frame is discarded once a stream would exceed it (M2 fix --
+	// this used to be a hard-coded constant, rxJitterMax, ignoring the
+	// persisted [voice] max_buffer_ms entirely). 0 means rxJitterMax (500ms),
+	// matching that constant's previous role as the only value this ever
+	// took.
+	MaxBufferMS int
+
 	// poll overrides defaultPoll. Unexported: it is a test seam for driving
 	// the state machine with an injected clock, not part of the API.
 	poll time.Duration
@@ -306,8 +314,26 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 		s.jitterMS = defaultJitterMS
 	}
 
+	// maxBufferMS is the per-stream jitter buffer's depth ceiling (M2 fix).
+	// 0 (unset, or an unwired caller) falls back to rxJitterMax -- the exact
+	// value every session used before this was configurable.
+	maxBufferMS := opt.MaxBufferMS
+	if maxBufferMS <= 0 {
+		maxBufferMS = int(rxJitterMax / time.Millisecond)
+	}
+	// M3 fix: a jitter_buffer_ms priming delay deeper than the buffer it
+	// primes into is not a valid configuration -- every stream would evict
+	// constantly and stay silent for the whole configured delay. Clamping
+	// rather than rejecting keeps a misconfigured session usable, logged
+	// once here rather than per-frame.
+	if s.jitterMS > maxBufferMS {
+		s.log.Warn("voice: jitter_buffer_ms exceeds max_buffer_ms; clamping",
+			"jitter_buffer_ms", s.jitterMS, "max_buffer_ms", maxBufferMS)
+		s.jitterMS = maxBufferMS
+	}
+
 	s.tx.init(opt.txEncode, s.log)
-	s.rx.init(opt.rxNewDecoder, s.jitterMS)
+	s.rx.init(opt.rxNewDecoder, s.jitterMS, maxBufferMS)
 
 	// Started before the first transition so no callback is ever dropped,
 	// and deliberately outside s.wg: Close joins s.wg, and OnState is

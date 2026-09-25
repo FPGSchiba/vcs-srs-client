@@ -61,6 +61,15 @@ const (
 	// frontend/devtools surface. Backend consumers (the voice session) read
 	// it from Store.VoiceCredentials, not this event.
 	EventVoiceAddressUpdate = "voice:address_update"
+	// EventVoiceState is the voice session's lifecycle state, the sibling of
+	// EventAudioState/EventHotkeysState/EventJoystickState (I2 fix). Before
+	// this existed, nothing in the shipped binary ever observed
+	// voice.Session's OnState callback: a wrong or missing voice secret
+	// failed the handshake with a descriptive error that reached only
+	// slog, at Info, on a 15 s retry loop -- no event, no UI signal, in
+	// violation of Phase 5 DoD 4. The payload deliberately excludes the
+	// voice secret; see VoiceStatePayload.
+	EventVoiceState = "voice:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -319,4 +328,22 @@ type VoiceAddressPayload struct {
 // VoiceAddressUpdate emits EventVoiceAddressUpdate.
 func (t *Tagged) VoiceAddressUpdate(payload VoiceAddressPayload) {
 	t.em.Emit(EventVoiceAddressUpdate, payload)
+}
+
+// VoiceStatePayload is the EventVoiceState payload. state is
+// voice.State.String() ("idle" | "resolving" | "handshaking" | "connected" |
+// "rebinding" | "retrying" | "closed"); error is the lowercase-wrapped Go
+// error text for a failed/retrying transition, "" otherwise. It deliberately
+// carries NEVER the voice secret -- voice.Session's own error strings never
+// include it (a wrong-length secret is reported by byte count, not value),
+// but any future error text added to that state machine must keep that
+// property before it can be routed through here.
+type VoiceStatePayload struct {
+	State string `json:"state"`
+	Error string `json:"error"`
+}
+
+// VoiceState emits EventVoiceState.
+func (t *Tagged) VoiceState(state, errMsg string) {
+	t.em.Emit(EventVoiceState, VoiceStatePayload{State: state, Error: errMsg})
 }

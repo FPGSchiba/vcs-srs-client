@@ -244,8 +244,23 @@ func (a *App) dispatchAudioPressed(actionID string) {
 		// radio.<n>.ptt against radio n) and ADDS it to the refcounted
 		// active-TX set -- see voice.go's txPress doc for why a press can
 		// never be the transition that fails to open the gate.
-		targets := a.txPress(actionID)
+		targets, freshStart := a.txPress(actionID)
 		if sess := a.voiceSession(); sess != nil {
+			if freshStart {
+				// Bump the accumulator generation on the PRESS edge that
+				// STARTS a transmission, not on release (M1 fix). The gate
+				// stays open past release for ptt_release_delay_ms, so
+				// resetting at release discards the accumulator at the
+				// START of the tail rather than at its end -- an odd
+				// number of 10 ms tail frames then leaves a half-filled
+				// accumulator that glues onto the FRONT of the next
+				// transmission, on that next press's frequency, exactly
+				// what the generation counter (design doc §8.1) exists to
+				// prevent. Resetting here instead guarantees every fresh
+				// transmission starts with an empty accumulator regardless
+				// of the previous tail's frame parity.
+				sess.EndTransmission()
+			}
 			sess.SetTXFrequencies(targets)
 		}
 		m.SetPTT(true)
@@ -291,7 +306,15 @@ func (a *App) dispatchAudioReleased(actionID string) {
 			if held {
 				sess.SetTXFrequencies(targets)
 			} else {
-				sess.EndTransmission()
+				// The generation no longer bumps here (M1 fix -- see the
+				// press edge above); the gate stays open for
+				// ptt_release_delay_ms after this and WriteFrame keeps
+				// accumulating on the CURRENT targets for that whole tail,
+				// which a reset here would truncate. scheduleTXTargetClear
+				// instead arms a clear for once the tail has genuinely
+				// finished (I3 fix), so a later VOX trigger cannot key a
+				// stale frequency with no PTT held.
+				a.scheduleTXTargetClear()
 			}
 		}
 		m.SetPTT(held)

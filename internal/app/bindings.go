@@ -74,10 +74,21 @@ func (a *App) GetClientState() ClientStateSnapshot {
 // resolveTXTarget and refreshRXContext -- which both read sb.cfg.Radios
 // directly, never the server's echo -- kept transmitting on and accepting
 // the OLD frequency after every UI tune, no matter what the server was told.
+//
+// refreshRXContext runs synchronously right after the write-through, not
+// after the server's echo (residual from wave A's review). TX has no
+// equivalent window -- resolveTXTarget reads sb.cfg.Radios directly and
+// moves the instant persistRadios returns -- but before this, RX kept
+// accepting the OLD frequency list for as long as the server's own
+// CLIENT_RADIO_UPDATE echo (or a fresh dial) took to arrive and re-trigger
+// OnRadiosChanged. Calling it here closes that window so TX and RX move in
+// lockstep with the local write, and it is a documented no-op while
+// disconnected (see refreshRXContext's own doc).
 func (a *App) UpdateRadioInfo(info RadioInfoDTO) error {
 	if err := a.persistRadios(info.Radios); err != nil {
 		return err
 	}
+	a.refreshRXContext()
 	return a.sess.UpdateRadioInfo(context.Background(), RadioInfoToProto(info))
 }
 

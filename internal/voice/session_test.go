@@ -229,6 +229,73 @@ func TestSessionStateString(t *testing.T) {
 	}
 }
 
+// TestDialWiresMaxBufferMSIntoTheJitterCeiling is the M2 regression test:
+// Options.MaxBufferMS must reach the RX path's actual jitter-buffer depth
+// ceiling (r.jitterMax), not sit persisted and ignored in favour of the
+// hard-coded rxJitterMax constant every stream used before this fix.
+func TestDialWiresMaxBufferMSIntoTheJitterCeiling(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+	clk := newFakeClock()
+	rec := newStateRecorder()
+	opt := testOptions(clk, rec)
+	opt.MaxBufferMS = 250
+	s := dialTestSession(t, ts, goodSecret, opt)
+
+	if got := s.rx.jitterMax; got != 250*time.Millisecond {
+		t.Fatalf("rx.jitterMax = %v, want 250ms", got)
+	}
+}
+
+// TestDialDefaultsMaxBufferMSWhenUnset proves an unset (zero) MaxBufferMS
+// -- an unwired caller, or a config value of 0 -- falls back to exactly
+// rxJitterMax, the constant's previous, only role.
+func TestDialDefaultsMaxBufferMSWhenUnset(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+	clk := newFakeClock()
+	rec := newStateRecorder()
+	s := dialTestSession(t, ts, goodSecret, testOptions(clk, rec))
+
+	if got := s.rx.jitterMax; got != rxJitterMax {
+		t.Fatalf("rx.jitterMax = %v, want the rxJitterMax default (%v)", got, rxJitterMax)
+	}
+}
+
+// TestDialClampsJitterMSToMaxBufferMS is the M3 regression test: a
+// jitter_buffer_ms priming delay deeper than the buffer it primes into
+// (max_buffer_ms) is clamped rather than honoured verbatim -- an unclamped
+// 6000ms delay against a 500ms buffer would evict constantly and stay
+// silent for six seconds.
+func TestDialClampsJitterMSToMaxBufferMS(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+	clk := newFakeClock()
+	rec := newStateRecorder()
+	opt := testOptions(clk, rec)
+	opt.JitterMS = 6000
+	opt.MaxBufferMS = 500
+	s := dialTestSession(t, ts, goodSecret, opt)
+
+	if s.jitterMS != 500 {
+		t.Fatalf("jitterMS = %d, want clamped to 500 (max_buffer_ms)", s.jitterMS)
+	}
+}
+
+// TestDialLeavesJitterMSAloneWhenWithinBounds proves the clamp is a ceiling,
+// not a forced override: a configured value already inside (0, max] must
+// reach the session unchanged.
+func TestDialLeavesJitterMSAloneWhenWithinBounds(t *testing.T) {
+	ts := newTestServer(t, goodSecret)
+	clk := newFakeClock()
+	rec := newStateRecorder()
+	opt := testOptions(clk, rec)
+	opt.JitterMS = 80
+	opt.MaxBufferMS = 500
+	s := dialTestSession(t, ts, goodSecret, opt)
+
+	if s.jitterMS != 80 {
+		t.Fatalf("jitterMS = %d, want 80 (unclamped)", s.jitterMS)
+	}
+}
+
 func TestSessionHandshakeSucceeds(t *testing.T) {
 	ts := newTestServer(t, goodSecret)
 	clk := newFakeClock()

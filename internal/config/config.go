@@ -86,7 +86,11 @@ type Voice struct {
 	Host           string `toml:"host"`
 	Port           int    `toml:"port"`
 	JitterBufferMS int    `toml:"jitter_buffer_ms"`
-	MaxBufferMS    int    `toml:"max_buffer_ms"`
+	// MaxBufferMS bounds each received stream's jitter-buffer depth --
+	// wired through to voice.Options.MaxBufferMS by
+	// App.voiceDialOptions (M2 fix; it used to be persisted, defaulted, and
+	// then silently ignored in favour of a hard-coded 500ms constant).
+	MaxBufferMS int `toml:"max_buffer_ms"`
 }
 
 // Radio is one persisted radio preset.

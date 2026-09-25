@@ -209,6 +209,12 @@ type rxState struct {
 
 	jitterTarget time.Duration
 
+	// jitterMax is the per-stream jitter buffer's depth ceiling, wired from
+	// Options.MaxBufferMS (M2 fix). It replaces the constant rxJitterMax as
+	// every stream's actual `max` argument to newJitter; rxJitterMax
+	// remains as init's default when no value (or 0) was configured.
+	jitterMax time.Duration
+
 	// aheadSamples is how much decoded PCM the decode loop keeps in each
 	// stream's ring.
 	//
@@ -270,13 +276,17 @@ type rxState struct {
 // stream instead of at Dial, which is the same degradation the transmit
 // side takes -- the session still keeps its binding alive, it just cannot
 // play anything back.
-func (r *rxState) init(newDecoder func() (rxDecoder, error), jitterMS int) {
+func (r *rxState) init(newDecoder func() (rxDecoder, error), jitterMS int, maxBufferMS int) {
 	r.streams = map[streamKey]*rxStream{}
 	empty := []*rxStream{}
 	r.snapshot.Store(&empty)
 	r.wake = make(chan struct{}, 1)
 	r.mix = make([]float32, audio.FrameSamples)
 	r.jitterTarget = time.Duration(jitterMS) * time.Millisecond
+	if maxBufferMS <= 0 {
+		maxBufferMS = int(rxJitterMax / time.Millisecond)
+	}
+	r.jitterMax = time.Duration(maxBufferMS) * time.Millisecond
 
 	r.newDecoder = newDecoder
 	if r.newDecoder == nil {
@@ -469,9 +479,10 @@ func (s *Session) ReadInto(buf []float32) {
 // buffer, and it is deliberate because it makes the receive path allocate
 // once per packet rather than twice. DO NOT introduce a pooled or reused
 // payload buffer upstream of this: a jitter buffer can hold a frame for up
-// to rxJitterMax, and recycling the memory under it would corrupt audio that
-// is still queued, with a symptom that looks like a codec bug rather than a
-// lifetime bug.
+// to its configured ceiling (r.jitterMax -- rxJitterMax by default, see
+// Options.MaxBufferMS, M2 fix), and recycling the memory under it would
+// corrupt audio that is still queued, with a symptom that looks like a
+// codec bug rather than a lifetime bug.
 func (s *Session) rxVoice(pkt *Packet, at time.Time) {
 	r := &s.rx
 	r.received.Add(1)
@@ -561,7 +572,7 @@ func (s *Session) rxStreamFor(key streamKey, global bool, at time.Time) *rxStrea
 	st := &rxStream{
 		key:    key,
 		global: global,
-		jit:    newJitter(r.jitterTarget, rxJitterMax, rxFrameDuration),
+		jit:    newJitter(r.jitterTarget, r.jitterMax, rxFrameDuration),
 		ring:   audio.NewRing(r.ringFrames),
 		dec:    dec,
 		pcm:    make([]float32, opus.FrameSamples),

@@ -288,6 +288,71 @@ func TestTXEndTransmissionDiscardsPartialFrame(t *testing.T) {
 	}
 }
 
+// TestTXOddParityTailDoesNotGlueOntoTheNextTransmission is the M1
+// regression test at the Session-level primitive EndTransmission relies on:
+// five 10 ms frames -- an ODD number of them -- leave the accumulator
+// half-full (2 whole Opus frames flushed, one 10 ms frame left over) at the
+// moment EndTransmission runs, exactly the shape
+// TestTXEndTransmissionDiscardsPartialFrame exercises with a single frame's
+// worth of tail. This test additionally changes the TARGET FREQUENCY on the
+// next press, which is the part that matters in production: gluing a
+// leftover half-frame onto the front of a new transmission would smear the
+// PREVIOUS frequency's tail audio onto the NEXT frequency's packet, not
+// just onto the same one.
+//
+// It also pins the ORDER App.dispatchAudioPressed now follows (M1 fix):
+// EndTransmission before SetTXFrequencies, i.e. the generation bumps at the
+// START of the new press, discarding whatever an odd-parity tail left
+// behind, before the new frequency is ever set.
+func TestTXOddParityTailDoesNotGlueOntoTheNextTransmission(t *testing.T) {
+	requireOpus(t)
+	ts, s := dialConnectedTX(t, nil)
+	s.SetTXFrequencies([]TXTarget{{Freq: freqAlpha}})
+
+	// Five 10 ms frames on the OLD frequency -- an odd count. Two whole
+	// Opus frames flush as packets; the fifth leaves the accumulator
+	// half-full, standing in for an odd-parity release-delay tail.
+	s.WriteFrame(sineFrame(0))
+	s.WriteFrame(sineFrame(1))
+	s.WriteFrame(sineFrame(2))
+	s.WriteFrame(sineFrame(3))
+	s.WriteFrame(sineFrame(4))
+	waitVoice(t, ts, 2) // two full packets from four whole 20ms frames' worth
+
+	// The press edge: bump the generation, THEN retarget -- mirroring
+	// dispatchAudioPressed's fixed ordering exactly.
+	s.EndTransmission()
+	s.SetTXFrequencies([]TXTarget{{Freq: freqBravo}})
+
+	// One frame of the NEW transmission must NOT immediately complete a
+	// packet. If the reset above had not happened, the odd leftover half
+	// frame from the tail would still be sitting in the accumulator and
+	// this single frame would complete (and flush) it right away -- GLUED,
+	// on freqBravo, which a bare packet-count check after TWO frames could
+	// not tell apart from the correct behaviour once Opus has encoded over
+	// the samples. Catching it here, after only one write, needs no PCM
+	// inspection.
+	s.WriteFrame(sineFrame(20))
+	settle()
+	if got := ts.voiceCount(); got != 2 {
+		t.Fatalf("after one 10ms frame on the new press: %d datagrams, want still 2 -- "+
+			"the odd tail leftover must have been discarded at the press edge, not glued onto this frame", got)
+	}
+
+	// A second frame completes the new transmission's first packet.
+	s.WriteFrame(sineFrame(21))
+	pkts := waitVoice(t, ts, 3)
+	groups := byFreq(pkts)
+	if len(groups[freqBravo]) != 1 {
+		t.Fatalf("freqBravo packets = %d, want 1 (alpha=%d bravo=%d)",
+			len(groups[freqBravo]), len(groups[freqAlpha]), len(groups[freqBravo]))
+	}
+	// Sequence 0: freqBravo's own counter, independent of freqAlpha's.
+	if groups[freqBravo][0].Sequence != 0 {
+		t.Fatalf("freqBravo first sequence = %d, want 0", groups[freqBravo][0].Sequence)
+	}
+}
+
 func TestTXWriteFrameNeverBlocks(t *testing.T) {
 	block := make(chan struct{})
 	var once sync.Once
