@@ -65,8 +65,18 @@ func route(upd *srspb.ServerUpdate, st *state.Store, tagged *events.Tagged) {
 		}
 	case srspb.ServerUpdate_SERVER_ACTION:
 		tagged.ServerAction(struct{}{})
+	case srspb.ServerUpdate_VOICE_ADDRESS_UPDATE:
+		vu := upd.GetVoiceAddressUpdate()
+		if vu == nil {
+			return
+		}
+		st.SetVoiceCredentials(vu.GetVoiceSecret(), vu.GetCoalitionVoiceAddr(), vu.GetGlobalVoiceAddr())
+		tagged.VoiceAddressUpdate(events.VoiceAddressPayload{
+			CoalitionAddr: vu.GetCoalitionVoiceAddr(),
+			GlobalAddr:    vu.GetGlobalVoiceAddr(),
+		})
 	default:
-		// DISTRIBUTION_UPDATE / VOICE_ADDRESS_UPDATE / UNKNOWN — ignored this phase.
+		// DISTRIBUTION_UPDATE / UNKNOWN — ignored this phase.
 	}
 }
 

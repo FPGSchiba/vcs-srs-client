@@ -26,6 +26,20 @@ type Store struct {
 	selfGUID string
 	self     *srspb.ClientInfo
 
+	// voiceSecret, coalitionVoiceAddr and globalVoiceAddr are the live
+	// voice-plane credentials: the secret presented in the voice HELLO
+	// payload, and the UDP host:port pair to dial. Set by SyncClient at
+	// connect and re-set (unchanged secret, possibly new addrs) by a
+	// VOICE_ADDRESS_UPDATE on the stream. Empty addrs are legitimate --
+	// see SetVoiceCredentials.
+	voiceSecret        string
+	coalitionVoiceAddr string
+	globalVoiceAddr    string
+
+	// selectedRadio is the radio id global.ptt currently targets. Zero means
+	// nothing is selected.
+	selectedRadio uint32
+
 	// radioObservers are notified after any mutation that can change which
 	// radios the local client owns. See OnRadiosChanged.
 	radioObservers []func()
@@ -140,6 +154,47 @@ func (s *Store) Settings() *srspb.ServerSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.settings
+}
+
+// SetVoiceCredentials records the live voice-plane secret and the coalition
+// and global UDP addresses the client should dial for voice.
+//
+// Empty strings are meaningful and normal, not an error: a standalone
+// server -- every deployment today -- returns "" for both addrs, because
+// they are served from a registry only distributed voice nodes populate.
+// Callers must store what they received verbatim; the resolver downstream
+// already treats "" as absent and falls back, so this method never
+// substitutes a default.
+func (s *Store) SetVoiceCredentials(secret, coalitionAddr, globalAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.voiceSecret = secret
+	s.coalitionVoiceAddr = coalitionAddr
+	s.globalVoiceAddr = globalAddr
+}
+
+// VoiceCredentials returns the current voice secret and addresses. All three
+// are "" until SetVoiceCredentials has been called at least once (e.g.
+// before SyncClient completes).
+func (s *Store) VoiceCredentials() (secret, coalitionAddr, globalAddr string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.voiceSecret, s.coalitionVoiceAddr, s.globalVoiceAddr
+}
+
+// SetSelectedRadio records which radio id global.ptt currently targets.
+func (s *Store) SetSelectedRadio(id uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selectedRadio = id
+}
+
+// SelectedRadio returns the currently selected radio id, or 0 if none has
+// been selected yet.
+func (s *Store) SelectedRadio() uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.selectedRadio
 }
 
 // Snapshot returns a map-isolated copy of the store. Mutating the returned maps

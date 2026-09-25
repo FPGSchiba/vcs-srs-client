@@ -1,6 +1,7 @@
 package state_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -118,6 +119,72 @@ func TestStore_OnRadiosChangedFiresForEveryRadioMutation(t *testing.T) {
 				t.Errorf("%s notified %d observers, want 1", tt.name, calls)
 			}
 		})
+	}
+}
+
+// TestStore_VoiceCredentials_EmptyByDefault pins that an un-synced store
+// reports empty strings rather than panicking or returning stale data.
+func TestStore_VoiceCredentials_EmptyByDefault(t *testing.T) {
+	s := state.New()
+	secret, coal, global := s.VoiceCredentials()
+	if secret != "" || coal != "" || global != "" {
+		t.Fatalf("expected empty defaults, got secret=%q coal=%q global=%q", secret, coal, global)
+	}
+}
+
+// TestStore_SetAndGetVoiceCredentials pins the round trip SyncClient and the
+// VOICE_ADDRESS_UPDATE stream case rely on.
+func TestStore_SetAndGetVoiceCredentials(t *testing.T) {
+	s := state.New()
+	wantSecret := strings.Repeat("A", 43)
+	s.SetVoiceCredentials(wantSecret, "10.0.0.9:5002", "10.0.0.1:5002")
+
+	secret, coal, global := s.VoiceCredentials()
+	if secret != wantSecret {
+		t.Errorf("secret = %q, want %q", secret, wantSecret)
+	}
+	if coal != "10.0.0.9:5002" {
+		t.Errorf("coalition addr = %q, want %q", coal, "10.0.0.9:5002")
+	}
+	if global != "10.0.0.1:5002" {
+		t.Errorf("global addr = %q, want %q", global, "10.0.0.1:5002")
+	}
+}
+
+// TestStore_SetVoiceCredentials_EmptyAddrsAreStoredAsIs pins that a
+// standalone server's "" coalition/global addrs are NOT replaced with a
+// default -- the resolver downstream treats "" as absent and falls back.
+func TestStore_SetVoiceCredentials_EmptyAddrsAreStoredAsIs(t *testing.T) {
+	s := state.New()
+	wantSecret := strings.Repeat("B", 43)
+	s.SetVoiceCredentials(wantSecret, "", "")
+
+	secret, coal, global := s.VoiceCredentials()
+	if secret != wantSecret {
+		t.Errorf("secret = %q, want %q", secret, wantSecret)
+	}
+	if coal != "" {
+		t.Errorf("coalition addr = %q, want empty", coal)
+	}
+	if global != "" {
+		t.Errorf("global addr = %q, want empty", global)
+	}
+}
+
+// TestStore_SelectedRadio_ZeroByDefault pins the unselected default.
+func TestStore_SelectedRadio_ZeroByDefault(t *testing.T) {
+	s := state.New()
+	if got := s.SelectedRadio(); got != 0 {
+		t.Fatalf("SelectedRadio() = %d, want 0", got)
+	}
+}
+
+// TestStore_SetAndGetSelectedRadio pins the round trip radio.N.select drives.
+func TestStore_SetAndGetSelectedRadio(t *testing.T) {
+	s := state.New()
+	s.SetSelectedRadio(3)
+	if got := s.SelectedRadio(); got != 3 {
+		t.Fatalf("SelectedRadio() = %d, want 3", got)
 	}
 }
 

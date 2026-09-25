@@ -54,6 +54,13 @@ const (
 	EventAudioState = "audio:state"
 	// EventAudioMicMuted reports the push-to-mute / mute-toggle state.
 	EventAudioMicMuted = "audio:mic_muted"
+	// EventVoiceAddressUpdate signals that a VOICE_ADDRESS_UPDATE redirect
+	// arrived on the control stream and the store's voice addresses changed.
+	// The payload deliberately excludes the secret -- it authenticates the
+	// voice UDP HELLO and must not leave the backend onto the Wails
+	// frontend/devtools surface. Backend consumers (the voice session) read
+	// it from Store.VoiceCredentials, not this event.
+	EventVoiceAddressUpdate = "voice:address_update"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -300,4 +307,16 @@ func (t *Tagged) AudioState(payload any) {
 // AudioMicMuted emits EventAudioMicMuted with mute state.
 func (t *Tagged) AudioMicMuted(muted bool) {
 	t.em.Emit(EventAudioMicMuted, muted)
+}
+
+// VoiceAddressPayload is the EventVoiceAddressUpdate payload. See
+// EventVoiceAddressUpdate for why the secret is excluded.
+type VoiceAddressPayload struct {
+	CoalitionAddr string `json:"coalition_addr"`
+	GlobalAddr    string `json:"global_addr"`
+}
+
+// VoiceAddressUpdate emits EventVoiceAddressUpdate.
+func (t *Tagged) VoiceAddressUpdate(payload VoiceAddressPayload) {
+	t.em.Emit(EventVoiceAddressUpdate, payload)
 }
