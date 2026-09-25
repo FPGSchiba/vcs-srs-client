@@ -220,13 +220,14 @@ func (a *App) audioManager() *audio.Manager {
 func (a *App) dispatchAudioPressed(actionID string) {
 	if id, ok := radioSelectID(actionID); ok {
 		a.st.SetSelectedRadio(id)
-		// Best-effort persist (M4 fix), matching the SelectRadio binding.
-		// Swallowed rather than propagated: dispatchAudioPressed has no
-		// error return, and a failed persist must never undo the
-		// in-memory selection the user just made with a keypress.
-		if err := a.persistSelectedRadio(id); err != nil {
-			a.logger.Warn("voice: failed to persist selected radio", "err", err)
-		}
+		// Best-effort persist (M4 fix), matching the SelectRadio binding,
+		// queued OFF this goroutine (M6 fix) -- this runs on gohook's event-
+		// reader goroutine, and a synchronous config.Save here is exactly
+		// the kind of stall internal/hotkeys/dispatch.go's own doc warns
+		// can strand a later key event (and therefore a held PTT) behind
+		// it. See queueSelectedRadioPersist's doc for how ordering is still
+		// preserved despite the async write.
+		a.queueSelectedRadioPersist(id)
 		return
 	}
 
@@ -241,28 +242,14 @@ func (a *App) dispatchAudioPressed(actionID string) {
 	switch {
 	case actionID == "global.ptt" || isRadioPTTAction(actionID):
 		// txPress resolves actionID (global.ptt against the SELECTED radio,
-		// radio.<n>.ptt against radio n) and ADDS it to the refcounted
-		// active-TX set -- see voice.go's txPress doc for why a press can
-		// never be the transition that fails to open the gate.
-		targets, freshStart := a.txPress(actionID)
-		if sess := a.voiceSession(); sess != nil {
-			if freshStart {
-				// Bump the accumulator generation on the PRESS edge that
-				// STARTS a transmission, not on release (M1 fix). The gate
-				// stays open past release for ptt_release_delay_ms, so
-				// resetting at release discards the accumulator at the
-				// START of the tail rather than at its end -- an odd
-				// number of 10 ms tail frames then leaves a half-filled
-				// accumulator that glues onto the FRONT of the next
-				// transmission, on that next press's frequency, exactly
-				// what the generation counter (design doc §8.1) exists to
-				// prevent. Resetting here instead guarantees every fresh
-				// transmission starts with an empty accumulator regardless
-				// of the previous tail's frame parity.
-				sess.EndTransmission()
-			}
-			sess.SetTXFrequencies(targets)
-		}
+		// radio.<n>.ptt against radio n), ADDS it to the refcounted
+		// active-TX set, and installs the resulting targets on the live
+		// session ATOMICALLY with that mutation -- see voice.go's txPress
+		// doc both for why a press can never be the transition that fails
+		// to open the gate, and for why the session call now lives inside
+		// txPress rather than out here (the blocker fix: it can no longer
+		// interleave with clearTXTargetsIfStillIdle's own store).
+		a.txPress(actionID)
 		m.SetPTT(true)
 	case actionID == "global.push_to_mute":
 		// Emit only on an actual transition -- see push_to_mute's Released
@@ -294,28 +281,25 @@ func (a *App) dispatchAudioReleased(actionID string) {
 	}
 	switch {
 	case actionID == "global.ptt" || isRadioPTTAction(actionID):
-		// txRelease removes actionID from the active-TX set and reports
+		// txRelease removes actionID from the active-TX set, reports
 		// whether ANY OTHER action is still held -- the exact Manager.SetPTT
 		// gate condition, independent of whether either action ever
-		// resolved to a real frequency (TestGateStaysOpenWhileAnyTargetIsHeld).
-		// Only a fully-emptied set ends the transmission outright; a set
-		// that merely shrank keeps transmitting on what remains
-		// (TestReleasingOneKeepsTheOther).
-		targets, held := a.txRelease(actionID)
-		if sess := a.voiceSession(); sess != nil {
-			if held {
-				sess.SetTXFrequencies(targets)
-			} else {
-				// The generation no longer bumps here (M1 fix -- see the
-				// press edge above); the gate stays open for
-				// ptt_release_delay_ms after this and WriteFrame keeps
-				// accumulating on the CURRENT targets for that whole tail,
-				// which a reset here would truncate. scheduleTXTargetClear
-				// instead arms a clear for once the tail has genuinely
-				// finished (I3 fix), so a later VOX trigger cannot key a
-				// stale frequency with no PTT held.
-				a.scheduleTXTargetClear()
-			}
+		// resolved to a real frequency (TestGateStaysOpenWhileAnyTargetIsHeld)
+		// -- and, when held, installs the shrunk targets on the live
+		// session ATOMICALLY with the removal (same reasoning as txPress;
+		// see its doc). Only a fully-emptied set ends the transmission
+		// outright; a set that merely shrank keeps transmitting on what
+		// remains (TestReleasingOneKeepsTheOther).
+		held := a.txRelease(actionID)
+		if !held {
+			// The generation no longer bumps here (M1 fix -- see the press
+			// edge above); the gate stays open for ptt_release_delay_ms
+			// after this and WriteFrame keeps accumulating on the CURRENT
+			// targets for that whole tail, which a reset here would
+			// truncate. scheduleTXTargetClear instead arms a clear for once
+			// the tail has genuinely finished (I3 fix), so a later VOX
+			// trigger cannot key a stale frequency with no PTT held.
+			a.scheduleTXTargetClear()
 		}
 		m.SetPTT(held)
 	case actionID == "global.push_to_mute":

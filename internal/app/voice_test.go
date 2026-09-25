@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
@@ -85,6 +87,18 @@ type fakeVoiceSession struct {
 	effectsSet []effectsCall
 	closed     int
 	state      voice.State
+
+	// blockOnEmptySetTX, when non-nil, is invoked synchronously from inside
+	// SetTXFrequencies whenever it is called with an EMPTY (nil or
+	// zero-length) target list -- i.e. a CLEAR, never a press -- before the
+	// call is recorded. TestClearCannotRaceANewPress uses it to force the
+	// blocker regression's exact interleaving deterministically: it lets
+	// the test pause a clear's SetTXFrequencies(nil) call mid-flight and
+	// then attempt a concurrent press, without depending on wall-clock
+	// timing or many iterations to get lucky. Set directly (no lock) before
+	// any goroutine that can observe it is started -- the `go` statement's
+	// own happens-before guarantee is what makes that safe unsynchronized.
+	blockOnEmptySetTX func()
 }
 
 // State implements voiceSessionAPI (I2 fix). Zero value is voice.StateIdle,
@@ -109,6 +123,9 @@ type rxCall struct{ accept, global, test []voice.KHz }
 type effectsCall struct{ voiceEffect, clippingEffect string }
 
 func (f *fakeVoiceSession) SetTXFrequencies(targets []voice.TXTarget) {
+	if len(targets) == 0 && f.blockOnEmptySetTX != nil {
+		f.blockOnEmptySetTX()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := append([]voice.TXTarget(nil), targets...)
@@ -490,6 +507,74 @@ func TestVoiceRedirectIsANoOpWhileDisconnected(t *testing.T) {
 	}
 }
 
+// TestHandleVoiceRedirectDoesNotBlockOnASlowDial is the M5 regression.
+// handleVoiceRedirect used to call a.startVoiceSession() INLINE, on the
+// SAME goroutine that invoked it -- internal/control's ConsumeUpdates
+// goroutine, via route()'s SetVoiceCredentials/SetVoiceAddresses call for a
+// VOICE_ADDRESS_UPDATE (internal/control/stream.go:80). voice.Dial (inside
+// startVoiceSession) can block up to resolveTimeout (10s) against a
+// blackholed resolver, and state.Store's own contract requires an observer
+// not block: OnVoiceCredentialsChanged's doc says "[observers] run
+// synchronously on the mutating goroutine, so an observer must not block."
+// Calling the dial inline violated that -- stalling delivery of every
+// OTHER control update (client list, radio echoes, connection state) for
+// as long as the dial took.
+//
+// This proves handleVoiceRedirect itself returns promptly even when the
+// dial is slow, by installing a fake a.voice.dial (see its doc; this
+// sandbox blocks bind(2), so a real voice.Dial cannot run here) that blocks
+// until the test releases it. Deterministic, not timing-sensitive: release
+// is only closed at the very end, after both assertions below already
+// passed, so a regression (the call running inline again) has no way to
+// pass by getting lucky on a race -- it can only time out.
+func TestHandleVoiceRedirectDoesNotBlockOnASlowDial(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	a.st.SetSelf("00000000-0000-0000-0000-000000000001", nil)
+	a.st.SetVoiceCredentials("secret", "10.0.0.9:5002", "")
+	wireTestVoice(t, a, nil) // a live session, so handleVoiceRedirect acts at all
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	a.voice.mu.Lock()
+	a.voice.dial = func(voice.Sources, uuid.UUID, string, voice.Options) (*voice.Session, error) {
+		close(started)
+		<-release
+		return nil, errors.New("fake dial: deliberately never completes within this test")
+	}
+	a.voice.mu.Unlock()
+
+	returned := make(chan struct{})
+	go func() {
+		// handleVoiceRedirect itself is the call under test; it only runs on
+		// its own goroutine here so the test below can time-box it with a
+		// select -- this stands in for internal/control's ConsumeUpdates
+		// goroutine, which must never be the one left waiting on the dial.
+		a.handleVoiceRedirect()
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+		// Expected: this is the fix -- the observer call returns without
+		// ever waiting on the dial.
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleVoiceRedirect did not return while its dial was slow -- " +
+			"it is blocking the calling (observer) goroutine again")
+	}
+
+	// Confirm a redial was actually attempted (on ITS OWN goroutine,
+	// separate from the one handleVoiceRedirect just returned on) rather
+	// than the fast return above being a no-op that skipped dialing
+	// altogether.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the fake dial was never invoked -- handleVoiceRedirect did not attempt a redial at all")
+	}
+
+	close(release)
+}
+
 // --- Generation-gated install/teardown race (task-11b Priority 1) ---------
 //
 // handleVoiceRedirect dials a replacement session with a.voice.mu released
@@ -701,8 +786,17 @@ func TestUpdateRadioInfo_PersistsToDisk(t *testing.T) {
 	a, _, _ := newTestAppWithPath(t, path)
 	a.sess = &fakeControlSession{}
 
+	// IsIntercom is deliberately TRUE here (not the zero value) so this
+	// test actually pins it: a mutation that hard-codes persistRadios'
+	// IsIntercom write to false would otherwise pass unnoticed against an
+	// input that was already false, exactly the coverage gap a whole-branch
+	// review caught -- Enabled was non-vacuously pinned elsewhere in this
+	// suite (every radio TX/RX routing test depends on it being written and
+	// read back correctly) but IsIntercom, equally one of config.Radio's
+	// five persisted fields and equally user-reachable (RadioCard.tsx's
+	// intercom toggle), had no assertion anywhere that it survives to disk.
 	if err := a.UpdateRadioInfo(RadioInfoDTO{Radios: []RadioDTO{
-		{ID: 7, Name: "Rescue", Frequency: 121.500, Enabled: true, IsIntercom: false},
+		{ID: 7, Name: "Rescue", Frequency: 121.500, Enabled: true, IsIntercom: true},
 	}}); err != nil {
 		t.Fatalf("UpdateRadioInfo: %v", err)
 	}
@@ -711,8 +805,13 @@ func TestUpdateRadioInfo_PersistsToDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if len(loaded.Radios) != 1 || loaded.Radios[0].ID != 7 || loaded.Radios[0].FrequencyKHz != 121500 {
-		t.Fatalf("loaded.Radios = %+v, want one radio at 121500 kHz", loaded.Radios)
+	if len(loaded.Radios) != 1 {
+		t.Fatalf("loaded.Radios = %+v, want exactly one radio", loaded.Radios)
+	}
+	got := loaded.Radios[0]
+	want := config.Radio{ID: 7, Name: "Rescue", FrequencyKHz: 121500, Enabled: true, IsIntercom: true}
+	if got != want {
+		t.Fatalf("loaded.Radios[0] = %+v, want %+v (all five config.Radio fields)", got, want)
 	}
 }
 
@@ -765,7 +864,11 @@ func TestSelectRadio_PersistsSelection(t *testing.T) {
 }
 
 // TestRadioSelectAction_PersistsSelection proves the hotkey path
-// (radio.<n>.select) persists exactly like the SelectRadio binding does.
+// (radio.<n>.select) persists exactly like the SelectRadio binding does --
+// asynchronously (M6 fix), via queueSelectedRadioPersist, so this polls for
+// the write to land rather than asserting immediately: the in-memory
+// selection (state.Store) is synchronous, but the disk write now happens on
+// its own goroutine, off gohook's event-reader goroutine.
 func TestRadioSelectAction_PersistsSelection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	a, _, _ := newTestAppWithPath(t, path)
@@ -775,12 +878,21 @@ func TestRadioSelectAction_PersistsSelection(t *testing.T) {
 		t.Fatalf("SelectedRadio() = %d, want 9", got)
 	}
 
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
-	if loaded.SelectedRadioID != 9 {
-		t.Fatalf("loaded.SelectedRadioID = %d, want 9", loaded.SelectedRadioID)
+	var loaded *config.Config
+	waitUntil(t, 2*time.Second, func() bool {
+		c, err := config.Load(path)
+		if err != nil {
+			return false
+		}
+		loaded = c
+		return loaded.SelectedRadioID == 9
+	})
+	if loaded == nil || loaded.SelectedRadioID != 9 {
+		got := uint32(0)
+		if loaded != nil {
+			got = loaded.SelectedRadioID
+		}
+		t.Fatalf("loaded.SelectedRadioID = %d, want 9", got)
 	}
 }
 
@@ -1131,6 +1243,141 @@ func TestVOXStaleTXTargetsClearIsCancelledByANewPress(t *testing.T) {
 	got := sess.lastTX()
 	if len(got) != 1 || got[0].Freq != voice.KHz(251000) {
 		t.Fatalf("targets after the cancelled clear = %+v, want the resumed transmission's frequency still set", got)
+	}
+}
+
+// TestScheduledClearIncludesATailMargin proves scheduleTXTargetClear's
+// timer is armed for ptt_release_delay_ms PLUS clearTailMargin, not the
+// bare configured delay. See clearTailMargin's doc: the gate
+// (internal/audio/gate.go) counts its release tail in DSP FRAMES, seeded
+// from the SAME config value at the moment of release, so a DSP loop that
+// is even slightly behind schedule (a device reopen, scheduler pressure)
+// finishes that frame-counted tail LATER, in wall-clock terms, than a bare
+// millisecond timer would. Without the margin, this clear could fire while
+// the gate is still counting down its last frame or two, truncating
+// exactly the tail manual check 8 expects on the wire.
+//
+// This measures wall-clock time from release to the clear's
+// SetTXFrequencies(nil) call landing, and asserts it is never LESS than
+// configured+margin -- a real timer cannot fire early, so this cannot
+// flake short; it can only fail by firing too soon, which is exactly what
+// dropping the margin would do.
+func TestScheduledClearIncludesATailMargin(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+	sess := wireTestVoice(t, a, []config.Radio{
+		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
+	})
+	a.st.SetSelectedRadio(3)
+	const releaseDelay = 40 * time.Millisecond
+	a.settings.mu.Lock()
+	a.settings.cfg.Audio.PTTReleaseDelayMS = int(releaseDelay / time.Millisecond)
+	a.settings.mu.Unlock()
+
+	a.Pressed("global.ptt")
+	a.Released("global.ptt")
+	// Captured AFTER Released, not before Pressed: the press itself is a
+	// SetTXFrequencies call, so counting from before it would let that call
+	// alone satisfy the wait below well before the clear ever fires --
+	// exactly the same trap TestVOXStaleTXTargetsAreClearedAfterTheReleaseTail's
+	// own comment warns about.
+	preClearCalls := sess.txCallCount()
+	start := time.Now()
+
+	waitUntil(t, 2*time.Second, func() bool {
+		return sess.txCallCount() > preClearCalls
+	})
+	elapsed := time.Since(start)
+
+	want := releaseDelay + clearTailMargin
+	if elapsed < want {
+		t.Fatalf("clear fired after %v, want at least %v (configured delay + clearTailMargin) -- "+
+			"the margin appears to be missing", elapsed, want)
+	}
+}
+
+// TestClearCannotRaceANewPress is the BLOCKER regression test from the
+// final Phase 5 fix wave: clearTXTargetsIfStillIdle used to read the
+// active-TX set's idle-ness under voiceState.mu, RELEASE the lock, and only
+// THEN call SetTXFrequencies(nil). A press landing in that gap won the idle
+// check (which had already run) and still lost its own store to the
+// clear's, which landed after it -- the gate stayed open (PTT lit,
+// hotkey:pressed already emitted) while every frame was silently dropped
+// as DroppedNoTarget: a fully silent transmission with a green light on
+// it, self-healing only on the NEXT press.
+//
+// This drives the exact interleaving DETERMINISTICALLY, via
+// fakeVoiceSession.blockOnEmptySetTX, rather than hammering many
+// press/release cycles hoping to get unlucky: it pauses a clear (simulating
+// scheduleTXTargetClear's timer firing) INSIDE its SetTXFrequencies(nil)
+// call, attempts a concurrent press, and asserts the press cannot complete
+// until the clear's call returns -- i.e. the two can never interleave.
+// Against the pre-fix code this fails at the "press completed too early"
+// assertion: releasing the lock before calling SetTXFrequencies(nil) lets
+// the concurrent press's OWN SetTXFrequencies (non-empty, so it does not
+// hit the hook) land, and complete, WHILE the clear's hooked call is still
+// blocked -- so the clear's nil then lands last, exactly the bug.
+func TestClearCannotRaceANewPress(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	m := newTestAudioManager(t)
+	a.SetAudioBackend(m)
+	sess := wireTestVoice(t, a, []config.Radio{
+		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
+	})
+	a.st.SetSelectedRadio(3)
+
+	// Get the TX set to idle exactly as a real release would, then cancel
+	// the real timer scheduleTXTargetClear armed -- this test drives
+	// clearTXTargetsIfStillIdle directly (standing in for the timer firing)
+	// so the real one must not ALSO fire and confuse the assertions below.
+	a.Pressed("global.ptt")
+	a.Released("global.ptt")
+	a.voice.mu.Lock()
+	a.voice.cancelPendingTXClearLocked()
+	a.voice.mu.Unlock()
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	sess.blockOnEmptySetTX = func() {
+		close(entered)
+		<-resume
+	}
+
+	clearDone := make(chan struct{})
+	go func() {
+		a.clearTXTargetsIfStillIdle() // stands in for the scheduled timer firing
+		close(clearDone)
+	}()
+	<-entered // the clear is inside SetTXFrequencies(nil), blocked on resume
+
+	pressDone := make(chan struct{})
+	go func() {
+		a.Pressed("global.ptt") // the race: a press landing "during" the clear
+		close(pressDone)
+	}()
+
+	select {
+	case <-pressDone:
+		t.Fatal("the press completed before the blocked clear released -- " +
+			"SetTXFrequencies(nil) is not covered by the same voiceState.mu " +
+			"critical section as the idle check, reopening the blocker")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: under the fix, txPress cannot even begin mutating the
+		// TX set until clearTXTargetsIfStillIdle releases voiceState.mu,
+		// which it will not do until resume is closed below.
+	}
+
+	close(resume)
+	<-clearDone
+	<-pressDone
+
+	// The press happened-after the clear (proven above), so it must be the
+	// one the session's final state reflects -- never the clear's nil.
+	got := sess.lastTX()
+	if len(got) != 1 || got[0].Freq != voice.KHz(251000) {
+		t.Fatalf("final TX targets after the race = %+v, want the press's target -- "+
+			"a clear must never be able to land after a press it raced", got)
 	}
 }
 

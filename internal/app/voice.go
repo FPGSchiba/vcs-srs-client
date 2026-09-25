@@ -37,6 +37,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
@@ -181,6 +182,15 @@ type voiceState struct {
 	// any press cancels it (see txPress) so it can never wipe out a
 	// transmission that has resumed before it fires.
 	clearTimer *time.Timer
+
+	// dial is voice.Dial by default (set in initVoice); startVoiceSession
+	// calls THROUGH this indirection rather than voice.Dial directly, so a
+	// test can install a slow or instrumented fake without ever opening a
+	// real socket -- this repo's sandbox blocks bind(2), which voice.Dial
+	// requires. See TestHandleVoiceRedirectDoesNotBlockOnASlowDial (M5),
+	// the regression for handleVoiceRedirect running the dial on its own
+	// goroutine instead of the state.Store observer's.
+	dial func(src voice.Sources, self uuid.UUID, secret string, opt voice.Options) (*voice.Session, error)
 }
 
 // cancelPendingTXClearLocked stops any TX-target clear scheduled by
@@ -199,6 +209,7 @@ func (v *voiceState) cancelPendingTXClearLocked() {
 func (a *App) initVoice() {
 	a.voice.bridge = &sessionBridge{}
 	a.voice.tx = map[string]*voice.TXTarget{}
+	a.voice.dial = voice.Dial
 	// OnRadiosChanged already exists for the per-radio keybind refresh
 	// (app.go); it fires on SetRadios/SetSelf/ClearSelf/RemoveClient, which
 	// covers a CLIENT_RADIO_UPDATE echo of our own UpdateRadioInfo push at
@@ -412,17 +423,32 @@ func txTargetsLocked(tx map[string]*voice.TXTarget) []voice.TXTarget {
 }
 
 // txPress adds actionID to the active-TX set (resolved target, or nil if it
-// cannot be resolved -- see resolveTXTarget) and returns the frequency list
-// to hand to SetTXFrequencies, plus freshStart: whether the set was EMPTY
-// before this press, i.e. this press starts a brand-new transmission rather
-// than joining one already in progress. The set is guaranteed non-empty
-// after this call, which is why dispatchAudioPressed does not need a "gate
-// open" return: a press can never be the transition that closes it.
+// cannot be resolved -- see resolveTXTarget) and, ATOMICALLY with that
+// mutation -- under voiceState.mu, in the SAME critical section -- installs
+// the resulting frequency list on the live session. The set is guaranteed
+// non-empty after this call, which is why dispatchAudioPressed does not need
+// a "gate open" return: a press can never be the transition that closes it.
+//
+// The session update must happen inside the same lock as the map mutation,
+// not after it. Before this fix, the caller read the map under the lock,
+// released it, and only THEN called SetTXFrequencies -- which left a window
+// where clearTXTargetsIfStillIdle's own (equally unlocked) store could land
+// AFTER this press's store, silently wiping the brand-new targets while the
+// gate stayed open (hotkey:pressed already fired, PTT lit) and every frame
+// was dropped as DroppedNoTarget: a fully silent transmission with a green
+// light on it. Holding voiceState.mu across both this store and the clear's
+// (see clearTXTargetsIfStillIdle) makes that interleaving impossible --
+// whichever one starts its critical section first finishes it before the
+// other can begin. See TestClearCannotRaceANewPress for the direct,
+// deterministic reproduction.
 //
 // A press also cancels any TX-target clear scheduled by an earlier
 // release's tail (see scheduleTXTargetClear, I3 fix): that clear must never
 // fire after a transmission has already resumed and wipe out its targets.
-func (a *App) txPress(actionID string) (targets []voice.TXTarget, freshStart bool) {
+// This is belt-and-suspenders with the atomicity above: cancelling here
+// closes the ordinary case (the timer has not fired yet), the shared lock
+// closes the rarer one (the timer's callback is already running).
+func (a *App) txPress(actionID string) {
 	target := a.resolveTXTarget(actionID)
 
 	a.voice.mu.Lock()
@@ -430,23 +456,47 @@ func (a *App) txPress(actionID string) (targets []voice.TXTarget, freshStart boo
 	if a.voice.tx == nil {
 		a.voice.tx = map[string]*voice.TXTarget{}
 	}
-	freshStart = len(a.voice.tx) == 0
+	freshStart := len(a.voice.tx) == 0
 	a.voice.cancelPendingTXClearLocked()
 	a.voice.tx[actionID] = target
-	return txTargetsLocked(a.voice.tx), freshStart
+
+	if sess := a.voice.sess; sess != nil {
+		// Bump the accumulator generation on the PRESS edge that STARTS a
+		// transmission, not on release (M1 fix) -- see the original comment
+		// this carried in dispatchAudioPressed before the fix wave that
+		// moved the session calls in here.
+		if freshStart {
+			sess.EndTransmission()
+		}
+		sess.SetTXFrequencies(txTargetsLocked(a.voice.tx))
+	}
 }
 
-// txRelease removes actionID from the active-TX set and reports whether any
-// OTHER action is still held (held == len(set) > 0 after the removal) --
+// txRelease removes actionID from the active-TX set and, when any OTHER
+// action is still held, installs the shrunk frequency list on the live
+// session -- atomically with the map mutation, under voiceState.mu, for the
+// identical reason txPress's session call moved in-lock (see its doc).
+//
+// held reports whether the set is still non-empty after the removal --
 // exactly Manager.SetPTT's gate condition, independent of whether either
-// action ever resolved to a real frequency.
-func (a *App) txRelease(actionID string) (targets []voice.TXTarget, held bool) {
+// action ever resolved to a real frequency. dispatchAudioReleased arms the
+// post-release clear (scheduleTXTargetClear) itself when held is false;
+// that call is deliberately OUTSIDE this method; scheduleTXTargetClear takes
+// voiceState.mu itself and calling it while still holding the lock here
+// would deadlock.
+func (a *App) txRelease(actionID string) (held bool) {
 	a.voice.mu.Lock()
 	defer a.voice.mu.Unlock()
 	if a.voice.tx != nil {
 		delete(a.voice.tx, actionID)
 	}
-	return txTargetsLocked(a.voice.tx), len(a.voice.tx) > 0
+	held = len(a.voice.tx) > 0
+	if held {
+		if sess := a.voice.sess; sess != nil {
+			sess.SetTXFrequencies(txTargetsLocked(a.voice.tx))
+		}
+	}
+	return held
 }
 
 // scheduleTXTargetClear arms a timer to clear the live voice session's TX
@@ -475,6 +525,21 @@ func (a *App) txRelease(actionID string) (targets []voice.TXTarget, held bool) {
 // transmission's tail to clear), and a subsequent press cancels it outright
 // (txPress) so a transmission that resumes before the clear fires is never
 // wiped out from under it.
+//
+// The scheduled delay adds a small margin -- clearTailMargin, two DSP frames
+// -- on top of the configured wall-clock ptt_release_delay_ms. The gate
+// (internal/audio/gate.go) counts its own tail in DSP FRAMES, not wall-clock
+// time: g.tail is seeded from the SAME PTTReleaseDelayMS, converted via
+// msToFrames, at the moment the key goes up. If the DSP loop is running
+// behind when that happens -- a device reopen, scheduler pressure -- the
+// frame-counted tail finishes later, in wall-clock terms, than this
+// millisecond timer does. Without the margin, this clear could fire and
+// wipe the session's TX targets while the gate is still counting down its
+// last frame or two, truncating exactly the tail manual check 8 expects on
+// the wire. The margin costs nothing when the DSP loop is on schedule (the
+// clear was always going to fire strictly after the gate closes, since the
+// gate's tail and this delay are seeded from the same config value); it
+// only matters when the loop has fallen behind.
 func (a *App) scheduleTXTargetClear() {
 	delayMS := 0
 	if sb := a.settings; sb != nil {
@@ -482,13 +547,22 @@ func (a *App) scheduleTXTargetClear() {
 		delayMS = sb.cfg.Audio.PTTReleaseDelayMS
 		sb.mu.Unlock()
 	}
-	delay := time.Duration(delayMS) * time.Millisecond
+	delay := time.Duration(delayMS)*time.Millisecond + clearTailMargin
 
 	a.voice.mu.Lock()
 	defer a.voice.mu.Unlock()
 	a.voice.cancelPendingTXClearLocked()
 	a.voice.clearTimer = time.AfterFunc(delay, a.clearTXTargetsIfStillIdle)
 }
+
+// clearTailMargin is added on top of ptt_release_delay_ms by
+// scheduleTXTargetClear so a DSP loop that is running slightly behind still
+// finishes emitting its frame-counted tail before the millisecond timer
+// clears the session's TX targets out from under it. Two frames (20 ms at
+// the fixed 10 ms cadence, audio.FrameDuration) -- enough slack for an
+// ordinary scheduling hiccup without meaningfully delaying VOX's stale-
+// target cleanup (I3).
+const clearTailMargin = 2 * audio.FrameDuration
 
 // clearTXTargetsIfStillIdle is scheduleTXTargetClear's deferred half. It
 // clears the live session's TX targets only if the active-TX set is STILL
@@ -497,16 +571,25 @@ func (a *App) scheduleTXTargetClear() {
 // under it (txPress's own cancel closes the more common ordering; this
 // double-check closes the one where the timer had already started running
 // when the press's cancel landed).
+//
+// The idle check and the SetTXFrequencies(nil) store below run inside the
+// SAME voiceState.mu critical section as txPress's mutation-plus-store (see
+// its doc). Before this fix they did not: the old version read stillIdle,
+// UNLOCKED, and only then called SetTXFrequencies(nil), leaving a window
+// where a press landing in that gap would win the idle check (which ran a
+// moment before) and still lose its own store to this one landing after it
+// -- gate open, transmit indicator lit, every frame silently dropped. This
+// closes that window: while this function holds voiceState.mu, txPress
+// cannot even begin building its own targets, so the two stores can no
+// longer interleave in either order.
 func (a *App) clearTXTargetsIfStillIdle() {
 	a.voice.mu.Lock()
+	defer a.voice.mu.Unlock()
 	a.voice.clearTimer = nil
-	stillIdle := len(a.voice.tx) == 0
-	a.voice.mu.Unlock()
-
-	if !stillIdle {
+	if len(a.voice.tx) != 0 {
 		return
 	}
-	if sess := a.voiceSession(); sess != nil {
+	if sess := a.voice.sess; sess != nil {
 		sess.SetTXFrequencies(nil)
 	}
 }
@@ -650,7 +733,16 @@ func (a *App) startVoiceSession() {
 		return
 	}
 	gen := a.nextVoiceGeneration()
-	sess, err := voice.Dial(src, self, secret, a.voiceDialOptions())
+	// Through a.voice.dial, not voice.Dial directly -- see voiceState.dial's
+	// doc for why (test seam; defaults to voice.Dial in initVoice). Read
+	// under the lock: dial itself is set once, at construction, and never
+	// mutated in production, but a test installing a fake races this read
+	// against that assignment absent the lock, and the race detector
+	// (mandatory in this repo's CI) would flag it.
+	a.voice.mu.Lock()
+	dial := a.voice.dial
+	a.voice.mu.Unlock()
+	sess, err := dial(src, self, secret, a.voiceDialOptions())
 	if err != nil {
 		a.logger.Warn("voice: dial failed; voice is unavailable for this session", "err", err)
 		return
@@ -681,6 +773,25 @@ func (a *App) stopVoiceSession() { a.setVoiceSession(nil, 0) }
 // anything. That call is a no-op here (live is false), which is why the
 // dial in startVoiceSession, not this observer, owns bringing a session up
 // for the first time.
+//
+// startVoiceSession -- specifically voice.Dial inside it -- runs on its OWN
+// goroutine, not this one. state.Store's observer contract (see
+// OnVoiceCredentialsChanged's doc) requires an observer not block: this is
+// called synchronously from route() on internal/control's ConsumeUpdates
+// goroutine, the same one that delivers every OTHER control update (client
+// list, radio echoes, connection state). voice.Dial can block up to
+// resolveTimeout (10s) resolving a blackholed hostname; running it inline
+// here used to stall that whole goroutine -- and therefore every other
+// control update -- for up to 10s on every redirect.
+//
+// This is safe without the caller waiting on it: nextVoiceGeneration is
+// still taken (inside startVoiceSession, on this new goroutine) before the
+// dial, and voiceSessionSwap still compares against the live generation
+// immediately before installing -- so a late-arriving dial from an old
+// redirect race, or one that outlives a concurrent Disconnect/
+// ServiceShutdown, is still closed rather than installed exactly as
+// before. Moving the dial off this goroutine does not touch that gate at
+// all; it only stops THIS caller from being the one left waiting on it.
 func (a *App) handleVoiceRedirect() {
 	a.voice.mu.Lock()
 	live := a.voice.sess != nil
@@ -688,7 +799,7 @@ func (a *App) handleVoiceRedirect() {
 	if !live {
 		return
 	}
-	a.startVoiceSession()
+	go a.startVoiceSession()
 }
 
 // refreshRXContext recomputes the RX frequency filter -- the local client's
@@ -833,10 +944,89 @@ func (a *App) persistRadios(dtos []RadioDTO) error {
 }
 
 // persistSelectedRadio writes the newly selected radio id to local config
-// (M4 fix). Called from both SelectRadio (the UI binding) and the
-// radio.<n>.select hotkey action, so either path survives a restart. Same
-// nil-settings no-op discipline as persistRadios above.
+// (M4 fix), SYNCHRONOUSLY on the caller's goroutine. Used by SelectRadio
+// (the UI binding), which already runs on its own Wails-dispatched
+// goroutine, is never called from gohook's event-reader goroutine, and
+// returns this error straight to its own caller -- none of which apply to
+// the hotkey path (radio.<n>.select), which uses
+// queueSelectedRadioPersist instead. See that method's doc for why the two
+// paths differ and how they share one ordering guard.
 func (a *App) persistSelectedRadio(id uint32) error {
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+	return a.persistSelectedRadioSeq(id, a.nextRadioSelectSeq())
+}
+
+// queueSelectedRadioPersist persists id OFF the caller's goroutine (M6 fix).
+// dispatchAudioPressed's radio.<n>.select handling used to call
+// persistSelectedRadio synchronously -- a full config.Save under
+// sb.writeMu -- on gohook's event-reader goroutine. internal/hotkeys/
+// dispatch.go's own doc says the OS event stream "must not be able to
+// stall behind" a Handler call, and that package documents a dropped KeyUp
+// (gohook drops events from a full 1024-slot buffer rather than blocking
+// the OS input path) as a cause of a STRANDED-OPEN MIC. writeMu is also
+// held across SetSettings applies and hotkey re-registration, so the worst
+// case here is well beyond a normal ~1ms save.
+//
+// The in-memory selection (state.Store.SetSelectedRadio) is applied by the
+// caller BEFORE this is queued, so the only thing deferred is the disk
+// write -- a crash between the two loses only the restart-survival
+// guarantee for this one selection, not the selection itself, which is
+// already live.
+//
+// ORDERING is preserved despite running on a fresh goroutine per call: the
+// sequence number is taken synchronously, on the CALLER's goroutine,
+// before the persist goroutine is even spawned, so seq order always
+// matches request order -- even though the spawned goroutines' own
+// scheduling (and therefore the order they actually reach sb.writeMu) is
+// not guaranteed to preserve it. persistSelectedRadioSeq refuses to write
+// a seq older than the newest one already persisted, so whichever
+// goroutine's write actually lands last in real time always carries the
+// newest requested selection: a late-scheduled goroutine for an OLDER
+// press can never clobber a newer press's already-persisted value.
+func (a *App) queueSelectedRadioPersist(id uint32) {
+	sb := a.settings
+	if sb == nil {
+		return
+	}
+	seq := a.nextRadioSelectSeq()
+	go func() {
+		if err := a.persistSelectedRadioSeq(id, seq); err != nil {
+			a.logger.Warn("voice: failed to persist selected radio", "err", err)
+		}
+	}()
+}
+
+// nextRadioSelectSeq bumps and returns the monotonic ordering sequence
+// persistSelectedRadioSeq uses to reject a stale, out-of-order write (see
+// queueSelectedRadioPersist's doc). 0 is never a value a real call
+// returns -- sb == nil returns it as a sentinel, and the first real call
+// returns 1 -- which is what lets radioSelectPersistedSeq's zero value mean
+// "nothing persisted yet" unambiguously.
+func (a *App) nextRadioSelectSeq() uint64 {
+	sb := a.settings
+	if sb == nil {
+		return 0
+	}
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	sb.radioSelectSeq++
+	return sb.radioSelectSeq
+}
+
+// persistSelectedRadioSeq is persistSelectedRadio's core, taking the
+// ordering sequence number explicitly so both the synchronous
+// (persistSelectedRadio/SelectRadio) and asynchronous
+// (queueSelectedRadioPersist) callers share one stale-write guard: a seq
+// older than the newest one already persisted is a no-op (nil error, not
+// a failure -- the newer write already did this call's job, better).
+// seq == 0 (the sb == nil sentinel from nextRadioSelectSeq; unreachable
+// here since sb is already known non-nil by the time this runs, but kept
+// as an explicit non-guarded fallback rather than an assumption) always
+// proceeds.
+func (a *App) persistSelectedRadioSeq(id uint32, seq uint64) error {
 	sb := a.settings
 	if sb == nil {
 		return nil
@@ -846,6 +1036,10 @@ func (a *App) persistSelectedRadio(id uint32) error {
 	defer sb.writeMu.Unlock()
 
 	sb.mu.Lock()
+	if seq != 0 && seq < sb.radioSelectPersistedSeq {
+		sb.mu.Unlock()
+		return nil
+	}
 	next := *sb.cfg
 	next.SelectedRadioID = id
 	var saveErr error
@@ -854,6 +1048,9 @@ func (a *App) persistSelectedRadio(id uint32) error {
 	}
 	if saveErr == nil {
 		sb.cfg = &next
+		if seq != 0 {
+			sb.radioSelectPersistedSeq = seq
+		}
 	}
 	sb.mu.Unlock()
 	if saveErr != nil {
