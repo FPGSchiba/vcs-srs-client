@@ -715,10 +715,20 @@ func (a *App) voiceDialOptions() voice.Options {
 
 // startVoiceSession dials a fresh voice session against the store's current
 // credentials/addresses and installs it. It captures the generation
-// (nextVoiceGeneration) itself and delegates to startVoiceSessionWithGen --
-// for Connect and Reconnect, the only remaining direct callers, there is no
-// ordered-goroutine race to preserve, so capturing here is equivalent to
-// capturing at the top of startVoiceSessionWithGen.
+// (nextVoiceGeneration) itself and delegates to startVoiceSessionWithGen.
+//
+// Connect is its only caller. That caller is already on its own binding
+// goroutine with no second dial racing it, so there is no ordering to
+// preserve and capturing here is equivalent to capturing inside
+// startVoiceSessionWithGen. (Reconnect does NOT call this: the voice half
+// recovers on its own, because session.Reconnect's SyncClient refreshes the
+// credentials, which notifies handleVoiceRedirect.)
+//
+// One consequence of capturing in the argument list: a Connect that returns
+// early inside startVoiceSessionWithGen -- no voice secret yet, or an
+// unparseable self GUID -- still burns a generation. That is harmless. The
+// generation is a pure monotonic epoch compared only for equality in
+// voiceSessionSwap, so an unused number gates nothing and strands nothing.
 //
 // handleVoiceRedirect does NOT call this: it captures its own generation
 // and calls startVoiceSessionWithGen directly. See that function's doc.
