@@ -32,6 +32,67 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Phase 5's voice tests run against the REAL server rather than a
+      # hand-written fake. A fake can only encode our own reading of the
+      # protocol, so it cannot catch a MISREADING of it -- which is the
+      # largest single risk in an interop phase spanning three
+      # independently-written implementations. Both repos are public, so
+      # this needs no credentials.
+      #
+      # -tags headless excludes the server's Wails GUI, so no GTK/WebKit
+      # is required on any runner for this build.
+      - name: Check out the VCS server
+        uses: actions/checkout@v7
+        with:
+          repository: FPGSchiba/vcs-srs-server
+          ref: main
+          path: .vcs-srs-server
+
+      # The checked-out server has its OWN gitignored generated code --
+      # srspb/, voicecontrolpb/, vcsauthpb/ (protoc) and graphql/generated/
+      # (gqlgen) -- exactly the same situation our own srspb/ is in. This
+      # was NOT obvious from the task brief and only surfaced by actually
+      # trying to build the checkout: `go build -tags headless .` fails
+      # with "no required module provides package .../srspb" etc. until
+      # these run first. Mirrors the server repo's own CI
+      # (FPGSchiba/vcs-srs-server/.github/workflows/test.yml) exactly, so
+      # it stays in lockstep with however upstream generates it.
+      - name: Install protoc · Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc · macOS
+        if: matrix.os == 'macos-latest'
+        run: brew install protobuf
+
+      - name: Install protoc · Windows
+        if: matrix.os == 'windows-latest'
+        run: choco install -y protoc
+
+      - name: Install protoc plugins for the VCS server
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+      - name: Generate the VCS server's protobuf and GraphQL code
+        working-directory: .vcs-srs-server
+        run: |
+          mkdir -p srspb voicecontrolpb vcsauthpb
+          protoc --go_out=./srspb --go_opt=paths=source_relative --go-grpc_out=./srspb --go-grpc_opt=paths=source_relative srs.proto
+          protoc --go_out=./voicecontrolpb --go_opt=paths=source_relative --go-grpc_out=./voicecontrolpb --go-grpc_opt=paths=source_relative control.proto
+          protoc --go_out=./vcsauthpb --go_opt=paths=source_relative --go-grpc_out=./vcsauthpb --go-grpc_opt=paths=source_relative vcs-auth-plugin.proto
+          go run github.com/99designs/gqlgen@$(go list -m -f '{{.Version}}' github.com/99designs/gqlgen) generate
+
+      - name: Build the headless VCS server
+        run: |
+          cd .vcs-srs-server
+          go build -tags headless -o "${{ runner.temp }}/vcs-server${{ runner.os == 'Windows' && '.exe' || '' }}" .
+
+      - name: Export the server binary path
+        run: echo "VCS_SERVER_BIN=${{ runner.temp }}/vcs-server${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
+
       # Wails v3 (alpha.96) links against GTK4 + WebKitGTK 6.0 on Linux. The
       # race-enabled `go test ./...` and `go build` compile the main package,
       # which imports the Wails application (cgo), so these dev headers must be

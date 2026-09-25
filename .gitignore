@@ -13,6 +13,11 @@ log/
 srspb/
 frontend/bindings/
 
+# Task 12: the real vcs-srs-server, checked out by CI (and optionally by
+# hand, locally) to build VCS_SERVER_BIN for internal/voice's integration
+# suite. Never vendored.
+.vcs-srs-server/
+
 # runtime artefacts
 *.log
 
