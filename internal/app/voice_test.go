@@ -1469,3 +1469,37 @@ func TestVoiceDialOptionsWiresJitterAndMaxBufferMS(t *testing.T) {
 		t.Errorf("MaxBufferMS = %d, want 750", opts.MaxBufferMS)
 	}
 }
+
+// TestReconnectVoice_ReturnsErrorWhenNoSessionAvailable is part of F8's fix
+// (Phase 6 whole-branch review). Before this, ReconnectVoice always returned
+// nil, so the banner's failure slot was unreachable for the voice variant: a
+// reconnect that could not even start showed RECONNECTING… and then silence.
+func TestReconnectVoice_ReturnsErrorWhenNoSessionAvailable(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	// No voice secret set -- one of the documented voice-unavailable paths
+	// startVoiceSessionWithGen's doc names.
+
+	if err := a.ReconnectVoice(); err == nil {
+		t.Fatal("ReconnectVoice() = nil error with no voice secret available, want a reported failure")
+	}
+}
+
+// TestReconnectVoice_ReturnsErrorOnDialFailure covers the other half of F8:
+// a dial that starts but fails must also be reported, not just the
+// voice-unavailable paths.
+func TestReconnectVoice_ReturnsErrorOnDialFailure(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	a.st.SetSelf("00000000-0000-0000-0000-000000000001", nil)
+	a.st.SetVoiceCredentials("secret", "10.0.0.9:5002", "")
+
+	dialErr := errors.New("fake dial: refused")
+	a.voice.mu.Lock()
+	a.voice.dial = func(voice.Sources, uuid.UUID, string, voice.Options) (*voice.Session, error) {
+		return nil, dialErr
+	}
+	a.voice.mu.Unlock()
+
+	if err := a.ReconnectVoice(); err == nil {
+		t.Fatal("ReconnectVoice() = nil error on a dial failure, want it reported")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -54,6 +55,40 @@ func TestBinding_ConnectDelegates(t *testing.T) {
 	}
 	if !fs.connected || fs.lastURL != "localhost:5002" {
 		t.Fatalf("Connect did not delegate: %+v", fs)
+	}
+}
+
+// TestConnect_SetsHealthMonitorServer is F1's regression test (Phase 6
+// whole-branch review). cfg.ServerURL is never written -- there is no
+// Settings field for it and the Welcome form's address never reaches
+// config -- so main.go's startup monitor.SetServer(cfg.ServerURL) was always
+// SetServer(""), and the status bar's `.val` rendered "standalone" in both
+// segments on every default install, even while connected. Connect must feed
+// the monitor the address it actually just dialed.
+func TestConnect_SetsHealthMonitorServer(t *testing.T) {
+	fs := &fakeSession{}
+	a := app.NewForTest(state.New(), fs, &fakeWindows{})
+	m := connhealth.New(connhealth.Options{})
+	a.SetConnHealth(m)
+
+	if err := a.Connect("192.168.1.50:5002", "n", "p", "u"); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	if got := m.Snapshot().Server; got != "192.168.1.50:5002" {
+		t.Errorf("Server = %q, want %q", got, "192.168.1.50:5002")
+	}
+}
+
+// TestConnect_WithNoMonitorWired_DoesNotPanic guards F1's fix against the
+// same optional-dependency discipline every other a.health use site follows:
+// tests, and any build where wiring failed, leave the monitor nil.
+func TestConnect_WithNoMonitorWired_DoesNotPanic(t *testing.T) {
+	fs := &fakeSession{}
+	a := app.NewForTest(state.New(), fs, &fakeWindows{})
+
+	if err := a.Connect("localhost:5002", "n", "p", "u"); err != nil {
+		t.Fatalf("Connect: %v", err)
 	}
 }
 

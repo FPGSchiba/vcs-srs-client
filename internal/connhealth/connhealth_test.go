@@ -174,6 +174,12 @@ func TestTick_EchoesPreviousRTTToPing(t *testing.T) {
 	// The echo is the sole input to the server's per-client latency map
 	// (srs/srs_service.go Ping writes client.LatencyToControlMs = LastRttMs),
 	// so dropping it leaves that map at zero for every VCS client forever.
+	//
+	// F2 (Phase 6 whole-branch review): the FIRST echo of every connection
+	// must be 0, not connhealth.RTTUnknown (-1). RTTUnknown is this
+	// package's internal sentinel for "nothing measured" -- echoing it
+	// verbatim put -1 straight onto the wire via control.PingRequest and
+	// into every peer's roster as this client's LatencyToControlMs.
 	var seen []int64
 	m := connhealth.New(connhealth.Options{
 		Ping: func(_ context.Context, last int64) (int64, error) {
@@ -189,11 +195,12 @@ func TestTick_EchoesPreviousRTTToPing(t *testing.T) {
 	if len(seen) != 2 {
 		t.Fatalf("Ping called %d times, want 2", len(seen))
 	}
-	if seen[0] != connhealth.RTTUnknown {
-		t.Errorf("first echo = %d, want %d", seen[0], connhealth.RTTUnknown)
+	if seen[0] != 0 {
+		t.Errorf("first echo = %d, want 0 (RTTUnknown clamped, not the raw sentinel %d)",
+			seen[0], connhealth.RTTUnknown)
 	}
 	if seen[1] != 12 {
-		t.Errorf("second echo = %d, want 12 (the first probe's measurement)", seen[1])
+		t.Errorf("second echo = %d, want 12 (a real measurement, unchanged by the clamp)", seen[1])
 	}
 }
 

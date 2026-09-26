@@ -61,6 +61,21 @@ func (m *Monitor) Tick(ctx context.Context) {
 	voiceConnected := voiceAvailable && m.snap.Voice.State == StateConnected
 	m.mu.Unlock()
 
+	// F2 fix (Phase 6 whole-branch review): RTTUnknown (-1) is this
+	// package's internal sentinel for "nothing measured yet" -- see its doc.
+	// It is genuinely held for one tick after every transition (SetControlState
+	// resets RTTMs to it). Echoing it verbatim into Ping puts -1 straight onto
+	// the wire as control.PingRequest.LastRttMs, and the server writes that
+	// into client.LatencyToControlMs -- which every OTHER client's roster
+	// reads -- so an un-clamped echo corrupted every peer's view of this
+	// client's latency for the first tick of every connection, not just this
+	// client's own. Clamped here, where the sentinel is defined and its
+	// meaning is known -- internal/control only ever sees a plain number and
+	// has no way to tell a sentinel from a real (if implausible) -1ms.
+	if lastRTT < 0 {
+		lastRTT = 0
+	}
+
 	if !connected {
 		// Nothing to probe. Hammering a server already known to be gone is
 		// noise, and a probe against a nil control client can only fail,

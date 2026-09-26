@@ -28,6 +28,18 @@ func (a *App) Connect(serverURL, name, password, unitID string) error {
 	if err := a.sess.Connect(ctx, serverURL, name, password, unitID); err != nil {
 		return err
 	}
+	// F1 fix (Phase 6 whole-branch review): cfg.ServerURL is never written --
+	// there is no Settings field for it and the Welcome form's address never
+	// reaches config -- so main.go's startup monitor.SetServer(cfg.ServerURL)
+	// is always SetServer(""), and the status bar's `.val` rendered
+	// "standalone" on every default install even while connected. This is
+	// the ACTUAL address just dialed, which is what the surface needs. Guard
+	// for nil the same as every other a.health use site (voice.go, bindings.go
+	// GetConnectionState): tests and any build where wiring failed leave it
+	// unset.
+	if a.health != nil {
+		a.health.SetServer(serverURL)
+	}
 	a.pushPersistedRadios(ctx)
 	a.startVoiceSession()
 	return nil
@@ -142,12 +154,17 @@ func (a *App) GetConnectionState() ConnectionStateDTO {
 // banner's RECONNECT VOICE button can force the attempt NOW rather than
 // leaving the user to wait out the current rung.
 //
-// It returns nil when no session could be started (no voice secret yet, an
-// unparseable self GUID, a build whose codec is the stub): those are the
-// documented voice-unavailable paths, not errors the user can act on, and
-// startVoiceSession already logs each one.
+// F8 fix (Phase 6 whole-branch review): it now returns an error when no
+// session could be started -- no voice secret yet, an unparseable self GUID,
+// a build whose codec is the stub, or a dial failure -- because those are
+// exactly the cases worth reporting through the banner's failure slot: a
+// user who clicks RECONNECT VOICE and gets `RECONNECTING…` followed by
+// silence has no way to learn why. This is deliberately NOT the same
+// discipline as startVoiceSession's other callers (Connect/Reconnect, via
+// the void-returning startVoiceSession wrapper): those must not fail the
+// control connection over a missing voice capability, but this call exists
+// FOR THE USER to ask "why didn't that work", so the answer must reach them.
 func (a *App) ReconnectVoice() error {
 	a.stopVoiceSession()
-	a.startVoiceSession()
-	return nil
+	return a.startVoiceSessionWithGen(a.nextVoiceGeneration())
 }
