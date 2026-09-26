@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { StrictMode, useState } from "react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 import { KeyChip } from "./KeyChip";
 
@@ -54,7 +55,12 @@ describe("KeyChip", () => {
   // called out explicitly: the backend suspends all hotkeys while listening,
   // so a chip that unmounts mid-capture MUST cancel or every hotkey stays
   // dead until the server-side timeout.
-  it("cancels on unmount while listening", () => {
+  // Awaited, not synchronous: the unmount cancel is deferred by one
+  // microtask so StrictMode's simulated unmount can veto it (see the
+  // StrictMode block at the bottom of this file). The CONTRACT is
+  // unchanged -- a real unmount while listening still cancels -- only the
+  // tick it lands on moved.
+  it("cancels on unmount while listening", async () => {
     const onCapture = vi.fn();
     const onCancel = vi.fn();
     const { unmount } = render(
@@ -62,7 +68,7 @@ describe("KeyChip", () => {
     );
     fireEvent.click(screen.getByText("—"));
     unmount();
-    expect(onCancel).toHaveBeenCalled();
+    await waitFor(() => expect(onCancel).toHaveBeenCalled());
     expect(onCapture).not.toHaveBeenCalled();
   });
 
@@ -91,5 +97,94 @@ describe("KeyChip", () => {
     expect(onCancel).toHaveBeenCalled();
     expect(onCapture).not.toHaveBeenCalled();
     expect(screen.queryByText("PRESS…")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Both window roots render inside `React.StrictMode` (frontend/src/main.tsx
+ * and comms.tsx), which in development runs every effect as
+ * setup -> cleanup -> setup on the same element. The suite above renders
+ * bare, so it never exercised that, and a real defect hid behind the gap:
+ * the unmount-cancel fired on StrictMode's SIMULATED unmount and killed
+ * every capture the instant it began. These tests render the way the app
+ * actually does.
+ */
+describe("KeyChip under StrictMode", () => {
+  /** Mirrors Keybinds.tsx: a "+" button type-swaps into an autoListen chip. */
+  function Row({ onCancel }: { onCancel: () => void }) {
+    const [capturing, setCapturing] = useState(false);
+    return capturing ? (
+      <KeyChip
+        binding=""
+        autoListen
+        onCapture={() => {}}
+        onCancel={() => {
+          onCancel();
+          setCapturing(false);
+        }}
+      />
+    ) : (
+      <button type="button" onClick={() => setCapturing(true)}>
+        +
+      </button>
+    );
+  }
+
+  it("keeps listening after the capture affordance is clicked", async () => {
+    const onCancel = vi.fn();
+    render(
+      <StrictMode>
+        <Row onCancel={onCancel} />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByText("+"));
+    // Awaited: the cancel this asserts against is deferred by a microtask,
+    // so a synchronous assertion would pass even with the bug present.
+    await waitFor(() => expect(screen.queryByText("PRESS\u2026")).toBeInTheDocument());
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("still delivers the captured key", async () => {
+    const onCapture = vi.fn();
+    render(
+      <StrictMode>
+        <KeyChip binding="" autoListen onCapture={onCapture} onCancel={() => {}} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(screen.queryByText("PRESS\u2026")).toBeInTheDocument());
+    fireEvent.keyDown(window, { code: "KeyV", key: "v" });
+    expect(onCapture).toHaveBeenCalledWith({
+      code: "KeyV",
+      ctrl: false,
+      alt: false,
+      shift: false,
+      super: false,
+    });
+  });
+
+  // The row switch the deferred cancel must NOT break: a genuine unmount
+  // while listening still has to tell the backend, or clicking another row
+  // leaves the first capture suspended until the backend's own timeout.
+  it("still cancels on a real unmount while listening", async () => {
+    const onCancel = vi.fn();
+    const { unmount } = render(
+      <StrictMode>
+        <KeyChip binding="" autoListen onCapture={() => {}} onCancel={onCancel} />
+      </StrictMode>,
+    );
+    unmount();
+    await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not cancel on unmount when it was never listening", async () => {
+    const onCancel = vi.fn();
+    const { unmount } = render(
+      <StrictMode>
+        <KeyChip binding="F1" onCapture={() => {}} onCancel={onCancel} />
+      </StrictMode>,
+    );
+    unmount();
+    await new Promise((r) => queueMicrotask(() => r(null)));
+    expect(onCancel).not.toHaveBeenCalled();
   });
 });
