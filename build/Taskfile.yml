@@ -157,7 +157,23 @@ tasks:
       - "darwin/icons.icns"
       - "windows/icon.ico"
     cmds:
-      - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico -iconcomposerinput appicon.icon -macassetdir darwin
+      # -iconcomposerinput/-macassetdir make wails3 run Xcode's `actool` to
+      # build an Assets.car from an Icon Composer document. build/appicon.icon
+      # is NOT in this repo, so on macOS that failed the whole release build
+      # with a bare "failed to run actool: exit status 1" -- no mention of the
+      # missing input. Only macOS runs actool, which is why nothing else ever
+      # tripped over it, and release.yml has never run before now.
+      #
+      # Assets.car is already optional downstream (build/darwin/Taskfile.yml
+      # copies it only `if [ -f ... ]`), so asking for it when the source is
+      # absent was the outlier. Add build/appicon.icon and this starts
+      # producing one again, with no further change here.
+      - |
+        if [ -f appicon.icon ]; then
+          wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico -iconcomposerinput appicon.icon -macassetdir darwin
+        else
+          wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico
+        fi
 
   dev:frontend:
     summary: Runs the frontend in development mode
