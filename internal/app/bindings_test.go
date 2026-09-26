@@ -34,6 +34,8 @@ func (f *fakeSession) Disconnect(ctx context.Context) error {
 
 func (f *fakeSession) Reconnect(_ context.Context) error                           { return nil }
 func (f *fakeSession) UpdateRadioInfo(_ context.Context, _ *srspb.RadioInfo) error { return nil }
+func (f *fakeSession) PingOnce(_ context.Context, _ int64) (int64, error)          { return 1, nil }
+func (f *fakeSession) MarkControlLost()                                            {}
 
 type fakeWindows struct{ opened []string }
 

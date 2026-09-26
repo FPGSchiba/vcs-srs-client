@@ -1,6 +1,9 @@
 package app
 
-import srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
+import (
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
+	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
+)
 
 // RadioDTO is the binding-facing radio shape.
 type RadioDTO struct {
@@ -353,6 +356,49 @@ type HotkeyStateDTO struct {
 	// "denied"; Windows and Linux/X11 report "not_applicable", which is the
 	// UI's signal to offer no permission affordance at all.
 	Permission string `json:"permission"`
+}
+
+// ConnLinkDTO is one transport plane's health, mirroring connhealth.Link.
+//
+// RTTMs is -1 when nothing has been measured, never 0 -- see
+// connhealth.RTTUnknown for why the distinction is load-bearing. The
+// frontend renders -1 as an em dash.
+type ConnLinkDTO struct {
+	State     string `json:"state"`
+	RTTMs     int64  `json:"rtt_ms"`
+	Healthy   bool   `json:"healthy"`
+	Available bool   `json:"available"`
+	Error     string `json:"error"`
+}
+
+// ConnectionStateDTO is the connection:state event payload and
+// GetConnectionState's return, mirroring connhealth.Snapshot.
+type ConnectionStateDTO struct {
+	Server  string      `json:"server"`
+	Control ConnLinkDTO `json:"control"`
+	Voice   ConnLinkDTO `json:"voice"`
+}
+
+// ConnectionStateDTOFrom converts a connhealth.Snapshot to its wire shape.
+// One shared converter for the event path and the getter, for exactly the
+// reason AudioStateDTOFrom exists: a hand-written mapping on one of the two
+// paths is how fields silently go missing from the other.
+func ConnectionStateDTOFrom(s connhealth.Snapshot) ConnectionStateDTO {
+	return ConnectionStateDTO{
+		Server:  s.Server,
+		Control: connLinkDTOFrom(s.Control),
+		Voice:   connLinkDTOFrom(s.Voice),
+	}
+}
+
+func connLinkDTOFrom(l connhealth.Link) ConnLinkDTO {
+	return ConnLinkDTO{
+		State:     l.State,
+		RTTMs:     l.RTTMs,
+		Healthy:   l.Healthy,
+		Available: l.Available,
+		Error:     l.Error,
+	}
 }
 
 // HotkeyPermissionResultDTO is the result of RequestHotkeyPermission.

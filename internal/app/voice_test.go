@@ -52,6 +52,9 @@ func (f *fakeControlSession) Connect(context.Context, string, string, string, st
 func (f *fakeControlSession) Disconnect(context.Context) error { return nil }
 func (f *fakeControlSession) Reconnect(context.Context) error  { return nil }
 
+func (f *fakeControlSession) PingOnce(context.Context, int64) (int64, error) { return 1, nil }
+func (f *fakeControlSession) MarkControlLost()                               {}
+
 func (f *fakeControlSession) UpdateRadioInfo(_ context.Context, info *srspb.RadioInfo) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -87,6 +90,8 @@ type fakeVoiceSession struct {
 	effectsSet []effectsCall
 	closed     int
 	state      voice.State
+
+	rtt time.Duration
 
 	// blockOnEmptySetTX, when non-nil, is invoked synchronously from inside
 	// SetTXFrequencies whenever it is called with an EMPTY (nil or
@@ -148,6 +153,12 @@ func (f *fakeVoiceSession) SetEffects(voiceEffect, clippingEffect string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.effectsSet = append(f.effectsSet, effectsCall{voiceEffect: voiceEffect, clippingEffect: clippingEffect})
+}
+
+func (f *fakeVoiceSession) RTT() time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rtt
 }
 
 func (f *fakeVoiceSession) Close() error {

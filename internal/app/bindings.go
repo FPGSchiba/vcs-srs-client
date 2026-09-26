@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 )
@@ -109,3 +110,44 @@ func (a *App) GetWindowGeometry(id string) windowstate.Geometry { return a.windo
 
 // SetWindowGeometry records a window's geometry (from debounced move/resize).
 func (a *App) SetWindowGeometry(id string, g windowstate.Geometry) { a.windows.SetGeometry(id, g) }
+
+// GetConnectionState returns the current connection-health snapshot, for a
+// window hydrating on mount. The push counterpart is the connection:state
+// event; this exists because a window opened AFTER a transition has missed
+// it -- exactly the precedent GetHotkeyState, GetJoystickState and
+// GetAudioState set.
+//
+// With no monitor wired it answers honestly -- disconnected, voice
+// unavailable, nothing measured -- rather than panicking or claiming health
+// nothing has confirmed.
+func (a *App) GetConnectionState() ConnectionStateDTO {
+	if a.health == nil {
+		return ConnectionStateDTOFrom(connhealth.Snapshot{
+			Control: connhealth.Link{
+				State: connhealth.StateDisconnected, RTTMs: connhealth.RTTUnknown, Available: true,
+			},
+			Voice: connhealth.Link{
+				State: connhealth.StateUnavailable, RTTMs: connhealth.RTTUnknown,
+			},
+		})
+	}
+	return ConnectionStateDTOFrom(a.health.Snapshot())
+}
+
+// ReconnectVoice tears the live voice session down and dials a fresh one.
+//
+// The voice plane already recovers on its own -- voice.Session re-HELLOs on
+// its ladder and, failing that, re-dials a fresh socket every 15s
+// indefinitely -- so this is not the only route back. It exists so the
+// banner's RECONNECT VOICE button can force the attempt NOW rather than
+// leaving the user to wait out the current rung.
+//
+// It returns nil when no session could be started (no voice secret yet, an
+// unparseable self GUID, a build whose codec is the stub): those are the
+// documented voice-unavailable paths, not errors the user can act on, and
+// startVoiceSession already logs each one.
+func (a *App) ReconnectVoice() error {
+	a.stopVoiceSession()
+	a.startVoiceSession()
+	return nil
+}

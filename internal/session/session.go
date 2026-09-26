@@ -72,9 +72,25 @@ func New(st *state.Store, em events.Emitter, dep Deps) *Session {
 // site can ever feed one without the other.
 func (s *Session) setConnState(st events.ConnectionState) {
 	events.New(s.em).ConnectionState(st)
-	if s.dep.OnControlState != nil {
-		s.dep.OnControlState(st)
+	s.mu.Lock()
+	fn := s.dep.OnControlState
+	s.mu.Unlock()
+	if fn != nil {
+		fn(st)
 	}
+}
+
+// SetControlStateObserver installs the control-transition observer after
+// construction. It exists because the session and the health monitor each
+// need the other -- the monitor probes through Session.PingOnce, the session
+// reports through the monitor's SetControlState -- so one of the two links
+// must be late-bound, and this is the one with somewhere to put it.
+//
+// Must be called before Connect. Setting it twice replaces the first.
+func (s *Session) SetControlStateObserver(fn func(events.ConnectionState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dep.OnControlState = fn
 }
 
 // startStreamLocked launches the update-stream consumer and returns the

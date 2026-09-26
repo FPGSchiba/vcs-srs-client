@@ -4,6 +4,7 @@ import (
 	"embed"
 	"log"
 	"log/slog"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -11,6 +12,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	vcsevents "github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
@@ -124,6 +126,37 @@ func main() {
 	}
 	registry := app.NewRegistry(app.NewWailsFactory(wailsApp), winPath, emitter)
 	gui.SetBackend(sess, registry)
+
+	// Connection health: one model, one ticker, one event, fed from the same
+	// call sites that emit the control lifecycle event (see
+	// session.Deps.OnControlState) so the two cannot disagree about the link.
+	healthEvents := vcsevents.New(emitter)
+	interval := time.Duration(cfg.PingIntervalSeconds) * time.Second
+	monitor := connhealth.New(connhealth.Options{
+		Interval: interval, // 0 falls back to connhealth.DefaultInterval
+		Ping:     sess.PingOnce,
+		VoiceRTT: gui.VoiceRTT,
+		// The Monitor does not set disconnected itself: the session emits it
+		// through its single normal path, which comes straight back in via
+		// SetControlState. One emission path, two detectors.
+		OnLoss: sess.MarkControlLost,
+		OnChange: func(s connhealth.Snapshot) {
+			healthEvents.ConnectionHealth(app.ConnectionStateDTOFrom(s))
+		},
+	})
+	monitor.SetServer(cfg.ServerURL)
+	gui.SetConnHealth(monitor)
+	monitor.Start()
+	defer monitor.Stop()
+
+	// session.New's construction above is unchanged. The observer is
+	// installed after the monitor exists, because the two halves need each
+	// other -- the monitor probes through sess.PingOnce, the session reports
+	// through the monitor's SetControlState -- so one of the two links must
+	// be late-bound, and the session is the one with somewhere to put it.
+	sess.SetControlStateObserver(func(st vcsevents.ConnectionState) {
+		monitor.SetControlState(string(st))
+	})
 
 	// Keybind store, seeded from config (falls back to shipped defaults on a
 	// fresh install), and the OS hotkey manager. App itself implements

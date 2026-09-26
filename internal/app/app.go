@@ -8,6 +8,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
@@ -35,6 +36,12 @@ type sessionAPI interface {
 	Disconnect(ctx context.Context) error
 	Reconnect(ctx context.Context) error
 	UpdateRadioInfo(ctx context.Context, info *srspb.RadioInfo) error
+	// PingOnce probes the control plane. Driven by the connhealth ticker;
+	// returns an error when no control client is live.
+	PingOnce(ctx context.Context, lastRTTMs int64) (int64, error)
+	// MarkControlLost declares the control link dead after the probe
+	// threshold trips. Idempotent against the stream-termination path.
+	MarkControlLost()
 }
 
 // windowsAPI is the window-registry surface the bindings depend on.
@@ -67,6 +74,11 @@ type App struct {
 	// TX set and the Sink/Source bridge main.go registers with the audio
 	// Manager exactly once, at startup. See voice.go.
 	voice voiceState
+
+	// health is the connection-health model. Optional, the same discipline
+	// as settings.audio and settings.joy: nil in tests and in any build
+	// where wiring failed, so every use site must check.
+	health *connhealth.Monitor
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.
@@ -94,6 +106,14 @@ func (a *App) SetBackend(sess sessionAPI, windows windowsAPI) {
 
 // SetApp injects the Wails application reference. Must be called before Run().
 func (a *App) SetApp(app *application.App) { a.wailsApp = app }
+
+// SetConnHealth injects the connection-health monitor (called from main.go
+// after the session exists). Written once, before anything reads it.
+func (a *App) SetConnHealth(m *connhealth.Monitor) { a.health = m }
+
+// ConnHealth returns the wired monitor, or nil. Used by the voice layer to
+// report lifecycle transitions into the model.
+func (a *App) ConnHealth() *connhealth.Monitor { return a.health }
 
 // SetSettingsBackend wires the settings/keybind dependencies onto App and
 // seeds kb from cfg.Keybinds, falling back to keybinds.Defaults() when

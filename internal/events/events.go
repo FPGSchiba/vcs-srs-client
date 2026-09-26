@@ -70,6 +70,22 @@ const (
 	// violation of Phase 5 DoD 4. The payload deliberately excludes the
 	// voice secret; see VoiceStatePayload.
 	EventVoiceState = "voice:state"
+	// EventConnectionState is the connection-health snapshot both planes
+	// feed: the single source for the status surface (the conn-banner and
+	// the status bar's dual-pill).
+	//
+	// It is deliberately SEPARATE from EventControlConnection rather than
+	// replacing it. They answer different questions -- that one is a
+	// lifecycle signal driving MainApp's login phase gating, this one is a
+	// health snapshot updating every five seconds -- and coupling a 0.2 Hz
+	// health feed to the login state machine would invite exactly the
+	// re-render and re-hydration the phase gating exists to insulate from.
+	//
+	// It is NOT suppressed when unchanged the way EventAudioVU is: RTT
+	// differs on nearly every tick, so suppression would save almost
+	// nothing, and at 0.2 Hz across a handful of windows the traffic is
+	// negligible.
+	EventConnectionState = "connection:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -346,4 +362,13 @@ type VoiceStatePayload struct {
 // VoiceState emits EventVoiceState.
 func (t *Tagged) VoiceState(state, errMsg string) {
 	t.em.Emit(EventVoiceState, VoiceStatePayload{State: state, Error: errMsg})
+}
+
+// ConnectionHealth emits EventConnectionState with the full dual-plane
+// snapshot. The payload is typed as any for the same reason
+// KeybindsChanged's is: the concrete shape is app.ConnectionStateDTO, and
+// internal/app already imports this package, so naming it here would be an
+// import cycle.
+func (t *Tagged) ConnectionHealth(payload any) {
+	t.em.Emit(EventConnectionState, payload)
 }

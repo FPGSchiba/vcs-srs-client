@@ -39,6 +39,7 @@ import (
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -60,6 +61,12 @@ type voiceSessionAPI interface {
 	// dialed a socket but never completed a HELLO and would never carry
 	// audio.
 	State() voice.State
+	// RTT reports the most recent keepalive round trip, or zero when no
+	// keepalive has been answered on the current binding. Read by the
+	// connhealth ticker for the status bar's VOICE segment. It is reset on
+	// every rebind (see voice.Session.resetBindingLocked), which is what
+	// keeps the pill from showing a healthy ping for a broken session.
+	RTT() time.Duration
 	Close() error
 }
 
@@ -221,6 +228,45 @@ func (a *App) initVoice() {
 	a.st.OnVoiceCredentialsChanged(a.handleVoiceRedirect)
 	a.st.OnSettingsChanged(a.refreshRXContext)
 }
+
+// reportVoiceState feeds one voice lifecycle transition into the
+// connection-health model AND the voice:state event.
+//
+// Both, not either: the event is Phase 5's I2 contract and other consumers
+// may subscribe to it, while the model is what the status surface reads.
+func (a *App) reportVoiceState(state, errMsg string) {
+	if a.health != nil {
+		a.health.SetVoiceState(state, errMsg, true)
+	}
+}
+
+// reportVoiceUnavailable records that no voice session is possible: torn
+// down, never started, no voice secret, or a build whose codec is the stub.
+//
+// Distinct from a failed state on purpose. Voice that never started is not
+// voice that broke, and rendering it as an alert would tell the user to
+// reconnect something that was never going to connect -- which is the normal
+// case on every CGO-less Windows release build (Phase 5 issue #1).
+func (a *App) reportVoiceUnavailable() {
+	if a.health != nil {
+		a.health.SetVoiceState(connhealth.StateUnavailable, "", false)
+	}
+}
+
+// voiceRTT reads the live session's round trip for the connhealth ticker.
+// Zero (no session, or nothing measured) is mapped to RTTUnknown by the
+// Monitor.
+func (a *App) voiceRTT() time.Duration {
+	sess := a.voiceSession()
+	if sess == nil {
+		return 0
+	}
+	return sess.RTT()
+}
+
+// VoiceRTT exposes the live voice session's round trip for main.go's
+// connhealth wiring. Zero means no session or nothing measured.
+func (a *App) VoiceRTT() time.Duration { return a.voiceRTT() }
 
 // VoiceBridge returns the Sink/Source bridge main.go must register with the
 // audio Manager exactly once, at startup (AddSink AND SetSource -- see this
@@ -701,12 +747,20 @@ func (a *App) voiceDialOptions() voice.Options {
 		JitterMS:    jitterMS,
 		MaxBufferMS: maxBufferMS,
 		OnState: func(st voice.State, err error) {
-			if em == nil {
-				return
-			}
 			msg := ""
 			if err != nil {
 				msg = err.Error()
+			}
+			// The health model first: it is what the status surface reads,
+			// and em may be nil in a build with no settings backend while
+			// the model is still wired.
+			if st == voice.StateClosed {
+				a.reportVoiceUnavailable()
+			} else {
+				a.reportVoiceState(st.String(), msg)
+			}
+			if em == nil {
+				return
 			}
 			em.VoiceState(st.String(), msg)
 		},
@@ -767,6 +821,7 @@ func (a *App) startVoiceSession() {
 func (a *App) startVoiceSessionWithGen(gen uint64) {
 	self, secret, src, ok := a.voiceDialInputs()
 	if !ok {
+		a.reportVoiceUnavailable()
 		return
 	}
 	// Through a.voice.dial, not voice.Dial directly -- see voiceState.dial's
@@ -792,7 +847,10 @@ func (a *App) startVoiceSessionWithGen(gen uint64) {
 // through it rather than assigned directly. The generation argument is
 // ignored for a teardown (voiceSessionSwap's nil branch always proceeds and
 // bumps the generation itself), so 0 is passed.
-func (a *App) stopVoiceSession() { a.setVoiceSession(nil, 0) }
+func (a *App) stopVoiceSession() {
+	a.setVoiceSession(nil, 0)
+	a.reportVoiceUnavailable()
+}
 
 // handleVoiceRedirect re-points the voice session at a fresh socket when a
 // VOICE_ADDRESS_UPDATE redirect changes the store's coalition/global
