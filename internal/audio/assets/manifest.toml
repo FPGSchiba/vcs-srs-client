@@ -44,3 +44,13 @@ order = 6
 label = "Encryption Beep"
 file = "crypto_handshake.wav"
 order = 7
+
+[connect]
+label = "Connect"
+file = "connect.wav"
+order = 8
+
+[disconnect]
+label = "Disconnect"
+file = "disconnect.wav"
+order = 9

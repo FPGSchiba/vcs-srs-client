@@ -156,6 +156,7 @@ func main() {
 	// be late-bound, and the session is the one with somewhere to put it.
 	sess.SetControlStateObserver(func(st vcsevents.ConnectionState) {
 		monitor.SetControlState(string(st))
+		gui.PlayConnectionSFX(string(st))
 	})
 
 	// Keybind store, seeded from config (falls back to shipped defaults on a

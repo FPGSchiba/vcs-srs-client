@@ -9,7 +9,7 @@ func TestSFXReportsManifestSlots(t *testing.T) {
 	// what makes this the design prototype's TX/RX/Intercom/Encryption
 	// grouping rather than the alphabetical order a bare map iteration
 	// would produce -- see manifest.toml's and EffectIDs' own doc comments.
-	want := []string{"tx_start", "tx_end", "rx_start", "rx_end", "intercom_start", "intercom_end", "encryption_beep"}
+	want := []string{"tx_start", "tx_end", "rx_start", "rx_end", "intercom_start", "intercom_end", "encryption_beep", "connect", "disconnect"}
 	if len(ids) != len(want) {
 		t.Fatalf("EffectIDs() = %v, want %d slots", ids, len(want))
 	}
