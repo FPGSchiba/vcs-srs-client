@@ -23,6 +23,16 @@ export const EV = {
   audioVU: "audio:vu",
   audioState: "audio:state",
   audioMicMuted: "audio:mic_muted",
+  connectionState: "connection:state",
+  // Emitted by the backend since Phase 5's I2 fix. EV is a name registry
+  // mirroring the Go event constants (see this file's header comment), not
+  // a subscriber list, so an entry with no direct listener is expected, not
+  // a gap. Voice state DOES reach the UI: through the aggregated
+  // connection:state snapshot (../store/connection.ts), which folds the
+  // voice plane in via App's connhealth wiring, rather than by subscribing
+  // to voice:state directly.
+  voiceState: "voice:state",
+  voiceAddressUpdate: "voice:address_update",
 } as const;
 
 // HotkeyEventPayload is the payload shape for EV.hotkeyPressed /

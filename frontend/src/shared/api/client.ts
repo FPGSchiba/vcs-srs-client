@@ -11,6 +11,7 @@ import type {
   AudioState,
   AudioEffectPresets,
 } from "../store/settings";
+import type { ConnectionState } from "../store/connection";
 
 export interface RadioDTO {
   id: number;
@@ -104,4 +105,7 @@ export const api = {
   previewEffect: (id: string): Promise<void> => App.PreviewEffect(id) as Promise<void>,
   getAudioEffectPresets: (): Promise<AudioEffectPresets> =>
     App.GetAudioEffectPresets() as Promise<AudioEffectPresets>,
+  getConnectionState: (): Promise<ConnectionState> =>
+    App.GetConnectionState() as Promise<ConnectionState>,
+  reconnectVoice: (): Promise<void> => App.ReconnectVoice() as Promise<void>,
 };

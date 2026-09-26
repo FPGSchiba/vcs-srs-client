@@ -4,6 +4,8 @@ import (
 	"embed"
 	"log"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -11,6 +13,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/app"
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	vcsevents "github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
@@ -124,6 +127,59 @@ func main() {
 	}
 	registry := app.NewRegistry(app.NewWailsFactory(wailsApp), winPath, emitter)
 	gui.SetBackend(sess, registry)
+
+	// Connection health: one model, one ticker, one event, fed from the same
+	// call sites that emit the control lifecycle event (see
+	// session.Deps.OnControlState) so the two cannot disagree about the link.
+	healthEvents := vcsevents.New(emitter)
+	interval := time.Duration(cfg.PingIntervalSeconds) * time.Second
+	monitor := connhealth.New(connhealth.Options{
+		Interval: interval, // 0 falls back to connhealth.DefaultInterval
+		Ping:     sess.PingOnce,
+		VoiceRTT: gui.VoiceRTT,
+		// The Monitor does not set disconnected itself: the session emits it
+		// through its single normal path, which comes straight back in via
+		// SetControlState. One emission path, two detectors.
+		OnLoss: sess.MarkControlLost,
+		OnChange: func(s connhealth.Snapshot) {
+			healthEvents.ConnectionHealth(app.ConnectionStateDTOFrom(s))
+		},
+	})
+	// This is only the PRE-LOGIN seed: cfg.ServerURL is never written by
+	// Settings or the Welcome form, so it is "" on every default install.
+	// App.Connect calls monitor.SetServer again with the address actually
+	// dialed the moment a connection succeeds (F1 fix, Phase 6 whole-branch
+	// review) -- this call exists purely so a pre-connect window (or a
+	// future persisted-server-URL feature) has something honest to show.
+	monitor.SetServer(cfg.ServerURL)
+	gui.SetConnHealth(monitor)
+	monitor.Start()
+	defer monitor.Stop()
+
+	// session.New's construction above is unchanged. The observer is
+	// installed after the monitor exists, because the two halves need each
+	// other -- the monitor probes through sess.PingOnce, the session reports
+	// through the monitor's SetControlState -- so one of the two links must
+	// be late-bound, and the session is the one with somewhere to put it.
+	//
+	// sfxGate dedupes the SFX side of this observer (F4 fix, Phase 6
+	// whole-branch review). monitor.SetControlState already dedupes against
+	// the state it already holds, but gui.PlayConnectionSFX does not, and the
+	// two calls are not the same question: a known, accepted duplicate
+	// `disconnected` -- Disconnect firing after the probe detector has
+	// already declared loss -- reaches this closure twice with the state
+	// unchanged both times. Silent today because connect.wav/disconnect.wav
+	// do not exist; would otherwise double-play the instant they land. Do
+	// NOT fix this by changing the double-emit itself: it is deliberately
+	// deferred (see the session/connhealth docs), and every OTHER consumer
+	// of this state is already idempotent.
+	sfxGate := &sfxDedup{}
+	sess.SetControlStateObserver(func(st vcsevents.ConnectionState) {
+		monitor.SetControlState(string(st))
+		if sfxGate.shouldPlay(string(st)) {
+			gui.PlayConnectionSFX(string(st))
+		}
+	})
 
 	// Keybind store, seeded from config (falls back to shipped defaults on a
 	// fresh install), and the OS hotkey manager. App itself implements
@@ -289,4 +345,31 @@ func main() {
 type audioVUPayload struct {
 	Input  float32 `json:"input"`
 	Output float32 `json:"output"`
+}
+
+// sfxDedup skips a repeated identical control-state transition, so a
+// consumer with no dedup logic of its own (gui.PlayConnectionSFX) does not
+// double-fire on a known, accepted duplicate emission of the same state (see
+// its call site's doc, F4 in the Phase 6 whole-branch review).
+//
+// The zero value's last field is "", which every real events.ConnectionState
+// string value ("connected"/"reconnecting"/"disconnected") differs from, so
+// the very first transition always plays -- no separate "nothing played yet"
+// flag is needed.
+type sfxDedup struct {
+	mu   sync.Mutex
+	last string
+}
+
+// shouldPlay reports whether state differs from the last state this gate
+// let through, and records state as the new last-played value either way --
+// including when it returns false, so a THIRD repeat is still suppressed.
+func (d *sfxDedup) shouldPlay(state string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if state == d.last {
+		return false
+	}
+	d.last = state
+	return true
 }

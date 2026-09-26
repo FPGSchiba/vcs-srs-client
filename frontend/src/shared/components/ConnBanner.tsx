@@ -1,25 +1,104 @@
+import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
 import { api } from "../api/client";
-import { useSession } from "../store/session";
+import { useConnection, bannerVariant, type BannerVariant } from "../store/connection";
 
-type ConnBannerProps = Record<string, never>;
+interface VariantConfig {
+  kind: "warn" | "alert";
+  title: string;
+  msg: string;
+  action: string;
+  /** Which reconnect the action button drives. */
+  target: "control" | "voice";
+}
+
+/** Copy taken verbatim from the design prototype's `shell.jsx` ConnBanner.
+ *  `control-only` means "control is fine, voice is not", matching the
+ *  prototype's own naming. */
+const VARIANTS: Record<Exclude<BannerVariant, "none">, VariantConfig> = {
+  "control-only": {
+    kind: "warn",
+    title: "VOICE DEGRADED",
+    msg: "Connection to voice server lost — control is healthy. You cannot transmit or hear traffic until reconnected.",
+    action: "RECONNECT VOICE",
+    target: "voice",
+  },
+  "voice-only": {
+    kind: "warn",
+    title: "CONTROL DEGRADED",
+    msg: "Lost link to control server — voice continues but state is frozen. Profile changes won't persist.",
+    action: "RECONNECT CONTROL",
+    target: "control",
+  },
+  disconnected: {
+    kind: "alert",
+    title: "DISCONNECTED",
+    msg: "All servers unreachable. Audio is muted. Verify network and retry.",
+    action: "FULL RECONNECT",
+    target: "control",
+  },
+};
 
 /**
  * ConnBanner is the connection-degraded banner, ported from the design
- * prototype's `shell.jsx` ConnBanner. Only the `disconnected` (alert) variant
- * is rendered this phase; the control-degraded / voice-degraded variants are
- * deferred until distributed voice/control health is wired. It reads the
- * session store for the control-connection state and renders nothing unless the
- * client is disconnected. The reconnect button calls `api.reconnect()`.
- * classNames are kept byte-identical to the design so the ported CSS applies.
+ * prototype's `shell.jsx` ConnBanner.
+ *
+ * All three of the prototype's variants are reachable as of Phase 6. Before
+ * it, only `disconnected` was ported, and it could essentially never fire:
+ * both `ConsumeUpdates` goroutines discarded the stream's terminating error,
+ * so nothing ever reported a control link that died on its own.
+ *
+ * A voice plane that is merely UNAVAILABLE — no secret yet, no session, or a
+ * build whose codec is the stub — drops out of the banner's input entirely.
+ * It is not a failure the user can act on, and on every CGO-less Windows
+ * release build it is the normal state.
+ *
+ * classNames are byte-identical to the design so the ported CSS applies.
  */
-export function ConnBanner(_props: ConnBannerProps) {
-  const conn = useSession((s) => s.conn);
-  if (conn !== "disconnected") return null;
+export function ConnBanner() {
+  const conn = useConnection((s) => s.conn);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const variant = bannerVariant(conn);
+
+  // F7 fix (Phase 6 whole-branch review): the component stays MOUNTED across
+  // a "none" variant -- it returns null below rather than unmounting -- so
+  // `failure` used to survive a recovery and then leak into whatever
+  // DIFFERENT variant's banner appeared next, rendering an error that
+  // variant never itself produced. Must run unconditionally, before the
+  // early return, so it fires on every render regardless of `variant`'s
+  // value (Rules of Hooks).
+  useEffect(() => {
+    setFailure(null);
+  }, [variant]);
+
+  if (variant === "none") return null;
+  const conf = VARIANTS[variant];
+
+  const onAction = () => {
+    // Guarded rather than merely disabled: App.Reconnect re-dials and
+    // re-pushes the persisted radios, and two in flight race each other's
+    // stream generation — the loser's stream is cancelled under a connection
+    // the user believes is live.
+    if (busy) return;
+    setBusy(true);
+    setFailure(null);
+    const call = conf.target === "voice" ? api.reconnectVoice() : api.reconnect();
+    void Promise.resolve(call)
+      .catch((err: unknown) => {
+        // Surfaced, not discarded. The banner used to call
+        // `void api.reconnect()` and drop the result, so a failed reconnect
+        // was invisible and the button appeared to do nothing at all.
+        setFailure(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setBusy(false));
+  };
+
   return (
-    <div className="conn-banner alert">
+    <div className={`conn-banner ${conf.kind}`}>
       <span className="blink" />
-      <span style={{ fontWeight: 600, letterSpacing: "0.18em" }}>DISCONNECTED</span>
+      <span style={{ fontWeight: 600, letterSpacing: "0.18em" }}>{conf.title}</span>
       <span
         style={{
           color: "var(--tx-2)",
@@ -28,11 +107,11 @@ export function ConnBanner(_props: ConnBannerProps) {
           fontFamily: "var(--ff-sans)",
         }}
       >
-        All servers unreachable. Audio is muted. Verify network and retry.
+        {failure ?? conf.msg}
       </span>
       <span style={{ flex: 1 }} />
-      <button className="btn btn-sm" onClick={() => void api.reconnect()}>
-        <Icon name="refresh" size={10} /> FULL RECONNECT
+      <button className="btn btn-sm" onClick={onAction} disabled={busy}>
+        <Icon name="refresh" size={10} /> {busy ? "RECONNECTING…" : conf.action}
       </button>
     </div>
   );

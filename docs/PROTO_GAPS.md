@@ -135,6 +135,28 @@ message ClientInfo {
 
 ---
 
+## 10. Server identity and region
+
+**Where it shows up:** Status bar `dual-pill` (`.val` per segment) and the prototype's region item.
+
+**Today:** The client renders `host:port` from `server_url` in both segments, and omits the region entirely rather than showing a permanent em dash for a field with no data source.
+
+The design prototype's `StatusBar` renders `vanguard-prime · {latency}ms` and `{app.server.region}`. `srs.proto` carries neither. `SyncResponse.version` is the only server-identifying string on the wire, and it is a version, not a name.
+
+**Suggested proto change:**
+
+```proto
+message ServerSyncResult {
+  // ... existing fields ...
+  string server_name   = 7; // NEW — human-readable display name, e.g. "vanguard-prime"
+  string server_region = 8; // NEW — e.g. "eu-central"
+}
+```
+
+**Not blocking.** The pill is fully functional with a host address. Phase 9 needs per-voice-host names for the distributed Server Network panel anyway, so this is best negotiated once, alongside `DistributionUpdate`.
+
+---
+
 ## How to use this document
 
 When the server team wants to extend `srs.proto`, this list is the priority queue. Each item also pairs with a client commit that swaps the local fallback for the wire-backed implementation; those commits should bump the `ClientCapabilities.version` so the server can degrade gracefully for older clients.
