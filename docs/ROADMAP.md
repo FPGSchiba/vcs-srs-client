@@ -159,15 +159,32 @@ Found during implementation and review; deliberately **not fixed** as part of Ph
 
 ## Phase 6 — Connection-status surface
 
-**Status:** `[ ]`
+**Status:** `[x]` complete 2026-09-26 — control-plane liveness detection, the ping ticker (closing master spec §6 DoD 9), the `connhealth` dual-plane model, `connection:state`, the status bar's dual-pill, all three ConnBanner variants and a working reconnect UX landed on `feat/phase-6-connection-status`.
+
+**Verification status:** the full automated suite is green (`go build`/`go vet`/`go test -race ./...` with `-tags purego`, frontend `vitest`/`tsc --noEmit`/production build). **The phase has NOT been verified on real hardware, and nobody has ever watched this client lose a control connection to a real server.** The 5s × 3 failure threshold, the half-open detection claim and the ~70s transport floor are all designed from the server's source, not measured; voice RTT has never been read by a human. Checklist: [`2026-09-26-phase-6-manual-verification.md`](./superpowers/plans/2026-09-26-phase-6-manual-verification.md).
+
+**Design doc:** [`2026-09-26-vcs-client-phase-6-connection-status-design.md`](./superpowers/specs/2026-09-26-vcs-client-phase-6-connection-status-design.md)
+
+**Four gaps this phase found and closed** (none of them recorded in this file beforehand):
+1. **`ConnBanner` was live code that could essentially never fire.** Both `ConsumeUpdates` goroutines discarded the stream's terminating error, so a server restart or network drop emitted nothing and the UI reported `connected` indefinitely.
+2. **The Phase 1 ping ticker was never wired.** `PingOnce` had zero callers, `PingIntervalSeconds` zero readers, and the server's `LatencyToControlMs` read zero for every VCS client.
+3. **Phase 5's `voice:state` was emitted into the void** — absent from the frontend's `EV` map. `voice.Session.RTT()` was surfaced nowhere at all.
+4. **The prototype's status bar rendered a server name and region not on the wire.** Filed as PROTO_GAPS #10.
 
 **Headline deliverables**
-- ConnBanner integrated with real control + voice state
-- Status bar `dual-pill` for distributed mode (still shown in standalone form here; full distributed UI in Phase 9)
-- Reconnect flow UX (manual reconnect button on banner)
-- Standalone path fully wired
+- `internal/connhealth`: derived dual-plane model, one ticker, one `connection:state` event
+- Stream-termination detection under intent and generation guards; `MarkControlLost`
+- Ping ticker at 5s with a 3-failure loss threshold, mirroring `internal/voice`'s own budget
+- gRPC client keepalive at 75s, respecting the server's `MinTime: 60s` enforcement floor
+- Status bar `dual-pill`, rendered unconditionally (standalone included), with a fourth `unavailable` state for voice
+- All three `ConnBanner` variants, in-flight reconnect state, and failure reasons surfaced
+- `App.ReconnectVoice()`; connection SFX wired asset-agnostically (ships silent)
 
-**Blocking deps:** Phase 5
+**Blocking deps:** none remaining.
+
+**Two server behaviours made visible, not fixed** — both cross-repo, neither confirmed to fire. `SubscribeToUpdates` rejects a duplicate subscription while the old stream's cleanup is pending; a dead stream leaves the client in `serverState.Clients`. Both are on the manual checklist.
+
+**Still outstanding:** the SFX sample pack is now **nine** files, not seven — `connect.wav` and `disconnect.wav` joined the seven from Phase 4.
 
 ---
 
