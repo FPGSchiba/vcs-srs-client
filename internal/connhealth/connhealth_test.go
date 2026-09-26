@@ -514,3 +514,54 @@ func TestTick_OnLossReentrantSetControlStateDoesNotDeadlock(t *testing.T) {
 		t.Errorf("Control.State = %q, want %q", got.Control.State, connhealth.StateDisconnected)
 	}
 }
+
+// Review Finding (Important, round 3). Dropping Tick's top-level defer to
+// get OnLoss outside the locked region also dropped the unwind guarantee: a
+// panicking OnChange left emitMu locked forever, wedging every subsequent
+// Tick, SetServer, SetControlState and SetVoiceState -- the same class of
+// permanent deadlock as round 2's finding, just reached by a panic instead
+// of a reentrant call.
+//
+// Recovered here (as a supervisor around the ticker goroutine would) so the
+// test process itself survives; the assertion is that the Monitor's locks
+// survive too. Guarded with a bounded timeout, same shape as the round-2
+// reentrancy test, so a regression fails instead of hanging the suite.
+func TestTick_PanickingOnChangeStillReleasesEmitMu(t *testing.T) {
+	// panicOnChange is toggled from the test's own goroutine only, strictly
+	// before each call whose OnChange delivery it controls: false while
+	// establishing the connected state below (that publish must not panic,
+	// or there is nothing left to Tick), true for the one Tick call this
+	// test exists to break, then false again so the final SetControlState
+	// can prove the lock survived rather than re-triggering the panic.
+	panicOnChange := false
+	m := connhealth.New(connhealth.Options{
+		OnChange: func(connhealth.Snapshot) {
+			if panicOnChange {
+				panic("boom")
+			}
+		},
+		Ping: func(_ context.Context, _ int64) (int64, error) {
+			return 5, nil
+		},
+	})
+	m.SetControlState(connhealth.StateConnected)
+
+	panicOnChange = true
+	func() {
+		defer func() { _ = recover() }()
+		m.Tick(context.Background())
+	}()
+	panicOnChange = false
+
+	done := make(chan struct{})
+	go func() {
+		m.SetControlState(connhealth.StateDisconnected)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetControlState did not return within 2s -- a panicking OnChange left emitMu locked")
+	}
+}
