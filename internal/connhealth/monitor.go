@@ -91,8 +91,14 @@ func (m *Monitor) Tick(ctx context.Context) {
 	// SetVoiceState. From here on this is a commit, so it follows the same
 	// emitMu -> mu -> mutate -> unlock mu -> publish -> unlock emitMu order
 	// as every setter -- see publish's doc comment.
+	//
+	// NOT deferred: emitMu must be released before OnLoss fires below, not
+	// held across it. The owner's expected reaction to OnLoss is a
+	// synchronous SetControlState call from the SAME goroutine, and that
+	// call acquires emitMu itself -- sync.Mutex is not reentrant, so holding
+	// it here across OnLoss would deadlock this goroutine against itself on
+	// the first real control-plane loss. See Options.OnLoss's doc comment.
 	m.emitMu.Lock()
-	defer m.emitMu.Unlock()
 
 	m.mu.Lock()
 	// Re-check: Ping and VoiceRTT above ran with no lock held, so a
@@ -102,6 +108,7 @@ func (m *Monitor) Tick(ctx context.Context) {
 	// not Healthy, not the failure count, not loss.
 	if m.snap.Control.State != StateConnected {
 		m.mu.Unlock()
+		m.emitMu.Unlock()
 		return
 	}
 	before := m.snap
@@ -129,10 +136,16 @@ func (m *Monitor) Tick(ctx context.Context) {
 	if changed {
 		m.publish(snap)
 	}
+	// emitMu is released here, BEFORE OnLoss fires -- see the comment above
+	// where it was acquired. Holding it one line longer is the whole defect.
+	m.emitMu.Unlock()
+
 	if fireLoss && m.opt.OnLoss != nil {
 		// The Monitor does NOT set disconnected itself: the owner emits the
 		// loss through its single normal path, which comes back in via
 		// SetControlState. One emission path, two detectors, no disagreement.
+		// Called with NEITHER mu NOR emitMu held: SetControlState (the
+		// owner's expected synchronous reaction) acquires emitMu itself.
 		m.opt.OnLoss()
 	}
 }

@@ -462,3 +462,55 @@ func TestTick_DiscardsStaleProbeAfterConcurrentDisconnect(t *testing.T) {
 			got.Control.RTTMs, connhealth.RTTUnknown)
 	}
 }
+
+// Review Finding (Critical, round 2). Task 3's real owner reacts to OnLoss
+// synchronously, on the SAME goroutine, by calling SetControlState -- that
+// is the "single normal path" OnLoss's doc comment describes. If Tick still
+// held emitMu when OnLoss fired, that call would block forever on a mutex
+// its own goroutine already holds: sync.Mutex is not reentrant.
+//
+// Against the pre-fix code (emitMu held via defer across the whole rest of
+// Tick, including the OnLoss call) this test does not fail an assertion --
+// it hangs. It is written to survive that: the reproduction runs in its own
+// goroutine, and the test fails on a bounded timeout instead of hanging the
+// suite.
+func TestTick_OnLossReentrantSetControlStateDoesNotDeadlock(t *testing.T) {
+	rec := &recorder{}
+	var m *connhealth.Monitor
+	m = connhealth.New(connhealth.Options{
+		FailureThreshold: 3,
+		OnChange:         rec.add,
+		Ping: func(_ context.Context, _ int64) (int64, error) {
+			return 0, errors.New("deadline exceeded")
+		},
+		OnLoss: func() {
+			// Exactly Task 3's chain: the owner's synchronous reaction to
+			// loss is SetControlState, on the same goroutine Tick called
+			// OnLoss from.
+			m.SetControlState(connhealth.StateDisconnected)
+		},
+	})
+	m.SetControlState(connhealth.StateConnected)
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 3; i++ {
+			m.Tick(context.Background())
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Tick did not return within 2s -- OnLoss's reentrant SetControlState deadlocked on emitMu")
+	}
+
+	got, ok := rec.last()
+	if !ok {
+		t.Fatal("published nothing")
+	}
+	if got.Control.State != connhealth.StateDisconnected {
+		t.Errorf("Control.State = %q, want %q", got.Control.State, connhealth.StateDisconnected)
+	}
+}

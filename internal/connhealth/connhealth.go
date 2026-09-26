@@ -104,11 +104,25 @@ type Options struct {
 	// through its single normal path, which comes back in via
 	// SetControlState. That is what keeps one emission path and makes the
 	// two detectors' snapshots impossible to disagree.
+	//
+	// OnLoss is called from Tick with NEITHER mu NOR emitMu held. This is
+	// required, not incidental: the owner's expected re-entry --
+	// SetControlState -- itself acquires emitMu, and sync.Mutex is not
+	// reentrant. Tick releases both locks before calling OnLoss precisely so
+	// that a synchronous SetControlState from inside this hook cannot
+	// deadlock against itself. Do not wrap the call in a held lock again.
 	OnLoss func()
 
 	// OnChange receives every published Snapshot. It is called from the
 	// Monitor's own goroutine and from state setters, never concurrently
-	// with itself.
+	// with itself -- delivery is serialised under emitMu (see publish).
+	//
+	// OnChange MUST NOT call back into the Monitor (Snapshot, SetServer,
+	// SetControlState, SetVoiceState, Tick, Start, Stop). It runs WITH
+	// emitMu held, and every one of those methods acquires emitMu itself;
+	// a reentrant call from inside OnChange deadlocks permanently on the
+	// same goroutine, the same way a synchronous OnLoss -> SetControlState
+	// call would if Tick still held emitMu when it fired OnLoss.
 	OnChange func(Snapshot)
 }
 
