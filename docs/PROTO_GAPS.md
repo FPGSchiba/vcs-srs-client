@@ -148,8 +148,8 @@ The design prototype's `StatusBar` renders `vanguard-prime · {latency}ms` and `
 ```proto
 message ServerSyncResult {
   // ... existing fields ...
-  string server_name   = 9;  // NEW — human-readable display name, e.g. "vanguard-prime"
-  string server_region = 10; // NEW — e.g. "eu-central"
+  string server_name   = 7; // NEW — human-readable display name, e.g. "vanguard-prime"
+  string server_region = 8; // NEW — e.g. "eu-central"
 }
 ```
 

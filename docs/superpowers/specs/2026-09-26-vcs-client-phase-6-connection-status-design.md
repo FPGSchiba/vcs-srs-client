@@ -272,8 +272,8 @@ Suggested shape, for the server team's queue:
 ```proto
 message ServerSyncResult {
   // ...
-  string server_name = 9;   // NEW — human-readable display name
-  string server_region = 10; // NEW — e.g. "eu-central"
+  string server_name = 7;   // NEW — human-readable display name
+  string server_region = 8; // NEW — e.g. "eu-central"
 }
 ```
 
