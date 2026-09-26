@@ -129,6 +129,26 @@ describe("ConnBanner reconnect feedback", () => {
 
     await waitFor(() => expect(screen.queryByText(/connection refused/)).toBeNull());
   });
+
+  // F7 (Phase 6 whole-branch review). The component stays mounted across a
+  // "none" variant (it returns null rather than unmounting), so `failure`
+  // used to survive and leak into a LATER, DIFFERENT variant's banner that
+  // never itself failed.
+  it("does not leak a failure from one variant into a different later variant", async () => {
+    reconnect.mockRejectedValueOnce(new Error("connection refused"));
+    set({ control: down, voice: voiceDown }); // disconnected
+    render(<ConnBanner />);
+
+    fireEvent.click(screen.getByText(/FULL RECONNECT/));
+    await waitFor(() => expect(screen.getByText(/connection refused/)).toBeInTheDocument());
+
+    // Voice recovers on its own; control alone stays down -- a DIFFERENT
+    // variant (voice-only -> "CONTROL DEGRADED") that never failed.
+    set({ control: down, voice: ok });
+
+    await waitFor(() => expect(screen.getByText("CONTROL DEGRADED")).toBeInTheDocument());
+    expect(screen.queryByText(/connection refused/)).toBeNull();
+  });
 });
 
 describe("ConnBanner in-flight guard", () => {

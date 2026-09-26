@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
 import { api } from "../api/client";
 import { useConnection, bannerVariant, type BannerVariant } from "../store/connection";
@@ -61,6 +61,18 @@ export function ConnBanner() {
   const [failure, setFailure] = useState<string | null>(null);
 
   const variant = bannerVariant(conn);
+
+  // F7 fix (Phase 6 whole-branch review): the component stays MOUNTED across
+  // a "none" variant -- it returns null below rather than unmounting -- so
+  // `failure` used to survive a recovery and then leak into whatever
+  // DIFFERENT variant's banner appeared next, rendering an error that
+  // variant never itself produced. Must run unconditionally, before the
+  // early return, so it fires on every render regardless of `variant`'s
+  // value (Rules of Hooks).
+  useEffect(() => {
+    setFailure(null);
+  }, [variant]);
+
   if (variant === "none") return null;
   const conf = VARIANTS[variant];
 
