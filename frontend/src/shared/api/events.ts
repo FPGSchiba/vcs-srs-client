@@ -23,6 +23,12 @@ export const EV = {
   audioVU: "audio:vu",
   audioState: "audio:state",
   audioMicMuted: "audio:mic_muted",
+  connectionState: "connection:state",
+  // Emitted by the backend since Phase 5's I2 fix, and subscribed by
+  // nothing until now — the whole voice.Session state machine had no
+  // frontend consumer at all.
+  voiceState: "voice:state",
+  voiceAddressUpdate: "voice:address_update",
 } as const;
 
 // HotkeyEventPayload is the payload shape for EV.hotkeyPressed /

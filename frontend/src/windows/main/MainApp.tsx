@@ -8,6 +8,7 @@ import { useClients } from "../../shared/store/clients";
 import { useRadios } from "../../shared/store/radios";
 import { useWindows } from "../../shared/store/windows";
 import { useSettingsSync } from "../../shared/store/useSettingsSync";
+import { useConnectionSync } from "../../shared/store/useConnectionSync";
 import { TopBar } from "../../shared/components/TopBar";
 import { NavRail } from "../../shared/components/NavRail";
 import { StatusBar } from "../../shared/components/StatusBar";
@@ -48,6 +49,9 @@ export function MainApp() {
   // Keeps the shared settings/keybinds store live for this window's whole
   // lifetime, not just while the Settings screen happens to be open.
   useSettingsSync();
+  // Same discipline for connection health: the status bar and the banner
+  // both read it, and both are part of the window shell.
+  useConnectionSync();
 
   useEffect(() => {
     // Pull the full snapshot (clients, radios, self) and replace the stores.
