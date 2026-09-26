@@ -273,6 +273,10 @@
 .dual-pill .d.ok { background: var(--ac-ok); box-shadow: 0 0 4px var(--ac-ok); }
 .dual-pill .d.warn { background: var(--ac-warn); box-shadow: 0 0 4px var(--ac-warn); animation: pulse 1.2s infinite; }
 .dual-pill .d.alert { background: var(--ac-alert); box-shadow: 0 0 4px var(--ac-alert); }
+/* Not in the design prototype: it has no "voice was never going to run"
+   state. Dimmed and static -- deliberately not .alert, which would put a red
+   dot on every CGO-less Windows release build as its NORMAL rendering. */
+.dual-pill .d.off { background: var(--tx-4); box-shadow: none; }
 
 /* ========== Launcher tile (Home page) ========== */
 .launcher-tile {

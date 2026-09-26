@@ -127,7 +127,7 @@ export function MainApp() {
         <NavRail activeKey={view} onSelect={setView} onLogout={handleLogout} />
         <main className="main">{screen}</main>
       </div>
-      <StatusBar />
+      <StatusBar onNavigate={setView} />
     </div>
   );
 }
