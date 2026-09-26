@@ -130,8 +130,12 @@ type Monitor struct {
 	stopOnce  sync.Once
 	done      chan struct{}
 	wg        sync.WaitGroup
-	// emitMu serialises OnChange deliveries so a tick and a state setter
-	// cannot interleave two snapshots out of order.
+	// emitMu makes one commit-and-deliver sequence atomic with respect to
+	// every other one. It is always acquired BEFORE mu, and held across both
+	// the mu-guarded mutation and the OnChange delivery that follows it, by
+	// every setter and by Tick's own commit. That lock order -- never the
+	// reverse -- is what makes delivery order match commit order: see
+	// publish's doc comment.
 	emitMu sync.Mutex
 }
 
@@ -166,6 +170,9 @@ func (m *Monitor) Snapshot() Snapshot {
 
 // SetServer records the server address the surface displays.
 func (m *Monitor) SetServer(server string) {
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+
 	m.mu.Lock()
 	if m.snap.Server == server {
 		m.mu.Unlock()
@@ -174,6 +181,7 @@ func (m *Monitor) SetServer(server string) {
 	m.snap.Server = server
 	snap := m.snap
 	m.mu.Unlock()
+
 	m.publish(snap)
 }
 
@@ -188,6 +196,9 @@ func (m *Monitor) SetServer(server string) {
 // a reconnect would show a healthy ping for a link that has not answered a
 // single probe.
 func (m *Monitor) SetControlState(state string) {
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+
 	m.mu.Lock()
 	if m.snap.Control.State == state {
 		m.mu.Unlock()
@@ -201,6 +212,7 @@ func (m *Monitor) SetControlState(state string) {
 	m.lossFired = false
 	snap := m.snap
 	m.mu.Unlock()
+
 	m.publish(snap)
 }
 
@@ -214,6 +226,10 @@ func (m *Monitor) SetVoiceState(state, errMsg string, available bool) {
 	if !available {
 		state = StateUnavailable
 	}
+
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+
 	m.mu.Lock()
 	next := Link{
 		State:     state,
@@ -234,16 +250,25 @@ func (m *Monitor) SetVoiceState(state, errMsg string, available bool) {
 	m.snap.Voice = next
 	snap := m.snap
 	m.mu.Unlock()
+
 	m.publish(snap)
 }
 
-// publish delivers one Snapshot to OnChange, serialised so a tick and a
-// state setter cannot interleave two snapshots out of order.
+// publish delivers one Snapshot to OnChange.
+//
+// The caller must already hold emitMu, acquired BEFORE mu and held across
+// both the mu-guarded mutation and this call -- see SetServer,
+// SetControlState, SetVoiceState and Tick, which all follow the same
+// emitMu -> mu -> mutate -> unlock mu -> publish -> unlock emitMu order.
+// Holding emitMu across the whole commit-and-deliver sequence, rather than
+// just around this call, is what guarantees delivery order matches commit
+// order: with the two locks acquired separately (mu released before emitMu
+// is taken), a goroutine preempted in the gap between them could lose its
+// place, letting a second commit-and-deliver sequence run entirely in
+// between and deliver out of the order the two committed in.
 func (m *Monitor) publish(s Snapshot) {
 	if m.opt.OnChange == nil {
 		return
 	}
-	m.emitMu.Lock()
-	defer m.emitMu.Unlock()
 	m.opt.OnChange(s)
 }

@@ -366,3 +366,99 @@ func TestStartStop_IsIdempotentAndJoins(t *testing.T) {
 		t.Errorf("Control.RTTMs = %d after the loop ran, want 1", got.Control.RTTMs)
 	}
 }
+
+// Review Finding (a). publish's contract is that emitMu is acquired BEFORE
+// mu and held across both the mutation and the OnChange delivery. If a
+// setter instead released mu before acquiring emitMu (the pre-fix code), a
+// second, fully independent setter could commit its own mutation -- and
+// even attempt delivery -- while the first delivery was still in flight,
+// letting delivery order and commit order disagree.
+//
+// This proves the lock discipline directly, per the review's suggested
+// form: while the first OnChange is blocked in flight, a second setter must
+// not be able to reach its own mutation (observable here as Snapshot()
+// still reading the first value), because it cannot acquire emitMu until
+// the first call releases it.
+func TestPublish_SecondSetterCannotCommitWhileFirstDeliveryInFlight(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+
+	m := connhealth.New(connhealth.Options{
+		OnChange: func(s connhealth.Snapshot) {
+			if s.Server == "first" {
+				enteredOnce.Do(func() { close(entered) })
+				<-release
+			}
+		},
+	})
+
+	go m.SetServer("first")
+	<-entered // OnChange("first") is in flight and blocked on release.
+
+	secondDone := make(chan struct{})
+	go func() {
+		m.SetServer("second")
+		close(secondDone)
+	}()
+
+	// Give the second call every opportunity to run. Under the pre-fix
+	// locking (mu released before emitMu acquired), this is ample time for
+	// its mutation to land even though delivery is still blocked.
+	select {
+	case <-secondDone:
+		t.Fatal("second SetServer completed while the first OnChange was still in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	if got := m.Snapshot().Server; got != "first" {
+		t.Fatalf("Snapshot().Server = %q while the first OnChange was still in flight, want %q -- "+
+			"the second setter committed before the first commit-and-deliver sequence finished",
+			got, "first")
+	}
+
+	close(release)
+	<-secondDone
+
+	if got := m.Snapshot().Server; got != "second" {
+		t.Errorf("Snapshot().Server = %q after both setters ran, want %q", got, "second")
+	}
+}
+
+// Review Finding (b). Ping runs with no lock held, so a concurrent
+// SetControlState can land while it is in flight. Tick must re-check the
+// control state after re-acquiring mu and discard a probe result that no
+// longer belongs to the current connection -- not the RTT, not Healthy, not
+// the failure count, not loss.
+func TestTick_DiscardsStaleProbeAfterConcurrentDisconnect(t *testing.T) {
+	rec := &recorder{}
+	var m *connhealth.Monitor
+	m = connhealth.New(connhealth.Options{
+		OnChange: rec.add,
+		Ping: func(_ context.Context, _ int64) (int64, error) {
+			// Simulate the control plane dropping while this probe is in
+			// flight: the transition lands, and is delivered, before Ping
+			// itself returns success.
+			m.SetControlState(connhealth.StateDisconnected)
+			return 9, nil
+		},
+	})
+	m.SetControlState(connhealth.StateConnected)
+
+	m.Tick(context.Background())
+
+	got, ok := rec.last()
+	if !ok {
+		t.Fatal("Tick published nothing")
+	}
+	if got.Control.State != connhealth.StateDisconnected {
+		t.Errorf("Control.State = %q, want %q", got.Control.State, connhealth.StateDisconnected)
+	}
+	if got.Control.Healthy {
+		t.Error("Control.Healthy = true for a stale probe applied after a concurrent disconnect, want false")
+	}
+	if got.Control.RTTMs != connhealth.RTTUnknown {
+		t.Errorf("Control.RTTMs = %d for a stale probe applied after a concurrent disconnect, want %d",
+			got.Control.RTTMs, connhealth.RTTUnknown)
+	}
+}

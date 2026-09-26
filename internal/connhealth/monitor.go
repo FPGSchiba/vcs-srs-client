@@ -86,7 +86,24 @@ func (m *Monitor) Tick(ctx context.Context) {
 		}
 	}
 
+	// emitMu is acquired here, not around the probe above: Ping runs with no
+	// lock held so a slow probe never blocks a concurrent SetControlState or
+	// SetVoiceState. From here on this is a commit, so it follows the same
+	// emitMu -> mu -> mutate -> unlock mu -> publish -> unlock emitMu order
+	// as every setter -- see publish's doc comment.
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+
 	m.mu.Lock()
+	// Re-check: Ping and VoiceRTT above ran with no lock held, so a
+	// concurrent SetControlState may have moved the control plane away from
+	// "connected" while this probe was in flight. A probe answering for a
+	// connection that is already gone must not be applied -- not the RTT,
+	// not Healthy, not the failure count, not loss.
+	if m.snap.Control.State != StateConnected {
+		m.mu.Unlock()
+		return
+	}
 	before := m.snap
 	if probeOK {
 		m.snap.Control.RTTMs = rttMs
