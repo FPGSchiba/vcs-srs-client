@@ -127,14 +127,44 @@ export function KeyChip({ binding, onCapture, onCancel, autoListen = false }: Ke
     };
   }, [listening]);
 
-  // Runs only on true unmount (empty deps): if the chip is torn down mid
-  // capture, route it through the same funnel as every other exit so it
-  // can never diverge from the "cancel means stopListening(true)" contract.
+  // True between this effect's setup and its cleanup. `React.StrictMode`
+  // (which both window roots use) deliberately runs an effect as
+  // setup -> cleanup -> setup on the SAME element in development, so the
+  // cleanup on its own cannot tell "this chip is going away" apart from
+  // "React is stress-testing the effect". This ref plus the deferred check
+  // below is what distinguishes them.
+  const mountedRef = useRef(false);
+
+  // Runs on true unmount: if the chip is torn down mid capture, route it
+  // through the same funnel as every other exit so it can never diverge
+  // from the "cancel means stopListening(true)" contract. Load-bearing for
+  // the row switch -- clicking chip B while A listens unmounts A, and A's
+  // cancel is the only thing that tells the backend to drop A's capture.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (listeningRef.current) {
+      mountedRef.current = false;
+      if (!listeningRef.current) return;
+      // Deferred rather than immediate, and this is the whole fix: under
+      // StrictMode the re-setup runs synchronously straight after this
+      // cleanup, so a microtask is the first moment at which "did it come
+      // back?" has a truthful answer. Cancelling eagerly here killed EVERY
+      // capture in a dev build the instant it began -- `autoListen` means
+      // the chip mounts already listening, so the simulated unmount found
+      // listeningRef true, fired onCancel, and Keybinds cleared the row
+      // before the user could press anything. It looked like "listening
+      // stops on its own" and was mistaken for a platform bug.
+      queueMicrotask(() => {
+        if (mountedRef.current) return; // re-mounted: not a real unmount
+        // Re-read rather than trusting the cleanup's check: a StrictMode
+        // cleanup and a real one can both be in flight, and whichever
+        // cancels first must make the other a no-op. Without this the
+        // chip reported two cancels for one capture, and the second would
+        // have resumed the backend's hotkeys underneath a capture the
+        // user had already started on another row.
+        if (!listeningRef.current) return;
         stopListeningRef.current(true);
-      }
+      });
     };
   }, []);
 
