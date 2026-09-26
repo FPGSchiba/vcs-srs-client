@@ -24,9 +24,13 @@ export const EV = {
   audioState: "audio:state",
   audioMicMuted: "audio:mic_muted",
   connectionState: "connection:state",
-  // Emitted by the backend since Phase 5's I2 fix, and subscribed by
-  // nothing until now — the whole voice.Session state machine had no
-  // frontend consumer at all.
+  // Emitted by the backend since Phase 5's I2 fix. EV is a name registry
+  // mirroring the Go event constants (see this file's header comment), not
+  // a subscriber list, so an entry with no direct listener is expected, not
+  // a gap. Voice state DOES reach the UI: through the aggregated
+  // connection:state snapshot (../store/connection.ts), which folds the
+  // voice plane in via App's connhealth wiring, rather than by subscribing
+  // to voice:state directly.
   voiceState: "voice:state",
   voiceAddressUpdate: "voice:address_update",
 } as const;

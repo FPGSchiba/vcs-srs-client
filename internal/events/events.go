@@ -81,10 +81,20 @@ const (
 	// health feed to the login state machine would invite exactly the
 	// re-render and re-hydration the phase gating exists to insulate from.
 	//
-	// It is NOT suppressed when unchanged the way EventAudioVU is: RTT
-	// differs on nearly every tick, so suppression would save almost
-	// nothing, and at 0.2 Hz across a handful of windows the traffic is
-	// negligible.
+	// It IS suppressed when unchanged, the same discipline EventAudioVU
+	// uses: every connhealth setter and Tick's own commit publish only when
+	// the new Snapshot actually differs from the one already held, because a
+	// repeat carries no new information for a listener to act on -- there is
+	// nothing "cheaper" about delivering it anyway. Transitions still emit
+	// immediately (SetControlState/SetVoiceState/SetServer each publish
+	// synchronously the instant they change something), so a drop is never
+	// hidden behind tick latency.
+	//
+	// Suppression rarely fires in practice, though: RTT differs on nearly
+	// every tick, so most ticks DO publish. That was the original reasoning
+	// for not bothering to suppress at all -- it remains true, and is
+	// exactly why doing it costs almost nothing on top: at 0.2 Hz across a
+	// handful of windows, the traffic either way is negligible.
 	EventConnectionState = "connection:state"
 )
 

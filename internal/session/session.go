@@ -150,9 +150,26 @@ func (s *Session) MarkControlLost() {
 // markControlLost tears the dead connection down and publishes the loss,
 // exactly once per generation.
 //
-// Closing the connection here is what makes the second detector's call a
-// no-op: whichever of the two arrives first bumps the generation, and the
-// other's captured generation no longer matches.
+// F6 correction (Phase 6 whole-branch review): gen is read fresh, immediately
+// before this call, by MarkControlLost or handleStreamEnd -- it is whatever
+// generation is CURRENT at call time, not the generation whichever detector
+// originally measured the failure against. That is enough to order this
+// entry point against a concurrent STREAM DEATH: if the other detector has
+// already fired, it has already bumped streamGen and cleared s.conn, so the
+// freshly-read gen already reflects that and the guard below is a no-op --
+// whichever detector arrives first wins, the other's fresh read already
+// disagrees with itself.
+//
+// It is NOT ordered against a concurrent SUCCESSFUL Reconnect. Nothing stops
+// a Reconnect from dialing, syncing and installing a brand-new connection
+// (which also bumps streamGen exactly once) inside the gap between the probe
+// detector deciding to fire OnLoss and this call re-reading streamGen a few
+// function calls later -- and if that gap is hit, the freshly-read gen
+// matches the NEW generation, and this call tears the new, healthy
+// connection down instead of a no-op. Closing that window would need a full
+// dial + SyncClient to complete inside a handful of lock-free function calls
+// with no I/O of their own, so it is considered unreachable in practice, not
+// actually closed by this code.
 func (s *Session) markControlLost(gen uint64) {
 	s.mu.Lock()
 	if gen != s.streamGen || s.conn == nil {

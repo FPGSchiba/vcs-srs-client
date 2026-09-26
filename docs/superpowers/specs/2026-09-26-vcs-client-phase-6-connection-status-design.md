@@ -155,7 +155,7 @@ type Snapshot struct {
 
 **Output.** An `OnChange(Snapshot)` hook, which `internal/app` turns into the `connection:state` event.
 
-**Emission cadence.** Every tick, plus immediately on any state transition. Deliberately *not* suppressed-when-unchanged the way `audio:vu` is: RTT differs on nearly every tick, so suppression would save almost nothing, and at 0.2 Hz across a handful of windows the traffic is negligible. Transitions emit immediately so a drop is not hidden behind up to five seconds of tick latency.
+**Emission cadence.** Published only when the Snapshot changes: every setter and `Tick`'s own commit early-return when the new Snapshot equals the one already held, so a repeat is not delivered -- it carries no new information for a listener to act on. Transitions still emit immediately (each setter publishes synchronously the instant it changes something), so a drop is never hidden behind up to five seconds of tick latency. In practice suppression rarely fires: RTT differs on nearly every tick, so most ticks DO publish -- which was the original reasoning for not bothering to suppress at all. That reasoning still holds; it is also exactly why suppressing costs almost nothing on top of it, the same discipline `audio:vu` uses at a much higher rate. Transitions emit immediately so a drop is not hidden behind up to five seconds of tick latency.
 
 **Hydration.** A window opened after a transition has missed it. `App.GetConnectionState()` returns the current `Snapshot` for mount-time hydration — the precedent set by `GetHotkeyState`, `GetJoystickState` and `GetAudioState`.
 
@@ -171,7 +171,7 @@ Enriching `control:connection`'s payload from a bare string to a struct would gi
 
 Three gaps to close (G3); the state machine itself is already complete and is not touched.
 
-1. **Subscribe.** Add `voice:state` to the frontend `EV` map. The backend has emitted it since Phase 5 and nothing has ever listened.
+1. **Register the name.** Add `voice:state` to the frontend `EV` map, mirroring the Go event constants that map already tracks (`EV` is a name registry, not a subscriber list -- see `events.ts`'s own header comment). The backend has emitted `voice:state` since Phase 5; the UI consumes voice state through the aggregated `connection:state` snapshot (§4) rather than subscribing to `voice:state` directly, so an entry here with no direct subscriber is expected, not a gap.
 2. **Surface RTT.** `voice.Session.RTT()` is read on the `connhealth` tick rather than through a second ticker. `RTT()` already returns zero while rebinding — it is reset by `resetBindingLocked` on every new binding, specifically so the UI never shows a healthy ping for a broken session — so `0` maps to `RTTMs: -1` (unknown), not to a real zero-millisecond measurement.
 3. **Availability.** `Available: false` when no voice secret has arrived, no session exists, or the build cannot do voice. See §6.3.
 
@@ -397,8 +397,8 @@ Until that checklist has been run, Phase 6 is code-complete, not field-verified.
 3. Three consecutive ping failures declare `disconnected`; one or two set `healthy = false` without changing link state.
 4. `dial.go` sets client keepalive parameters compatible with the server's `MinTime: 60s` enforcement policy.
 5. `internal/connhealth` produces a correct `Snapshot` under an injected clock, with no sockets, under `-race`.
-6. `connection:state` is emitted on every tick and immediately on every transition; `App.GetConnectionState()` hydrates a late-opening window.
-7. `voice:state` is subscribed in the frontend; voice RTT and the `unavailable` state render.
+6. `connection:state` is emitted whenever the Snapshot changes -- immediately on every transition, and on the tick that first reflects a new measurement; a repeat of the already-held Snapshot is not re-delivered. `App.GetConnectionState()` hydrates a late-opening window.
+7. Voice RTT and the `unavailable` state render in the UI, through the aggregated `connection:state` snapshot -- not by the frontend subscribing to `voice:state` directly. `voice:state` is registered in the frontend `EV` map alongside every other backend event constant it mirrors; an entry with no direct subscriber is expected (§5 item 1), not unmet.
 8. The dual-pill renders both planes with correct dot derivation per §6.1, against a real local server.
 9. All three `ConnBanner` variants render for their respective states; the reconnect button shows in-flight state and surfaces a failure's reason; `ReconnectVoice` works.
 10. Connection SFX slots exist, are gated on `play_connection_sounds`, and log-once-play-silence with no sample present.

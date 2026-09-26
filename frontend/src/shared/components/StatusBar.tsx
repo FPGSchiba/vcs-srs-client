@@ -10,8 +10,9 @@ import {
 } from "../store/connection";
 
 interface StatusBarProps {
-  /** Navigates the main window to a nav key. Optional so the Comms popout
-   *  can render the bar without a router. */
+  /** Navigates the main window to a nav key. Optional because a consumer
+   *  with no navigation of its own to offer need not supply it -- today
+   *  `MainApp` is the only renderer of `StatusBar` and always passes it. */
   onNavigate?: (key: string) => void;
 }
 

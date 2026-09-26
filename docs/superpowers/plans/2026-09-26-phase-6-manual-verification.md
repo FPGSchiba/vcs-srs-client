@@ -50,6 +50,25 @@ inherits all of it.
       still pending. Before Phase 6 that error vanished into `_ =`; now it
       surfaces as `disconnected`. Watch for a reconnect bounce. **If this
       fires, it is pre-existing and cross-repo, not a Phase 6 regression.**
+      Do not confuse this with the harmless flicker noted just below --
+      that one self-corrects in well under a second and needs no bounce to
+      reproduce it; this race needs the rapid-repeat reconnects above.
+
+- [ ] **Expected: a brief DISCONNECTED flash mid-reconnect.** A manual
+      reconnect sets state to `reconnecting`; if the stream underneath it
+      happens to die in the narrow window between that and the point where
+      the old stream's cancellation is registered (`session.go`'s
+      `Reconnect`, between `setConnState(reconnecting)` and the cancel a few
+      lines later), the dying stream's own termination handler reports
+      `disconnected` before `reconnecting` -> `connected` follows moments
+      later. Harmless and self-correcting -- the banner and pill settle to
+      `connected` on their own -- but a tester who has not been told to
+      expect it will read this as the `SubscribeToUpdates` race just above.
+      The difference: this one is a single, brief flash bracketing an
+      OTHERWISE-successful reconnect, with no bounce and no repeat clicking
+      needed to trigger it; the race above needs rapid, repeated reconnects
+      and shows up as the reconnect itself failing/bouncing, not flashing
+      through on the way to success.
 - [ ] **Ghost clients.** After a real drop and reconnect, check the player
       list (and the server's admin view) for a duplicate of yourself. The
       server removes a dead stream's client from `s.streams` but not from
