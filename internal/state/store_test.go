@@ -1,6 +1,7 @@
 package state_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -121,6 +122,72 @@ func TestStore_OnRadiosChangedFiresForEveryRadioMutation(t *testing.T) {
 	}
 }
 
+// TestStore_VoiceCredentials_EmptyByDefault pins that an un-synced store
+// reports empty strings rather than panicking or returning stale data.
+func TestStore_VoiceCredentials_EmptyByDefault(t *testing.T) {
+	s := state.New()
+	secret, coal, global := s.VoiceCredentials()
+	if secret != "" || coal != "" || global != "" {
+		t.Fatalf("expected empty defaults, got secret=%q coal=%q global=%q", secret, coal, global)
+	}
+}
+
+// TestStore_SetAndGetVoiceCredentials pins the round trip SyncClient and the
+// VOICE_ADDRESS_UPDATE stream case rely on.
+func TestStore_SetAndGetVoiceCredentials(t *testing.T) {
+	s := state.New()
+	wantSecret := strings.Repeat("A", 43)
+	s.SetVoiceCredentials(wantSecret, "10.0.0.9:5002", "10.0.0.1:5002")
+
+	secret, coal, global := s.VoiceCredentials()
+	if secret != wantSecret {
+		t.Errorf("secret = %q, want %q", secret, wantSecret)
+	}
+	if coal != "10.0.0.9:5002" {
+		t.Errorf("coalition addr = %q, want %q", coal, "10.0.0.9:5002")
+	}
+	if global != "10.0.0.1:5002" {
+		t.Errorf("global addr = %q, want %q", global, "10.0.0.1:5002")
+	}
+}
+
+// TestStore_SetVoiceCredentials_EmptyAddrsAreStoredAsIs pins that a
+// standalone server's "" coalition/global addrs are NOT replaced with a
+// default -- the resolver downstream treats "" as absent and falls back.
+func TestStore_SetVoiceCredentials_EmptyAddrsAreStoredAsIs(t *testing.T) {
+	s := state.New()
+	wantSecret := strings.Repeat("B", 43)
+	s.SetVoiceCredentials(wantSecret, "", "")
+
+	secret, coal, global := s.VoiceCredentials()
+	if secret != wantSecret {
+		t.Errorf("secret = %q, want %q", secret, wantSecret)
+	}
+	if coal != "" {
+		t.Errorf("coalition addr = %q, want empty", coal)
+	}
+	if global != "" {
+		t.Errorf("global addr = %q, want empty", global)
+	}
+}
+
+// TestStore_SelectedRadio_ZeroByDefault pins the unselected default.
+func TestStore_SelectedRadio_ZeroByDefault(t *testing.T) {
+	s := state.New()
+	if got := s.SelectedRadio(); got != 0 {
+		t.Fatalf("SelectedRadio() = %d, want 0", got)
+	}
+}
+
+// TestStore_SetAndGetSelectedRadio pins the round trip radio.N.select drives.
+func TestStore_SetAndGetSelectedRadio(t *testing.T) {
+	s := state.New()
+	s.SetSelectedRadio(3)
+	if got := s.SelectedRadio(); got != 3 {
+		t.Fatalf("SelectedRadio() = %d, want 3", got)
+	}
+}
+
 // TestStore_ObserverCanReadTheStore is the deadlock guard: observers run with
 // the store lock RELEASED, so an observer is free to call Snapshot -- which is
 // exactly what the per-radio keybind refresh does.
@@ -141,5 +208,104 @@ func TestStore_ObserverCanReadTheStore(t *testing.T) {
 	}
 	if seen != 1 {
 		t.Errorf("observer saw %d radios, want 1", seen)
+	}
+}
+
+// TestStore_OnVoiceCredentialsChangedFiresForBothMutators pins the observer
+// contract the voice session's redirect handling depends on: a
+// VOICE_ADDRESS_UPDATE reaches the store through either SetVoiceCredentials
+// (non-blank secret) or SetVoiceAddresses (blank secret, see stream.go's
+// route case), and a live session must learn about both so it can re-point
+// itself at the fresh address.
+func TestStore_OnVoiceCredentialsChangedFiresForBothMutators(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*state.Store)
+	}{
+		{"SetVoiceCredentials", func(s *state.Store) {
+			s.SetVoiceCredentials(strings.Repeat("A", 43), "10.0.0.9:5002", "10.0.0.1:5002")
+		}},
+		{"SetVoiceAddresses", func(s *state.Store) {
+			s.SetVoiceAddresses("10.0.0.9:5002", "10.0.0.1:5002")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := state.New()
+			calls := 0
+			s.OnVoiceCredentialsChanged(func() { calls++ })
+			tt.mutate(s)
+			if calls != 1 {
+				t.Errorf("%s notified %d observers, want 1", tt.name, calls)
+			}
+		})
+	}
+}
+
+// TestStore_OnVoiceCredentialsChanged_ObserverCanReadTheStore mirrors
+// TestStore_ObserverCanReadTheStore for the voice-credentials observer: it
+// must run with the store lock released, since the whole point is that a
+// live voice session can call back into VoiceCredentials() from inside it.
+func TestStore_OnVoiceCredentialsChanged_ObserverCanReadTheStore(t *testing.T) {
+	s := state.New()
+	var seenSecret string
+	s.OnVoiceCredentialsChanged(func() {
+		seenSecret, _, _ = s.VoiceCredentials()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		s.SetVoiceCredentials(strings.Repeat("C", 43), "10.0.0.9:5002", "")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observer deadlocked against the store lock")
+	}
+	if seenSecret != strings.Repeat("C", 43) {
+		t.Errorf("observer saw secret %q, want %q", seenSecret, strings.Repeat("C", 43))
+	}
+}
+
+// TestStore_OnSettingsChangedFiresOnSetSettings pins the observer contract a
+// live voice session's RX refresh depends on (task-11b Priority 2): a
+// server-side change to the global/test frequency lists must notify, the
+// same way SetRadios/SetVoiceCredentials already do for their own state.
+func TestStore_OnSettingsChangedFiresOnSetSettings(t *testing.T) {
+	s := state.New()
+	calls := 0
+	s.OnSettingsChanged(func() { calls++ })
+
+	s.SetSettings(&srspb.ServerSettings{GlobalFrequencies: []float32{251.000}})
+
+	if calls != 1 {
+		t.Errorf("SetSettings notified %d observers, want 1", calls)
+	}
+}
+
+// TestStore_OnSettingsChanged_ObserverCanReadTheStore mirrors
+// TestStore_ObserverCanReadTheStore for the settings observer: it must run
+// with the store lock released, since the whole point is that a live voice
+// session can call back into Settings() from inside it.
+func TestStore_OnSettingsChanged_ObserverCanReadTheStore(t *testing.T) {
+	s := state.New()
+	var seenGlobal []float32
+	s.OnSettingsChanged(func() {
+		seenGlobal = s.Settings().GetGlobalFrequencies()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		s.SetSettings(&srspb.ServerSettings{GlobalFrequencies: []float32{251.000}})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observer deadlocked against the store lock")
+	}
+	if len(seenGlobal) != 1 || seenGlobal[0] != 251.000 {
+		t.Errorf("observer saw global frequencies %v, want [251.000]", seenGlobal)
 	}
 }

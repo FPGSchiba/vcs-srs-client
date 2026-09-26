@@ -10,6 +10,23 @@ import { useBuildInfo } from "../../../shared/hooks/useBuildInfo";
 
 type Stage = "welcome" | "manual";
 
+// Mirrors the server's UnitId validation exactly (vngd-srs-server): 2-4
+// uppercase letters/digits. The server rejects anything else, including an
+// empty string, with no useful explanation surfaced to the user -- this
+// catches it client-side instead, before a round trip to the server.
+const UNIT_ID_PATTERN = /^[A-Z0-9]{2,4}$/;
+
+function unitIdError(unitId: string): string | null {
+  if (!UNIT_ID_PATTERN.test(unitId)) {
+    // The field auto-uppercases as the user types (see the FFID input's
+    // onChange below), so a rejection here is never a case mismatch --
+    // don't mention "A-Z" in a way that reads as "any letters" to someone
+    // who typed lowercase. What's left to explain is length/characters.
+    return "FFID must be 2–4 letters and digits only (e.g. VG12).";
+  }
+  return null;
+}
+
 /**
  * Extracts a human-readable message from a binding error. Wails serializes a Go
  * error as a JSON envelope ({message, cause, kind}); we surface only `message`.
@@ -51,6 +68,11 @@ export function Welcome() {
 
   async function connect() {
     setError(null);
+    const idError = unitIdError(ffid);
+    if (idError) {
+      setError(idError);
+      return;
+    }
     try {
       setSessionServer(server);
       setPhase("connecting");
@@ -165,7 +187,11 @@ export function Welcome() {
                       id="ffid"
                       className="input mono"
                       value={ffid}
-                      onChange={(e) => setFfid(e.target.value)}
+                      // Auto-uppercase as typed -- matches how FFIDs are
+                      // normally presented and removes the lowercase
+                      // rejection failure mode entirely, instead of making
+                      // the user decode an ambiguous error message.
+                      onChange={(e) => setFfid(e.target.value.toUpperCase())}
                     />
                   </Field>
                   <Field label="Player Name" htmlFor="player" style={{ flex: 1 }}>

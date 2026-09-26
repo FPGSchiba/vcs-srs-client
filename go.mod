@@ -14,6 +14,7 @@ require (
 
 require (
 	github.com/gen2brain/malgo v0.11.26
+	github.com/google/uuid v1.6.0
 	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
 )
 

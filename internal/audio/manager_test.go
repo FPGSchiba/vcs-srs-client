@@ -3,6 +3,7 @@ package audio
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -927,5 +928,797 @@ func TestManagerRestartAfterStopReopensDevices(t *testing.T) {
 	}
 	if calls := b.PlaybackOpens(); len(calls) != 2 || calls[1] != "out-1" {
 		t.Fatalf("backend.OpenPlayback calls = %v, want a second open for out-1 after the restart", calls)
+	}
+}
+
+// TestEmitStateIfChangedHonoursEpoch pins that an abandoned generation
+// cannot publish a stale state over the current one. pollOnce can outlive
+// the generation that launched it (Stop()'s bounded joins), and without an
+// epoch check its emitState would overwrite m.lastState and fire OnState
+// with a snapshot belonging to a dead generation.
+func TestEmitStateIfChangedHonoursEpoch(t *testing.T) {
+	var mu sync.Mutex
+	var seen []State
+	m := NewManager(NewFakeBackend(), ManagerOptions{
+		OnState: func(st State) {
+			mu.Lock()
+			seen = append(seen, st)
+			mu.Unlock()
+		},
+		VUInterval: time.Hour,
+	})
+
+	m.mu.Lock()
+	current := m.epoch
+	m.mu.Unlock()
+
+	// An emit tagged with a stale epoch must be discarded entirely.
+	m.emitStateIfChanged(current - 1)
+
+	mu.Lock()
+	n := len(seen)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("stale-epoch emit published %d state(s); expected 0", n)
+	}
+
+	// The current epoch still emits.
+	m.emitStateIfChanged(current)
+	mu.Lock()
+	n = len(seen)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("current-epoch emit published %d state(s); expected 1", n)
+	}
+}
+
+// pollOnceForTest drives exactly one poll tick synchronously, with this
+// generation's rings and epoch -- the same arguments pollLoop would pass.
+// It exists so a test can step the device-supersede / bounded-backoff
+// reopen machinery deterministically instead of sleeping on PollInterval
+// and hoping the right number of ticks landed.
+func (m *Manager) pollOnceForTest() {
+	m.mu.Lock()
+	captureRing, playbackRing, epoch := m.captureRing, m.playbackRing, m.epoch
+	m.mu.Unlock()
+	m.pollOnce(captureRing, playbackRing, epoch)
+}
+
+// TestDeviceChangeDuringBackoffIsNotDelayed pins that selecting a different
+// device clears a backoff accumulated against the PREVIOUS device. The
+// reset used to live only in the branch that requires an open stream, so
+// the one case that needed it -- no stream, because opening kept failing --
+// was the one case it never ran for, stranding the user's new selection
+// behind up to 30 seconds of backoff for a device they are no longer asking
+// for.
+func TestDeviceChangeDuringBackoffIsNotDelayed(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "bad", Name: "Bad"}, {ID: "good", Name: "Good", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	be.FailCaptureFor("bad", errors.New("device is wedged"))
+
+	// PollInterval is deliberately far longer than the test: every tick
+	// that matters is driven by hand through pollOnceForTest, so the real
+	// poll goroutine must not slip an extra one in behind our back.
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	m.SetConfig(Config{InputDevice: "bad"})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// Drive polls until a backoff has accumulated against "bad".
+	for i := 0; i < 3; i++ {
+		m.pollOnceForTest()
+	}
+	m.mu.Lock()
+	backoff := m.inputBackoff
+	m.mu.Unlock()
+	if backoff == 0 {
+		t.Fatal("expected a non-zero input backoff after repeated open failures")
+	}
+
+	// The user picks a device that works.
+	m.SetConfig(Config{InputDevice: "good"})
+	m.pollOnceForTest()
+
+	m.mu.Lock()
+	stream, id, resetBackoff := m.captureStream, m.inputID, m.inputBackoff
+	m.mu.Unlock()
+	if stream == nil {
+		t.Fatalf("capture did not open on the newly selected device; backoff is still %v", resetBackoff)
+	}
+	if id != "good" {
+		t.Fatalf("opened device %q, want \"good\"", id)
+	}
+}
+
+// TestBackoffIsHeldWhileTheTargetIsUnchanged is the other half of
+// TestDeviceChangeDuringBackoffIsNotDelayed: the nil-stream reset must fire
+// when the target MOVES and stay quiet when it does not.
+//
+// It is what makes maybeReopenCapture's inputTargetID stamp load-bearing.
+// Without that stamp the target would freeze at whatever Start resolved, so
+// a FALLBACK device that keeps failing (the device Start opened is gone, so
+// resolveDevice now names a different one) would look like a brand-new
+// target on every single poll tick. The reset would then clear the backoff
+// each time and bounded-backoff would silently degrade into a retry on
+// every tick -- which is precisely the unbounded per-open C-allocation path
+// reopenBackoffMax exists to prevent (see its doc).
+func TestBackoffIsHeldWhileTheTargetIsUnchanged(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "a", Name: "A", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	// Empty id == "follow the system default", so the resolved device
+	// changes under us when the default changes -- without any SetConfig.
+	m.SetConfig(Config{})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// "a" unplugs; the default becomes "b", which is wedged.
+	be.SetDevices(
+		[]DeviceInfo{{ID: "b", Name: "B", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	be.FailCaptureFor("b", errors.New("device is wedged"))
+
+	m.pollOnceForTest() // supersedes "a", attempts "b", starts the backoff
+	afterFirst := len(be.CaptureOpens())
+	if afterFirst != 2 {
+		t.Fatalf("expected exactly 2 capture opens (Start's \"a\" and the poll's \"b\"), got %v", be.CaptureOpens())
+	}
+
+	// Neither of these ticks may attempt anything: the target has not
+	// moved, so the backoff from "b" is still the right answer.
+	m.pollOnceForTest()
+	m.pollOnceForTest()
+
+	if opens := be.CaptureOpens(); len(opens) != afterFirst {
+		t.Fatalf("backoff was not honoured: capture opens grew to %v across two polls inside the backoff window", opens)
+	}
+	m.mu.Lock()
+	backoff, target := m.inputBackoff, m.inputTargetID
+	m.mu.Unlock()
+	if backoff == 0 {
+		t.Fatal("backoff was reset even though the target device did not change")
+	}
+	if target != "b" {
+		t.Fatalf("inputTargetID = %q, want \"b\" -- the reopen attempt must stamp the device it aimed at", target)
+	}
+}
+
+// markedSink counts frames, separating the ones carrying real (non-silent)
+// capture data from the zero-filled frames a ring underrun produces. The
+// distinction is what lets TestDSPLoopCatchesUpAfterAStall tell "the loop
+// absorbed the backlog" from "the loop ticked again and read nothing".
+type markedSink struct {
+	mu            sync.Mutex
+	marked, total int
+}
+
+func (s *markedSink) WriteFrame(f []float32) {
+	s.mu.Lock()
+	s.total++
+	if f[0] != 0 {
+		s.marked++
+	}
+	s.mu.Unlock()
+}
+func (s *markedSink) Close() error { return nil }
+
+// TestDSPLoopCatchesUpAfterAStall pins that a capture backlog decays instead
+// of becoming permanent latency. A time.Ticker coalesces missed ticks, so
+// one-frame-per-tick could never drain a backlog it did not cause: every
+// frame the loop failed to read stayed in the ring forever as added latency,
+// until Drain() eventually dumped ~160 ms of it in one audible jump.
+//
+// It equally pins the OTHER half of the fix, which is the easier one to get
+// wrong and the harder one to hear in a unit test: the playback side must
+// still run EXACTLY ONCE per tick. Playback is paced by the output device,
+// not by capture backlog, so writing one playback frame per absorbed capture
+// frame would make playback run fast. The playbackRing depth assertion below
+// is what holds that line -- nothing reads that ring in this test, so its
+// depth is exactly the number of mixer passes the loop performed.
+//
+// The tick source is hand-driven (Manager.dspTick) rather than the real
+// FrameDuration ticker: the assertions are about what ONE tick does, and a
+// sleep-based version would be a race between the test and the scheduler on
+// the one path in this package where a flaky test is worse than none.
+func TestDSPLoopCatchesUpAfterAStall(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	sink := &markedSink{}
+	m.AddSink(sink)
+	m.SetPTT(true) // gate open with no start delay, so every frame reaches the sink
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// The stall: four frames arrive from the OS capture callback before the
+	// DSP loop gets a single tick. A real time.Ticker would have coalesced
+	// those missed ticks into exactly one, which is what this hand-driven
+	// channel models.
+	frame := make([]float32, FrameSamples)
+	for i := range frame {
+		frame[i] = 0.5
+	}
+	for i := 0; i < 4; i++ {
+		be.PushFrame(frame)
+	}
+
+	tick <- time.Now() // the catch-up tick
+	// A send completes exactly when dspLoop receives, so this second send
+	// returning proves the first iteration finished. Stop() then joins the
+	// goroutine, which both ends the second iteration and gives us a
+	// happens-before edge to read everything below race-free.
+	tick <- time.Now()
+	m.Stop()
+
+	sink.mu.Lock()
+	marked, total := sink.marked, sink.total
+	sink.mu.Unlock()
+
+	if marked <= 1 {
+		t.Fatalf("sink saw %d frame(s) of real capture data across 2 ticks; a 4-frame backlog "+
+			"was not caught up -- it is now permanent latency", marked)
+	}
+	if marked != 4 {
+		t.Fatalf("sink saw %d of the 4 backlogged frames; one tick should absorb up to "+
+			"1+maxCatchUpFrames = 4", marked)
+	}
+	// Tick 2 finds an empty ring and still runs the chain once on a
+	// zero-filled frame, exactly as the pre-fix loop did on an underrun.
+	if total != 5 {
+		t.Fatalf("sink saw %d frames total, want 5 (4 real on the catch-up tick, 1 silent on the next)", total)
+	}
+
+	// THE REGRESSION THAT WOULD BE INAUDIBLE IN A TEST AND OBVIOUS ON
+	// HARDWARE: playback must advance one frame per TICK, never one per
+	// absorbed capture frame.
+	m.mu.Lock()
+	pb := m.playbackRing
+	m.mu.Unlock()
+	if got := pb.Available() / FrameSamples; got != 2 {
+		t.Fatalf("playbackRing holds %d frames after 2 ticks, want exactly 2 -- the playback "+
+			"side must run once per tick, not once per caught-up capture frame, or playback runs fast", got)
+	}
+}
+
+// forceInputRetryDue makes the next poll tick treat the capture backoff
+// window as already elapsed, without sleeping through it. The two tests
+// below need SEVERAL consecutive failed attempts to observe how the backoff
+// EVOLVES, and waiting out reopenBackoffInitial * 2^n of real time to get
+// them would put minutes of sleep into the suite.
+//
+// It clears only the DUE TIME and never m.inputBackoff: the accumulated
+// value is the thing under test, so a helper that touched it would be
+// asserting its own handiwork.
+func forceInputRetryDue(m *Manager) {
+	m.mu.Lock()
+	m.inputRetryAt = time.Time{}
+	m.mu.Unlock()
+}
+
+// TestHotPlugAfterAnEmptyEnumerationRetriesPromptly pins the case that has
+// nothing to do with the user touching Settings: boot with the USB headset
+// unplugged, plug it in a minute later.
+//
+// resolveDevice returns "" when nothing enumerates, so every attempt made
+// while there is no capture hardware is aimed at "" and the backoff
+// escalates toward reopenBackoffMax against a device that does not exist.
+// Keying the reset off "the resolved target differs from the last one" alone
+// reads that "" as "no attempt has ever been made" and never fires, so the
+// freshly plugged headset waits out up to 30 s of a backoff it had no part
+// in earning -- no microphone, and nothing anywhere indicating that
+// something is pending.
+//
+// cfg.InputDevice is "" (System Default) on BOTH sides of the hot-plug,
+// which is exactly why the configured id cannot detect this on its own
+// either. It takes the pair.
+func TestHotPlugAfterAnEmptyEnumerationRetriesPromptly(t *testing.T) {
+	be := NewFakeBackend()
+	outs := []DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}}
+	// No capture hardware at all. checkDeviceID lets "" through
+	// unconditionally (it means "follow the system default"), so the empty
+	// enumeration is modelled by wedging "" explicitly -- which is what
+	// ma_device_init does when there is no device to follow.
+	be.SetDevices(nil, outs)
+	be.FailCaptureFor("", errors.New("no capture device"))
+
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	m.SetConfig(Config{}) // System Default.
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// Four failed attempts against nothing, as a minute of the headset being
+	// unplugged would produce.
+	for i := 0; i < 4; i++ {
+		forceInputRetryDue(m)
+		m.pollOnceForTest()
+	}
+	m.mu.Lock()
+	backoff, target := m.inputBackoff, m.inputTargetID
+	m.mu.Unlock()
+	if backoff <= reopenBackoffInitial {
+		t.Fatalf("input backoff = %v after 4 failed attempts; expected it to have escalated past %v", backoff, reopenBackoffInitial)
+	}
+	if target != "" {
+		t.Fatalf("inputTargetID = %q, want \"\" -- nothing enumerated, so there was nothing to aim at", target)
+	}
+	opensBefore := len(be.CaptureOpens())
+
+	// The headset is plugged in. No SetConfig: the user did not touch
+	// anything, the enumeration changed underneath them.
+	be.SetDevices([]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}}, outs)
+
+	m.pollOnceForTest()
+
+	m.mu.Lock()
+	stream, id, after := m.captureStream, m.inputID, m.inputBackoff
+	m.mu.Unlock()
+	if stream == nil {
+		t.Fatalf("capture did not open on the first poll after the device appeared; backoff is still %v (opens: %v)", after, be.CaptureOpens())
+	}
+	if id != "mic-1" {
+		t.Fatalf("opened device %q, want \"mic-1\"", id)
+	}
+	// Prompt means ONE attempt, not a flurry: the retry became due, it was
+	// taken, and that is all.
+	if got := len(be.CaptureOpens()) - opensBefore; got != 1 {
+		t.Fatalf("hot-plug tick made %d open attempts, want exactly 1 (opens: %v)", got, be.CaptureOpens())
+	}
+}
+
+// TestAlternatingFailingTargetsKeepEscalatingTheBackoff is the counterweight
+// to TestHotPlugAfterAnEmptyEnumerationRetriesPromptly, and the two pull in
+// opposite directions: making the hot-plug case fire by keying the reset off
+// the resolved target is precisely what opens this hole.
+//
+// A flaky USB mic that appears and disappears across polls makes the
+// RESOLVED target alternate between devices that both fail, with the
+// CONFIGURED id (System Default, "") never moving. If that alternation
+// counts as "a fresh target", the backoff is cleared on every tick and
+// nextBackoff never escalates past reopenBackoffInitial. Per that const's
+// own doc the bound exists to cap an unfreed per-open C allocation in malgo,
+// so a retry rate pinned at the floor is a correspondingly faster leak --
+// the bug is a slow resource leak, not a cosmetic one, which is why this is
+// pinned rather than argued.
+func TestAlternatingFailingTargetsKeepEscalatingTheBackoff(t *testing.T) {
+	be := NewFakeBackend()
+	outs := []DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}}
+	flip := func(id string) {
+		be.SetDevices([]DeviceInfo{{ID: id, Name: id, IsDefault: true}}, outs)
+	}
+	flip("a")
+	be.FailCaptureFor("a", errors.New("device is wedged"))
+	be.FailCaptureFor("b", errors.New("device is wedged"))
+
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	m.SetConfig(Config{}) // System Default: cfg.InputDevice never moves.
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// Start's own attempt against "a" failed but left no backoff, so this
+	// first poll is the one that seeds it.
+	m.pollOnceForTest()
+	m.mu.Lock()
+	seeded := m.inputBackoff
+	m.mu.Unlock()
+	if seeded != reopenBackoffInitial {
+		t.Fatalf("input backoff = %v after the first failed attempt, want %v", seeded, reopenBackoffInitial)
+	}
+	opens := len(be.CaptureOpens())
+
+	// Phase 1: the mic flaps on every tick INSIDE the backoff window.
+	// Nothing may be attempted.
+	for i, id := range []string{"b", "a", "b", "a"} {
+		flip(id)
+		m.pollOnceForTest()
+		if got := len(be.CaptureOpens()); got != opens {
+			t.Fatalf("flap %d to %q broke the backoff window: capture opens grew to %v", i, id, be.CaptureOpens())
+		}
+	}
+
+	// Phase 2: every tick now lands after its backoff window elapsed, with
+	// the target still flapping. Each failure must double the backoff.
+	want := seeded
+	for i, id := range []string{"b", "a", "b", "a"} {
+		flip(id)
+		forceInputRetryDue(m)
+		m.pollOnceForTest()
+		// The doubling is written out rather than taken from nextBackoff:
+		// the expectation must not be computed by the code it is meant to
+		// hold to account.
+		want *= 2
+		if want > reopenBackoffMax {
+			want = reopenBackoffMax
+		}
+		m.mu.Lock()
+		got := m.inputBackoff
+		m.mu.Unlock()
+		if got != want {
+			t.Fatalf("after failed attempt %d against alternating wedged devices, input backoff = %v, want %v -- a flapping enumeration must not be mistaken for a user changing device, or the retry rate stays pinned at %v", i+1, got, want, reopenBackoffInitial)
+		}
+	}
+}
+
+// TestDSPLoopCatchUpCeilingHoldsOnOneTick pins the CEILING that
+// TestDSPLoopCatchesUpAfterAStall cannot: that test pushes exactly
+// 1+maxCatchUpFrames frames, so deleting the clamp entirely leaves it green
+// -- its assertions cannot tell "the ceiling is 4" from "there is no
+// ceiling". This one pushes twice the ceiling.
+//
+// The ceiling is the only thing standing between a pathological stall and
+// the 10 ms budget: without it one tick would run NS + AGC + gate + effect +
+// every Sink.WriteFrame over the whole backlog, and Phase 5's sink writes to
+// a socket.
+func TestDSPLoopCatchUpCeilingHoldsOnOneTick(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	sink := &markedSink{}
+	m.AddSink(sink)
+	m.SetPTT(true)
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	frame := make([]float32, FrameSamples)
+	for i := range frame {
+		frame[i] = 0.5
+	}
+	// Eight frames: twice what one tick is allowed to absorb.
+	for i := 0; i < 8; i++ {
+		be.PushFrame(frame)
+	}
+
+	tick <- time.Now()
+	// The send returns the instant dspLoop RECEIVES, so the loop is inside
+	// iteration 1 right now. Stop() closes stopDSP and joins dspDone: the
+	// loop finishes this iteration and exits at the next select, because
+	// nothing will ever send on tick again. Exactly one iteration ran.
+	m.Stop()
+
+	sink.mu.Lock()
+	marked, total := sink.marked, sink.total
+	sink.mu.Unlock()
+
+	if marked != 4 {
+		t.Fatalf("one tick absorbed %d of the 8 backlogged frames, want exactly 4 (1+maxCatchUpFrames) -- "+
+			"an unbounded catch-up turns one 10 ms tick into the whole backlog's worth of DSP and sink work", marked)
+	}
+	if total != 4 {
+		t.Fatalf("sink saw %d frames on one tick, want 4 -- every frame in a full catch-up carries real data, none are underrun fill", total)
+	}
+	m.mu.Lock()
+	cr := m.captureRing
+	m.mu.Unlock()
+	if got := cr.Available() / FrameSamples; got != 4 {
+		t.Fatalf("captureRing holds %d frames after one tick, want 4 -- the other half of the backlog must still be "+
+			"waiting for the next tick, not have been swallowed whole by this one", got)
+	}
+}
+
+// TestPlaybackHotPlugAfterAnEmptyEnumerationRetriesPromptly is the playback
+// mirror of TestHotPlugAfterAnEmptyEnumerationRetriesPromptly. The backoff
+// machinery is written out once per direction, so the capture half being the
+// only one under test is exactly how an asymmetric edit -- a mirrored branch
+// that still compares cfg.InputDevice, say -- survives review.
+func TestPlaybackHotPlugAfterAnEmptyEnumerationRetriesPromptly(t *testing.T) {
+	be := NewFakeBackend()
+	ins := []DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}}
+	be.SetDevices(ins, nil)
+	be.FailPlaybackFor("", errors.New("no playback device"))
+
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	m.SetConfig(Config{}) // System Default on both directions.
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	for i := 0; i < 4; i++ {
+		m.mu.Lock()
+		m.outputRetryAt = time.Time{}
+		m.mu.Unlock()
+		m.pollOnceForTest()
+	}
+	m.mu.Lock()
+	backoff := m.outputBackoff
+	m.mu.Unlock()
+	if backoff <= reopenBackoffInitial {
+		t.Fatalf("output backoff = %v after 4 failed attempts; expected it to have escalated past %v", backoff, reopenBackoffInitial)
+	}
+
+	be.SetDevices(ins, []DeviceInfo{{ID: "spk-1", Name: "Speakers", IsDefault: true}})
+	m.pollOnceForTest()
+
+	m.mu.Lock()
+	stream, id := m.playbackStream, m.outputID
+	m.mu.Unlock()
+	if stream == nil {
+		t.Fatalf("playback did not open on the first poll after the device appeared; backoff is still %v (opens: %v)", backoff, be.PlaybackOpens())
+	}
+	if id != "spk-1" {
+		t.Fatalf("opened output device %q, want \"spk-1\"", id)
+	}
+}
+
+// copyingSink keeps a copy of every frame it is handed. recordingSink above
+// only counts and markedSink only looks at f[0]; these tests need the whole
+// frame, because what they are asking is whether a filter ran over it.
+type copyingSink struct {
+	mu     sync.Mutex
+	frames [][]float32
+}
+
+func (s *copyingSink) WriteFrame(f []float32) {
+	s.mu.Lock()
+	s.frames = append(s.frames, append([]float32(nil), f...))
+	s.mu.Unlock()
+}
+func (s *copyingSink) Close() error { return nil }
+
+func (s *copyingSink) last() []float32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.frames) == 0 {
+		return nil
+	}
+	return s.frames[len(s.frames)-1]
+}
+
+// constantSource is a Source that overwrites every frame with one value and
+// counts how many times it was asked.
+type constantSource struct {
+	v     float32
+	calls atomic.Int64
+}
+
+func (s *constantSource) ReadInto(buf []float32) {
+	s.calls.Add(1)
+	for i := range buf {
+		buf[i] = s.v
+	}
+}
+
+// dcFrame is a constant-amplitude frame. DC is the right probe for a radio
+// effect: the voice presets all start with a highpass, so a filtered DC
+// frame decays to nothing within a few dozen samples while an unfiltered one
+// stays flat. That makes "was the effect applied" a one-sample question at
+// the tail rather than a spectral one.
+func dcFrame(v float32) []float32 {
+	f := make([]float32, FrameSamples)
+	for i := range f {
+		f[i] = v
+	}
+	return f
+}
+
+// startTicked brings up a Manager on a hand-driven tick with one input and
+// one output device, and returns it with its tick channel.
+func startTicked(t *testing.T, cfg Config) (*Manager, *FakeBackend, chan time.Time) {
+	t.Helper()
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	m.SetConfig(cfg)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return m, be, tick
+}
+
+// readPlayback takes one frame off the playback ring. Nothing else consumes
+// it in these tests, so it holds exactly what the mixer wrote.
+func readPlayback(t *testing.T, m *Manager) []float32 {
+	t.Helper()
+	m.mu.Lock()
+	pr := m.playbackRing
+	m.mu.Unlock()
+	out := make([]float32, FrameSamples)
+	if n := pr.Read(out); n != FrameSamples {
+		t.Fatalf("playback ring held %d samples, want a whole %d-sample frame", n, FrameSamples)
+	}
+	return out
+}
+
+// readLastPlayback empties the playback ring and returns the most recent
+// whole frame the mixer wrote into it.
+func readLastPlayback(t *testing.T, m *Manager) []float32 {
+	t.Helper()
+	m.mu.Lock()
+	pr := m.playbackRing
+	m.mu.Unlock()
+	var last []float32
+	buf := make([]float32, FrameSamples)
+	for pr.Available() >= FrameSamples {
+		pr.Read(buf)
+		last = append([]float32(nil), buf...)
+	}
+	if last == nil {
+		t.Fatal("the playback ring holds no whole frame")
+	}
+	return last
+}
+
+// TestDSPLoopTransmitsUneffectedAudio is design decision D7's regression.
+// The radio effect used to run before the sink loop, so we transmitted
+// pre-effected audio; the C# peer applies effects on RECEIVE, which left a
+// C# listener hearing us double-effected while we heard them dry.
+func TestDSPLoopTransmitsUneffectedAudio(t *testing.T) {
+	m, be, tick := startTicked(t, Config{
+		VoiceEffect: "comms_filter_mid",
+		Levels:      Levels{Master: 1, Voice: 1},
+	})
+	defer m.Stop()
+	sink := &copyingSink{}
+	m.AddSink(sink)
+	m.SetPTT(true)
+
+	be.PushFrame(dcFrame(0.5))
+	tick <- time.Now()
+	m.Stop()
+
+	got := sink.last()
+	if got == nil {
+		t.Fatal("the sink saw no frame at all")
+	}
+	// Written out by hand: the sink must see exactly what was captured. A
+	// bandpass would leave the head near 0.5 and decay the tail to nothing,
+	// so the tail is where a surviving effect shows up.
+	for i, v := range got {
+		if v != 0.5 {
+			t.Fatalf("transmitted sample %d = %v, want exactly 0.5 -- the radio effect must NOT run before the sinks (D7)", i, v)
+		}
+	}
+}
+
+// TestDSPLoopEffectsTheLocalMonitor is D7's other half: the effect did not
+// simply disappear, it moved. Self-monitoring must still sound like the
+// radio, so the monitor keeps an instance of its own.
+func TestDSPLoopEffectsTheLocalMonitor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		effect string
+		// wantTail is written out from what the filter does, not computed
+		// from the filter: "off" passes DC through untouched, and any
+		// highpass blocks DC entirely within a frame.
+		wantTail    float32
+		tolerance   float32
+		description string
+	}{
+		{"off", "", 0.5, 0.001, "passthrough must leave the monitor at the captured level"},
+		{"comms_filter_mid", "comms_filter_mid", 0, 0.02, "a highpass must have blocked the DC by the tail of the frame"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, be, tick := startTicked(t, Config{
+				MicPassthrough: true,
+				VoiceEffect:    tc.effect,
+				Levels:         Levels{Master: 1, Voice: 1},
+			})
+			defer m.Stop()
+			m.SetPTT(true)
+
+			be.PushFrame(dcFrame(0.5))
+			tick <- time.Now()
+			tick <- time.Now() // returns only once the first iteration finished
+			out := readPlayback(t, m)
+
+			tail := out[len(out)-1]
+			if d := tail - tc.wantTail; d < -tc.tolerance || d > tc.tolerance {
+				t.Fatalf("monitor tail sample = %v, want %v ± %v: %s", tail, tc.wantTail, tc.tolerance, tc.description)
+			}
+		})
+	}
+}
+
+// TestDSPLoopMixesTheRegisteredSource pins that a registered Source reaches
+// the output at all -- without this the whole RX path is inaudible.
+func TestDSPLoopMixesTheRegisteredSource(t *testing.T) {
+	m, _, tick := startTicked(t, Config{Levels: Levels{Master: 1, Voice: 1}})
+	defer m.Stop()
+	m.SetSource(&constantSource{v: 0.25})
+
+	tick <- time.Now()
+	tick <- time.Now()
+	out := readPlayback(t, m)
+
+	// Master and Voice are both at 1, and taper(1) is 1, so the received
+	// sample must arrive at the output unchanged.
+	for i, v := range out {
+		if v < 0.24 || v > 0.26 {
+			t.Fatalf("output sample %d = %v, want ~0.25 -- the registered Source must reach the voice bus", i, v)
+		}
+	}
+}
+
+// TestDSPLoopClearsTheSourceBufferWhenTheSourceGoesAway pins the `else`
+// branch that clears rxBuf. rxBuf is allocated once and reused, so a
+// Manager that simply skipped the read when no Source is registered would
+// replay the last received frame forever -- a stuck 10 ms loop of the last
+// thing anyone said, for as long as the pipeline runs.
+func TestDSPLoopClearsTheSourceBufferWhenTheSourceGoesAway(t *testing.T) {
+	m, _, tick := startTicked(t, Config{Levels: Levels{Master: 1, Voice: 1}})
+	defer m.Stop()
+	m.SetSource(&constantSource{v: 0.25})
+
+	tick <- time.Now()
+	tick <- time.Now()
+	if out := readPlayback(t, m); out[0] < 0.24 {
+		t.Fatalf("precondition failed: source did not reach the output, sample 0 = %v", out[0])
+	}
+
+	// Three ticks and then the LAST frame in the ring: a tick send returns
+	// when dspLoop RECEIVES it, so the iteration that was already in flight
+	// when SetSource(nil) landed may still write a frame carrying the old
+	// audio. Reading the most recent frame instead of the oldest is what
+	// makes the assertion about a tick that provably started after the
+	// change.
+	m.SetSource(nil)
+	tick <- time.Now()
+	tick <- time.Now()
+	tick <- time.Now()
+	out := readLastPlayback(t, m)
+	for i, v := range out {
+		if v != 0 {
+			t.Fatalf("output sample %d = %v after the Source was cleared, want 0 -- the reused rx buffer must be cleared, not left holding the last received frame", i, v)
+		}
+	}
+}
+
+// TestDSPLoopPullsTheSourceOncePerTick pins that received audio is paced by
+// the DSP tick and not by capture backlog. A catch-up tick absorbs up to
+// four CAPTURE frames but still writes exactly one playback frame, so
+// pulling the Source inside that loop would run every remote talker up to
+// four times real speed while the local ring drained.
+func TestDSPLoopPullsTheSourceOncePerTick(t *testing.T) {
+	m, be, tick := startTicked(t, Config{Levels: Levels{Master: 1, Voice: 1}})
+	defer m.Stop()
+	src := &constantSource{v: 0.25}
+	m.SetSource(src)
+	m.SetPTT(true)
+
+	// Eight frames: twice what one tick is allowed to absorb, so the tick
+	// below is a full catch-up tick.
+	for i := 0; i < 8; i++ {
+		be.PushFrame(dcFrame(0.5))
+	}
+	tick <- time.Now()
+	m.Stop()
+
+	if got := src.calls.Load(); got != 1 {
+		t.Fatalf("ReadInto was called %d times on one catch-up tick, want exactly 1 -- received audio is paced by the tick, not by capture backlog", got)
 	}
 }

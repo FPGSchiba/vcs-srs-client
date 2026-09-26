@@ -1,12 +1,13 @@
-package control_test
+package control
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/FPGSchiba/vcs-srs-client/internal/control"
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -41,7 +42,7 @@ func TestStream_RoutesClientJoined(t *testing.T) {
 
 	st := state.New()
 	em := &capEmitter{}
-	c := control.New(conn, "tok")
+	c := New(conn, "tok")
 
 	guid := "g9"
 	f.PushUpdate(&srspb.ServerUpdate{
@@ -66,5 +67,116 @@ func TestStream_RoutesClientJoined(t *testing.T) {
 			t.Fatal("client_update not observed in time")
 		case <-time.After(20 * time.Millisecond):
 		}
+	}
+}
+
+// TestRouteVoiceAddressUpdate pins that VOICE_ADDRESS_UPDATE reaches the
+// store. stream.go's default branch silently discarded it, which was correct
+// while there was no voice path and is a dropped redirect now.
+func TestRouteVoiceAddressUpdate(t *testing.T) {
+	st := state.New()
+	em := &capEmitter{}
+	route(&srspb.ServerUpdate{
+		Type: srspb.ServerUpdate_VOICE_ADDRESS_UPDATE,
+		Update: &srspb.ServerUpdate_VoiceAddressUpdate{
+			VoiceAddressUpdate: &srspb.VoiceAddressUpdate{
+				CoalitionVoiceAddr: "10.0.0.9:5002",
+				GlobalVoiceAddr:    "10.0.0.1:5002",
+				VoiceSecret:        strings.Repeat("A", 43),
+			},
+		},
+	}, st, events.New(em))
+
+	secret, coal, global := st.VoiceCredentials()
+	if coal != "10.0.0.9:5002" {
+		t.Errorf("coalition addr = %q", coal)
+	}
+	if global != "10.0.0.1:5002" {
+		t.Errorf("global addr = %q", global)
+	}
+	if len(secret) != 43 {
+		t.Errorf("secret length = %d, want 43", len(secret))
+	}
+}
+
+// TestRouteVoiceAddressUpdate_EmitsTypedEvent pins that the route case emits
+// a typed event (as every other case does) rather than only mutating the
+// store silently.
+func TestRouteVoiceAddressUpdate_EmitsTypedEvent(t *testing.T) {
+	st := state.New()
+	em := &capEmitter{}
+	route(&srspb.ServerUpdate{
+		Type: srspb.ServerUpdate_VOICE_ADDRESS_UPDATE,
+		Update: &srspb.ServerUpdate_VoiceAddressUpdate{
+			VoiceAddressUpdate: &srspb.VoiceAddressUpdate{
+				CoalitionVoiceAddr: "10.0.0.9:5002",
+				GlobalVoiceAddr:    "10.0.0.1:5002",
+				VoiceSecret:        strings.Repeat("A", 43),
+			},
+		},
+	}, st, events.New(em))
+
+	if !em.saw(events.EventVoiceAddressUpdate) {
+		t.Fatalf("expected %q to be emitted, saw %v", events.EventVoiceAddressUpdate, em.names)
+	}
+}
+
+// TestRouteVoiceAddressUpdate_NilPayloadIsIgnored guards the same nil-safety
+// pattern every other route case follows (e.g. CLIENT_JOINED with a nil
+// ClientUpdate): a malformed update must not panic the stream goroutine.
+func TestRouteVoiceAddressUpdate_NilPayloadIsIgnored(t *testing.T) {
+	st := state.New()
+	em := &capEmitter{}
+	route(&srspb.ServerUpdate{
+		Type: srspb.ServerUpdate_VOICE_ADDRESS_UPDATE,
+	}, st, events.New(em))
+
+	secret, coal, global := st.VoiceCredentials()
+	if secret != "" || coal != "" || global != "" {
+		t.Fatalf("expected store untouched, got secret=%q coal=%q global=%q", secret, coal, global)
+	}
+	if em.saw(events.EventVoiceAddressUpdate) {
+		t.Fatalf("expected no event for a nil payload")
+	}
+}
+
+// TestRouteVoiceAddressUpdate_EmptySecretPreservesStoredSecret guards that
+// a VOICE_ADDRESS_UPDATE carrying an empty secret does not overwrite a
+// previously stored good secret. Empty secrets indicate malformed messages
+// (partial writes, proto defaults from older servers, etc.), not revocations.
+// The server re-sends the same secret on redirect, so a blank is always wrong.
+func TestRouteVoiceAddressUpdate_EmptySecretPreservesStoredSecret(t *testing.T) {
+	st := state.New()
+	em := &capEmitter{}
+
+	// Pre-populate the store with a good secret and addresses.
+	goodSecret := strings.Repeat("B", 43)
+	st.SetVoiceCredentials(goodSecret, "10.0.0.9:5001", "10.0.0.1:5001")
+
+	// Route an update with empty secret but different addresses.
+	route(&srspb.ServerUpdate{
+		Type: srspb.ServerUpdate_VOICE_ADDRESS_UPDATE,
+		Update: &srspb.ServerUpdate_VoiceAddressUpdate{
+			VoiceAddressUpdate: &srspb.VoiceAddressUpdate{
+				CoalitionVoiceAddr: "10.0.0.9:5002",
+				GlobalVoiceAddr:    "10.0.0.1:5002",
+				VoiceSecret:        "", // Malformed: empty secret
+			},
+		},
+	}, st, events.New(em))
+
+	// Assert: addresses updated, secret preserved.
+	secret, coal, global := st.VoiceCredentials()
+	if coal != "10.0.0.9:5002" {
+		t.Errorf("coalition addr = %q, want 10.0.0.9:5002", coal)
+	}
+	if global != "10.0.0.1:5002" {
+		t.Errorf("global addr = %q, want 10.0.0.1:5002", global)
+	}
+	if secret != goodSecret {
+		t.Errorf("secret = %q, want %q", secret, goodSecret)
+	}
+	if !em.saw(events.EventVoiceAddressUpdate) {
+		t.Fatalf("expected event to be emitted, saw %v", em.names)
 	}
 }

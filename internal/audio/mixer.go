@@ -37,12 +37,22 @@ func NewMixer() *Mixer {
 // SetLevels replaces the bus positions. Called from the DSP goroutine only.
 func (m *Mixer) SetLevels(l Levels) { m.levels = l }
 
-// Mix writes master × (voice×monitor + sfx×sfx + notification×notif) into
-// out, hard-limited to [-1, 1].
+// Mix writes master × (voice×(monitor+received) + sfx×sfx +
+// notification×notif) into out, hard-limited to [-1, 1].
 //
-// Phase 5 adds received voice to the voice bus alongside monitor; the bus
-// structure is here now so that is an addition rather than a reshape.
-func (m *Mixer) Mix(out, monitor, sfx, notif []float32) {
+// The Phase 5 addition this bus structure was built for has landed:
+// `received` carries the decoded, per-stream-effected voice the RX path
+// sums in internal/voice's ReadInto, and it rides the SAME voice gain as
+// the local monitor. One bus, two sources -- a listener turning "Voice"
+// down expects both their own sidetone and the people they are listening to
+// to go quiet together, and a separate level for received audio is not
+// something the design's four knobs offer.
+//
+// Both voice sources are summed BEFORE the limiter, deliberately: the
+// clamp's job is to protect the output device from the sum of everything,
+// so limiting each source on its own would let two half-scale sources still
+// add up past full scale afterwards.
+func (m *Mixer) Mix(out, monitor, received, sfx, notif []float32) {
 	master := taper(m.levels.Master)
 	gv := taper(m.levels.Voice) * master
 	gs := taper(m.levels.SFX) * master
@@ -52,6 +62,9 @@ func (m *Mixer) Mix(out, monitor, sfx, notif []float32) {
 		var s float32
 		if i < len(monitor) {
 			s += monitor[i] * gv
+		}
+		if i < len(received) {
+			s += received[i] * gv
 		}
 		if i < len(sfx) {
 			s += sfx[i] * gs

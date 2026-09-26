@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 
 const getClientState = vi.fn();
 const getSettings = vi.fn();
@@ -9,6 +9,7 @@ const getJoystickState = vi.fn();
 const getAudioDevices = vi.fn();
 const getAudioState = vi.fn();
 const getAudioEffectPresets = vi.fn();
+const voiceState = vi.fn();
 
 vi.mock("../../shared/api/client", () => ({
   api: {
@@ -20,8 +21,10 @@ vi.mock("../../shared/api/client", () => ({
     getAudioDevices: () => getAudioDevices(),
     getAudioState: () => getAudioState(),
     getAudioEffectPresets: () => getAudioEffectPresets(),
+    voiceState: () => voiceState(),
     closeWindow: vi.fn(),
     updateRadioInfo: vi.fn(),
+    selectRadio: vi.fn(),
   },
 }));
 
@@ -43,6 +46,8 @@ vi.mock("../../shared/api/events", async (importOriginal) => {
 
 import { EV } from "../../shared/api/events";
 import { useSettings } from "../../shared/store/settings";
+import { useRadios } from "../../shared/store/radios";
+import { useSession } from "../../shared/store/session";
 import { CommsApp } from "./CommsApp";
 
 const settings = {
@@ -68,11 +73,14 @@ describe("CommsApp settings sync", () => {
       running: false, input_error: "", output_error: "", overruns: 0, underruns: 0,
     });
     getAudioEffectPresets.mockReset().mockResolvedValue({ voice: [], clipping: [] });
+    voiceState.mockReset().mockResolvedValue({ selected_radio: 0, connected: false });
     useSettings.setState({
       settings: null, keybinds: [],
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
       joystick: { supported: false, error: "", devices: [] },
     });
+    useRadios.setState({ radios: {}, selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 });
+    useSession.setState({ selfGuid: "" });
   });
 
   it("hydrates the shared settings store when the popout opens", async () => {
@@ -103,5 +111,75 @@ describe("CommsApp settings sync", () => {
       },
     ]);
     expect(useSettings.getState().keybinds[0].triggers[0].chord).toBe("F7");
+  });
+});
+
+/**
+ * CommsApp used to render `Object.values(radios)[0]` -- the first entry of
+ * the WHOLE radios map, which is any client's radios, not necessarily ours.
+ * Harmless while nobody else was connected; wrong the moment voice makes
+ * multi-client sessions real. It must render `radios[selfGuid]` instead.
+ */
+describe("CommsApp radio selection", () => {
+  beforeEach(() => {
+    handlers.clear();
+    getSettings.mockReset().mockResolvedValue(settings);
+    getKeybinds.mockReset().mockResolvedValue([]);
+    getHotkeyState.mockReset().mockResolvedValue({ registered: true, error: "", failed: {}, permission: "not_applicable" });
+    getJoystickState.mockReset().mockResolvedValue({ supported: false, error: "", devices: [] });
+    getAudioDevices.mockReset().mockResolvedValue({ inputs: [], outputs: [] });
+    getAudioState.mockReset().mockResolvedValue({
+      running: false, input_error: "", output_error: "", overruns: 0, underruns: 0,
+    });
+    getAudioEffectPresets.mockReset().mockResolvedValue({ voice: [], clipping: [] });
+    voiceState.mockReset().mockResolvedValue({ selected_radio: 0, connected: true });
+    useSettings.setState({
+      settings: null, keybinds: [],
+      hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
+      joystick: { supported: false, error: "", devices: [] },
+    });
+    useRadios.setState({ radios: {}, selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 });
+    useSession.setState({ selfGuid: "" });
+  });
+
+  it("renders the local client's radios, keyed by self_guid, not the first map entry", async () => {
+    getClientState.mockReset().mockResolvedValue({
+      self_guid: "guid-me",
+      self: { name: "Me", coalition: "Red", unit_id: "AB12", role_id: 0 },
+      clients: {
+        "guid-other": { name: "Other", coalition: "Red", unit_id: "CD34", role_id: 0 },
+        "guid-me": { name: "Me", coalition: "Red", unit_id: "AB12", role_id: 0 },
+      },
+      // "guid-other" sorts first in insertion order -- Object.values(...)[0]
+      // would pick its radios, not ours.
+      radios: {
+        "guid-other": {
+          muted: false,
+          radios: [{ id: 9, name: "Not Mine", frequency: 251.0, enabled: true, is_intercom: false }],
+        },
+        "guid-me": {
+          muted: false,
+          radios: [{ id: 1, name: "Mine", frequency: 118.5, enabled: true, is_intercom: false }],
+        },
+      },
+    });
+
+    render(<CommsApp />);
+
+    expect(await screen.findByDisplayValue("Mine")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Not Mine")).not.toBeInTheDocument();
+  });
+
+  it("shows the empty state when the local client has no radios yet", async () => {
+    getClientState.mockReset().mockResolvedValue({
+      self_guid: "guid-me",
+      self: { name: "Me", coalition: "Red", unit_id: "AB12", role_id: 0 },
+      clients: { "guid-me": { name: "Me", coalition: "Red", unit_id: "AB12", role_id: 0 } },
+      radios: {},
+    });
+
+    render(<CommsApp />);
+
+    expect(await screen.findByText(/no radios/i)).toBeInTheDocument();
   });
 });

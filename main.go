@@ -195,6 +195,20 @@ func main() {
 				audioEvents.AudioVU(audioVUPayload{Input: v.Input, Output: v.Output})
 			},
 		})
+		// The voice Sink/Source bridge, registered exactly ONCE, Manager-
+		// lifetime (design decision D5 -- Phase 4's Manager has no
+		// RemoveSink and never calls Sink.Close(), so a per-connection
+		// registration would leak a Sink on every reconnect). gui.voice.go
+		// owns pointing it at the live *voice.Session on connect/disconnect.
+		//
+		// BOTH calls are required. AddSink alone wires TRANSMIT only --
+		// receive comes back through the SEPARATE SetSource call, and
+		// forgetting it leaves every existing test green while received
+		// audio is silently discarded (see voice.go's package doc; Task 9's
+		// own RX tests exercise internal/voice directly, not through this
+		// Manager, so nothing there would catch a missing SetSource either).
+		am.AddSink(gui.VoiceBridge())
+		am.SetSource(gui.VoiceBridge())
 		// SetAudioBackend BEFORE Start, not after: it is what pushes the
 		// user's PERSISTED audio settings (device ids included) into the
 		// manager. Starting first would resolve both devices against

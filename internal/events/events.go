@@ -54,6 +54,22 @@ const (
 	EventAudioState = "audio:state"
 	// EventAudioMicMuted reports the push-to-mute / mute-toggle state.
 	EventAudioMicMuted = "audio:mic_muted"
+	// EventVoiceAddressUpdate signals that a VOICE_ADDRESS_UPDATE redirect
+	// arrived on the control stream and the store's voice addresses changed.
+	// The payload deliberately excludes the secret -- it authenticates the
+	// voice UDP HELLO and must not leave the backend onto the Wails
+	// frontend/devtools surface. Backend consumers (the voice session) read
+	// it from Store.VoiceCredentials, not this event.
+	EventVoiceAddressUpdate = "voice:address_update"
+	// EventVoiceState is the voice session's lifecycle state, the sibling of
+	// EventAudioState/EventHotkeysState/EventJoystickState (I2 fix). Before
+	// this existed, nothing in the shipped binary ever observed
+	// voice.Session's OnState callback: a wrong or missing voice secret
+	// failed the handshake with a descriptive error that reached only
+	// slog, at Info, on a 15 s retry loop -- no event, no UI signal, in
+	// violation of Phase 5 DoD 4. The payload deliberately excludes the
+	// voice secret; see VoiceStatePayload.
+	EventVoiceState = "voice:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -300,4 +316,34 @@ func (t *Tagged) AudioState(payload any) {
 // AudioMicMuted emits EventAudioMicMuted with mute state.
 func (t *Tagged) AudioMicMuted(muted bool) {
 	t.em.Emit(EventAudioMicMuted, muted)
+}
+
+// VoiceAddressPayload is the EventVoiceAddressUpdate payload. See
+// EventVoiceAddressUpdate for why the secret is excluded.
+type VoiceAddressPayload struct {
+	CoalitionAddr string `json:"coalition_addr"`
+	GlobalAddr    string `json:"global_addr"`
+}
+
+// VoiceAddressUpdate emits EventVoiceAddressUpdate.
+func (t *Tagged) VoiceAddressUpdate(payload VoiceAddressPayload) {
+	t.em.Emit(EventVoiceAddressUpdate, payload)
+}
+
+// VoiceStatePayload is the EventVoiceState payload. state is
+// voice.State.String() ("idle" | "resolving" | "handshaking" | "connected" |
+// "rebinding" | "retrying" | "closed"); error is the lowercase-wrapped Go
+// error text for a failed/retrying transition, "" otherwise. It deliberately
+// carries NEVER the voice secret -- voice.Session's own error strings never
+// include it (a wrong-length secret is reported by byte count, not value),
+// but any future error text added to that state machine must keep that
+// property before it can be routed through here.
+type VoiceStatePayload struct {
+	State string `json:"state"`
+	Error string `json:"error"`
+}
+
+// VoiceState emits EventVoiceState.
+func (t *Tagged) VoiceState(state, errMsg string) {
+	t.em.Emit(EventVoiceState, VoiceStatePayload{State: state, Error: errMsg})
 }

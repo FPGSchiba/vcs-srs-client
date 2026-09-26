@@ -34,6 +34,14 @@ type Fake struct {
 	SyncSettings *srspb.ServerSettings
 	LastRadio    *srspb.RadioInfo // records UpdateRadioInfo input
 
+	// SyncCoalitionVoiceAddr, SyncGlobalVoiceAddr and SyncVoiceSecret are
+	// returned on ServerSyncResult. Left "" by default, matching a
+	// standalone server, which never populates the registry-backed
+	// coalition/global addrs.
+	SyncCoalitionVoiceAddr string
+	SyncGlobalVoiceAddr    string
+	SyncVoiceSecret        string
+
 	updates chan *srspb.ServerUpdate // pushed to SubscribeToUpdates
 }
 
@@ -90,9 +98,12 @@ func (f *Fake) SyncClient(_ context.Context, _ *srspb.Empty) (*srspb.SyncRespons
 		Version: "test",
 		SyncResult: &srspb.SyncResponse_Data{
 			Data: &srspb.ServerSyncResult{
-				Clients:  f.SyncClients,
-				Radios:   f.SyncRadios,
-				Settings: f.SyncSettings,
+				Clients:            f.SyncClients,
+				Radios:             f.SyncRadios,
+				Settings:           f.SyncSettings,
+				CoalitionVoiceAddr: f.SyncCoalitionVoiceAddr,
+				GlobalVoiceAddr:    f.SyncGlobalVoiceAddr,
+				VoiceSecret:        f.SyncVoiceSecret,
 			},
 		},
 	}, nil

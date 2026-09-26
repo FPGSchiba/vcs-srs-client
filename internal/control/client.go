@@ -53,6 +53,10 @@ func (c *Client) SyncClient(ctx context.Context, st *state.Store) error {
 	if data.GetSettings() != nil {
 		st.SetSettings(data.GetSettings())
 	}
+	// voice_secret, coalition_voice_addr and global_voice_addr: the latter
+	// two are "" on a standalone server (no registry to populate them from)
+	// and that is stored as-is -- see Store.SetVoiceCredentials.
+	st.SetVoiceCredentials(data.GetVoiceSecret(), data.GetCoalitionVoiceAddr(), data.GetGlobalVoiceAddr())
 	return nil
 }
 

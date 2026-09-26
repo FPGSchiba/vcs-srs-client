@@ -26,9 +26,39 @@ type Store struct {
 	selfGUID string
 	self     *srspb.ClientInfo
 
+	// voiceSecret, coalitionVoiceAddr and globalVoiceAddr are the live
+	// voice-plane credentials: the secret presented in the voice HELLO
+	// payload, and the UDP host:port pair to dial. Set by SyncClient at
+	// connect and re-set (unchanged secret, possibly new addrs) by a
+	// VOICE_ADDRESS_UPDATE on the stream. Empty addrs are legitimate --
+	// see SetVoiceCredentials.
+	voiceSecret        string
+	coalitionVoiceAddr string
+	globalVoiceAddr    string
+
+	// selectedRadio is the radio id global.ptt currently targets. Zero means
+	// nothing is selected.
+	selectedRadio uint32
+
 	// radioObservers are notified after any mutation that can change which
 	// radios the local client owns. See OnRadiosChanged.
 	radioObservers []func()
+
+	// voiceObservers are notified after SetVoiceCredentials or
+	// SetVoiceAddresses changes the live voice-plane secret/addresses. This
+	// is what lets a live voice session learn about a VOICE_ADDRESS_UPDATE
+	// redirect and re-point itself -- voice.Session has no socket of its
+	// own to poll for that, and there is otherwise no in-Go subscriber
+	// downstream of stream.go's route (only the Wails event reaches the
+	// frontend). Mirrors radioObservers/OnRadiosChanged exactly.
+	voiceObservers []func()
+
+	// settingsObservers are notified after SetSettings replaces the server
+	// settings (the global/test frequency lists, in particular). This is
+	// what lets a live voice session refresh its RX filter when those lists
+	// change mid-session, rather than only on the next radios-driven
+	// refresh or reconnect. Mirrors radioObservers/OnRadiosChanged exactly.
+	settingsObservers []func()
 }
 
 // OnRadiosChanged registers fn to run after any mutation that can change the
@@ -52,6 +82,52 @@ func (s *Store) notifyRadiosChanged() {
 	s.mu.RLock()
 	observers := make([]func(), len(s.radioObservers))
 	copy(observers, s.radioObservers)
+	s.mu.RUnlock()
+	for _, fn := range observers {
+		fn()
+	}
+}
+
+// OnVoiceCredentialsChanged registers fn to run after any mutation that can
+// change the live voice-plane secret or addresses: SetVoiceCredentials and
+// SetVoiceAddresses. See radioObservers' doc for why this exists and
+// OnRadiosChanged for the identical contract (lock released, synchronous,
+// must not block).
+func (s *Store) OnVoiceCredentialsChanged(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.voiceObservers = append(s.voiceObservers, fn)
+}
+
+// notifyVoiceCredentialsChanged calls every observer. MUST be called with
+// the lock released: observers read the store back (VoiceCredentials, in
+// particular).
+func (s *Store) notifyVoiceCredentialsChanged() {
+	s.mu.RLock()
+	observers := make([]func(), len(s.voiceObservers))
+	copy(observers, s.voiceObservers)
+	s.mu.RUnlock()
+	for _, fn := range observers {
+		fn()
+	}
+}
+
+// OnSettingsChanged registers fn to run after SetSettings replaces the
+// server settings. See voiceObservers' doc for why this exists and
+// OnRadiosChanged for the identical contract: fn runs OUTSIDE the store
+// lock, synchronously on the mutating goroutine, so it must not block.
+func (s *Store) OnSettingsChanged(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settingsObservers = append(s.settingsObservers, fn)
+}
+
+// notifySettingsChanged calls every observer. MUST be called with the lock
+// released: observers read the store back (Settings, in particular).
+func (s *Store) notifySettingsChanged() {
+	s.mu.RLock()
+	observers := make([]func(), len(s.settingsObservers))
+	copy(observers, s.settingsObservers)
 	s.mu.RUnlock()
 	for _, fn := range observers {
 		fn()
@@ -128,11 +204,14 @@ func (s *Store) ClearSelf() {
 	s.notifyRadiosChanged()
 }
 
-// SetSettings overwrites the server settings.
+// SetSettings overwrites the server settings and notifies settings
+// observers (see OnSettingsChanged) so a live voice session can refresh its
+// RX filter when the global/test frequency lists change mid-session.
 func (s *Store) SetSettings(settings *srspb.ServerSettings) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.settings = settings
+	s.mu.Unlock()
+	s.notifySettingsChanged()
 }
 
 // Settings returns the current server settings, or nil if unset.
@@ -140,6 +219,60 @@ func (s *Store) Settings() *srspb.ServerSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.settings
+}
+
+// SetVoiceCredentials records the live voice-plane secret and the coalition
+// and global UDP addresses the client should dial for voice.
+//
+// Empty strings are meaningful and normal, not an error: a standalone
+// server -- every deployment today -- returns "" for both addrs, because
+// they are served from a registry only distributed voice nodes populate.
+// Callers must store what they received verbatim; the resolver downstream
+// already treats "" as absent and falls back, so this method never
+// substitutes a default.
+func (s *Store) SetVoiceCredentials(secret, coalitionAddr, globalAddr string) {
+	s.mu.Lock()
+	s.voiceSecret = secret
+	s.coalitionVoiceAddr = coalitionAddr
+	s.globalVoiceAddr = globalAddr
+	s.mu.Unlock()
+	s.notifyVoiceCredentialsChanged()
+}
+
+// VoiceCredentials returns the current voice secret and addresses. All three
+// are "" until SetVoiceCredentials has been called at least once (e.g.
+// before SyncClient completes).
+func (s *Store) VoiceCredentials() (secret, coalitionAddr, globalAddr string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.voiceSecret, s.coalitionVoiceAddr, s.globalVoiceAddr
+}
+
+// SetVoiceAddresses updates the coalition and global voice addresses without
+// overwriting the stored secret. This is used when a VoiceAddressUpdate arrives
+// with an empty secret (a sign of a malformed message) but valid addresses.
+// Empty strings are meaningful and stored as-is (see SetVoiceCredentials comment).
+func (s *Store) SetVoiceAddresses(coalitionAddr, globalAddr string) {
+	s.mu.Lock()
+	s.coalitionVoiceAddr = coalitionAddr
+	s.globalVoiceAddr = globalAddr
+	s.mu.Unlock()
+	s.notifyVoiceCredentialsChanged()
+}
+
+// SetSelectedRadio records which radio id global.ptt currently targets.
+func (s *Store) SetSelectedRadio(id uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selectedRadio = id
+}
+
+// SelectedRadio returns the currently selected radio id, or 0 if none has
+// been selected yet.
+func (s *Store) SelectedRadio() uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.selectedRadio
 }
 
 // Snapshot returns a map-isolated copy of the store. Mutating the returned maps

@@ -1,6 +1,15 @@
 version: v2
 modules:
   - path: .
+    # The Test workflow checks the VCS SERVER out into .vcs-srs-server/ so the
+    # voice integration tests can run against a real headless server. That
+    # checkout carries the server's own copy of srs.proto, whose symbols are
+    # by design identical to ours -- so without this exclude, `buf generate`
+    # fails with "symbol srspb.AuthService already defined". The Go toolchain
+    # ignores the directory already (a leading dot keeps it out of ./...);
+    # buf does not, so it has to be told.
+    excludes:
+      - .vcs-srs-server
 lint:
   use:
     - STANDARD

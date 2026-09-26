@@ -25,6 +25,15 @@ export const EV = {
   audioMicMuted: "audio:mic_muted",
 } as const;
 
+// HotkeyEventPayload is the payload shape for EV.hotkeyPressed /
+// EV.hotkeyReleased -- mirrors internal/events.HotkeyPressed/HotkeyReleased's
+// `{ action_id }` envelope. actionId is a keybind action id such as
+// "global.ptt" or "radio.3.ptt" (see internal/app/voice.go's
+// resolveTXTarget / perRadioPTTID).
+export interface HotkeyEventPayload {
+  action_id: string;
+}
+
 // on subscribes to a Wails event and returns an unsubscribe function.
 export function on<T = unknown>(name: string, cb: (data: T) => void): () => void {
   const off = Events.On(name, (e: { data: T }) => cb(e.data));

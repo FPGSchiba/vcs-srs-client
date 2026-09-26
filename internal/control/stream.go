@@ -65,8 +65,29 @@ func route(upd *srspb.ServerUpdate, st *state.Store, tagged *events.Tagged) {
 		}
 	case srspb.ServerUpdate_SERVER_ACTION:
 		tagged.ServerAction(struct{}{})
+	case srspb.ServerUpdate_VOICE_ADDRESS_UPDATE:
+		vu := upd.GetVoiceAddressUpdate()
+		if vu == nil {
+			return
+		}
+		// A blank voice_secret is a symptom of a malformed or partial message,
+		// not a revocation. The server re-sends the same secret on redirect
+		// for self-contained recovery, so only update when the incoming secret
+		// is actually usable (non-empty). Addresses may legitimately be empty
+		// (standalone servers return "" for both), so update them unconditionally.
+		secret := vu.GetVoiceSecret()
+		if secret != "" {
+			st.SetVoiceCredentials(secret, vu.GetCoalitionVoiceAddr(), vu.GetGlobalVoiceAddr())
+		} else {
+			// Update addresses only, preserving the stored secret.
+			st.SetVoiceAddresses(vu.GetCoalitionVoiceAddr(), vu.GetGlobalVoiceAddr())
+		}
+		tagged.VoiceAddressUpdate(events.VoiceAddressPayload{
+			CoalitionAddr: vu.GetCoalitionVoiceAddr(),
+			GlobalAddr:    vu.GetGlobalVoiceAddr(),
+		})
 	default:
-		// DISTRIBUTION_UPDATE / VOICE_ADDRESS_UPDATE / UNKNOWN — ignored this phase.
+		// DISTRIBUTION_UPDATE / UNKNOWN — ignored this phase.
 	}
 }
 

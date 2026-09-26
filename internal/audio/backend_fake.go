@@ -37,6 +37,20 @@ type FakeBackend struct {
 	failNext error
 	closed   bool
 
+	// failCapture maps a device id to a PERSISTENT OpenCapture failure.
+	// failNext above is one-shot and id-agnostic, which is enough to
+	// exercise "one open failed, the next succeeded" but cannot model the
+	// thing bounded backoff exists for: a device that is genuinely wedged
+	// and keeps failing while the user goes on to pick a different one.
+	// Keyed by id precisely so a test can assert that a backoff
+	// accumulated against ONE device does not strand a selection of
+	// another.
+	failCapture map[string]error
+
+	// failPlayback is the playback mirror of failCapture. See
+	// FailPlaybackFor.
+	failPlayback map[string]error
+
 	// captureOpens/playbackOpens record every id passed to OpenCapture /
 	// OpenPlayback, in call order, whether or not the call succeeded -- so
 	// a test can assert the backend genuinely received an open call
@@ -114,6 +128,42 @@ func (b *FakeBackend) Enumerate() ([]DeviceInfo, []DeviceInfo, error) {
 	return inputs, outputs, nil
 }
 
+// FailCaptureFor makes every OpenCapture against id fail with err, for as
+// long as the fake lives. Pass a nil err to clear it. See the failCapture
+// field for why this is distinct from FailNextOpen.
+func (b *FakeBackend) FailCaptureFor(id string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.failCapture == nil {
+		b.failCapture = make(map[string]error)
+	}
+	if err == nil {
+		delete(b.failCapture, id)
+		return
+	}
+	b.failCapture[id] = err
+}
+
+// FailPlaybackFor is the playback mirror of FailCaptureFor: every
+// OpenPlayback against id fails with err for as long as the fake lives.
+// Pass a nil err to clear it.
+//
+// It exists because the manager's device-backoff machinery is written twice
+// -- once per direction -- and the capture half being the only one a test
+// can wedge is exactly how an asymmetric typo in the mirror survives.
+func (b *FakeBackend) FailPlaybackFor(id string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.failPlayback == nil {
+		b.failPlayback = make(map[string]error)
+	}
+	if err == nil {
+		delete(b.failPlayback, id)
+		return
+	}
+	b.failPlayback[id] = err
+}
+
 // BlockNextOpenCapture makes exactly the next OpenCapture call block until
 // the returned unblock func is called. Safe to call unblock more than once.
 func (b *FakeBackend) BlockNextOpenCapture() (unblock func()) {
@@ -151,6 +201,9 @@ func (b *FakeBackend) OpenCapture(id string, onFrame func([]float32)) (Stream, e
 	if err := b.takeFailure(); err != nil {
 		return nil, err
 	}
+	if err := b.failCapture[id]; err != nil {
+		return nil, err
+	}
 	if err := checkDeviceID(id, b.inputs); err != nil {
 		return nil, err
 	}
@@ -166,6 +219,9 @@ func (b *FakeBackend) OpenPlayback(id string, fill func([]float32)) (Stream, err
 	}
 	b.playbackOpens = append(b.playbackOpens, id)
 	if err := b.takeFailure(); err != nil {
+		return nil, err
+	}
+	if err := b.failPlayback[id]; err != nil {
 		return nil, err
 	}
 	if err := checkDeviceID(id, b.outputs); err != nil {

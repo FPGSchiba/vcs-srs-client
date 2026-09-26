@@ -32,6 +32,130 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Phase 5's voice tests run against the REAL server rather than a
+      # hand-written fake. A fake can only encode our own reading of the
+      # protocol, so it cannot catch a MISREADING of it -- which is the
+      # largest single risk in an interop phase spanning three
+      # independently-written implementations. Both repos are public, so
+      # this needs no credentials.
+      #
+      # -tags headless excludes the server's Wails GUI, so no GTK/WebKit
+      # is required on any runner for this build.
+      - name: Check out the VCS server
+        uses: actions/checkout@v7
+        with:
+          repository: FPGSchiba/vcs-srs-server
+          ref: main
+          path: .vcs-srs-server
+
+      # The checked-out server has its OWN gitignored generated code --
+      # srspb/, voicecontrolpb/, vcsauthpb/ (protoc) and graphql/generated/
+      # (gqlgen) -- exactly the same situation our own srspb/ is in. This
+      # was NOT obvious from the task brief and only surfaced by actually
+      # trying to build the checkout: `go build -tags headless .` fails
+      # with "no required module provides package .../srspb" etc. until
+      # these run first. Mirrors the server repo's own CI
+      # (FPGSchiba/vcs-srs-server/.github/workflows/test.yml) exactly, so
+      # it stays in lockstep with however upstream generates it.
+      #
+      # PINNING CONVENTION for this block, and for every tool installed
+      # anywhere in this file: never let CI resolve "whatever is current"
+      # (an unpinned `@latest`, or an OS package manager's rolling channel).
+      # A floating tool version means CI can go red on an unrelated upstream
+      # release, with a failure that looks like our own code broke. Two
+      # techniques, in order of preference:
+      #   1. Derive the version from the server's own go.mod when the tool
+      #      IS one of its module requirements (protoc-gen-go rides in the
+      #      same module as google.golang.org/protobuf, which the server
+      #      requires directly -- same technique the gqlgen step below
+      #      already uses: `go run pkg@$(go list -m -f '{{.Version}}' pkg)`).
+      #   2. Pin an explicit version otherwise, with a comment saying why it
+      #      couldn't be derived. protoc-gen-go-grpc and protoc itself both
+      #      fall here: neither is a module the server's go.mod requires
+      #      (protoc-gen-go-grpc ships from its own go.mod inside the
+      #      grpc-go repo, tagged independently as cmd/protoc-gen-go-grpc/vX.Y.Z;
+      #      protoc is a C++ binary release, not a Go module at all).
+      # The next person adding a tool to this workflow should follow the
+      # same two rules rather than reaching for `@latest` or a bare
+      # `apt/brew/choco install`.
+      #
+      # protoc is pinned to v36.2 (protocolbuffers/protobuf) on every OS
+      # leg, fetched directly from the upstream GitHub release rather than
+      # through an OS package manager -- apt/brew/choco each carry whatever
+      # they currently carry, which is the same drift by another route.
+      # Windows is the one exception: chocolatey's own `protoc` package
+      # happens to carry this exact upstream version (36.2.0), so pinning
+      # via `--version` there is just as deterministic as the direct
+      # download used for Linux/macOS, without needing a bash-based zip
+      # extraction step on a runner that doesn't reliably ship `unzip`.
+      # --proto '=https' is not belt-and-braces: -L follows redirects, and
+      # without it a redirect could downgrade the transfer to plain HTTP.
+      # The sha256 check is the part that actually matters -- a pinned
+      # version alone still trusts whatever bytes the release URL serves.
+      - name: Install protoc · Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          curl -fsSL --proto '=https' --tlsv1.2 -o protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip
+          echo "121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278  protoc.zip" | sha256sum -c -
+          sudo unzip -o protoc.zip -d /usr/local bin/protoc 'include/*'
+          rm protoc.zip
+
+      - name: Install protoc · macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          curl -fsSL --proto '=https' --tlsv1.2 -o protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-osx-universal_binary.zip
+          echo "83d0dc80672f53486f54299bca6177159f9cad1fd54d4d3143eeea53c4423e1b  protoc.zip" | shasum -a 256 -c -
+          sudo unzip -o protoc.zip -d /usr/local bin/protoc 'include/*'
+          rm protoc.zip
+
+      - name: Install protoc · Windows
+        if: matrix.os == 'windows-latest'
+        run: choco install -y protoc --version=36.2.0
+
+      - name: Install protoc plugins for the VCS server
+        # working-directory here (not the checkout of THIS repo) is what
+        # makes `go list -m` below resolve against the SERVER's go.mod.
+        working-directory: .vcs-srs-server
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@$(go list -m -f '{{.Version}}' google.golang.org/protobuf)
+          # protoc-gen-go-grpc is NOT part of the google.golang.org/grpc
+          # module the server requires -- it ships from its own nested
+          # go.mod in the grpc-go repo and is tagged independently
+          # (cmd/protoc-gen-go-grpc/vX.Y.Z), so there is no go.mod entry to
+          # derive it from. Pinned explicitly here and bumped by hand.
+          #
+          # NOTE: the server's own CI uses @latest for this tool, so this pin
+          # deliberately does NOT track it -- we would rather this workflow
+          # stay reproducible than follow an upstream floating version. We
+          # generate the server's code ourselves in the step below, so only
+          # this pin decides what runs.
+          #
+          # Sonar flags this as an unverified dependency (S8545). For Go
+          # modules that is not accurate: `go install` checks the module
+          # against sum.golang.org, and proxy.golang.org serves a published
+          # version immutably, so an upstream re-tag cannot change what this
+          # line fetches. Left as-is rather than pinned to a pseudo-version.
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+
+      - name: Generate the VCS server's protobuf and GraphQL code
+        working-directory: .vcs-srs-server
+        run: |
+          mkdir -p srspb voicecontrolpb vcsauthpb
+          protoc --go_out=./srspb --go_opt=paths=source_relative --go-grpc_out=./srspb --go-grpc_opt=paths=source_relative srs.proto
+          protoc --go_out=./voicecontrolpb --go_opt=paths=source_relative --go-grpc_out=./voicecontrolpb --go-grpc_opt=paths=source_relative control.proto
+          protoc --go_out=./vcsauthpb --go_opt=paths=source_relative --go-grpc_out=./vcsauthpb --go-grpc_opt=paths=source_relative vcs-auth-plugin.proto
+          go run github.com/99designs/gqlgen@$(go list -m -f '{{.Version}}' github.com/99designs/gqlgen) generate
+
+      - name: Build the headless VCS server
+        run: |
+          cd .vcs-srs-server
+          go build -tags headless -o "${{ runner.temp }}/vcs-server${{ runner.os == 'Windows' && '.exe' || '' }}" .
+
+      - name: Export the server binary path
+        run: echo "VCS_SERVER_BIN=${{ runner.temp }}/vcs-server${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
+
       # Wails v3 (alpha.96) links against GTK4 + WebKitGTK 6.0 on Linux. The
       # race-enabled `go test ./...` and `go build` compile the main package,
       # which imports the Wails application (cgo), so these dev headers must be

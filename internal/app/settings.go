@@ -131,6 +131,17 @@ type settingsBackend struct {
 	// the focus hook can return without touching the OS once access is
 	// granted (or was never applicable).
 	lastPerm hotkeys.Permission
+
+	// radioSelectSeq / radioSelectPersistedSeq are queueSelectedRadioPersist's
+	// ordering guard (M6 fix): radioSelectSeq is bumped synchronously by
+	// nextRadioSelectSeq on every requested selected-radio persist (from
+	// either SelectRadio or the radio.<n>.select hotkey path), BEFORE any
+	// goroutine is spawned to do the actual write, so its value always
+	// reflects request order. radioSelectPersistedSeq records the seq of
+	// whichever write last actually reached disk, so persistSelectedRadioSeq
+	// can refuse to persist a seq older than that -- see its doc.
+	radioSelectSeq          uint64
+	radioSelectPersistedSeq uint64
 }
 
 // SetJoystickBackend wires the joystick manager. Optional -- when it is never

@@ -2,7 +2,9 @@ import { useEffect } from "react";
 import { api } from "../../shared/api/client";
 import type { RadioInfoDTO } from "../../shared/api/client";
 import { on, EV } from "../../shared/api/events";
+import type { HotkeyEventPayload } from "../../shared/api/events";
 import { useRadios } from "../../shared/store/radios";
+import { useSession } from "../../shared/store/session";
 import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { Icon } from "../../shared/components/Icon";
 import { RadioCard } from "./RadioCard";
@@ -20,14 +22,24 @@ interface RadioUpdatePayload {
  * store optimistically). It also mounts `useSettingsSync`, so the shared
  * settings/keybind store stays live in this window for as long as it is open.
  *
- * Phase-1 simplification: this window renders the first entry of the radios store.
- * If there are no radios it shows an empty state. The window chrome (title + close)
- * uses the ported `.popout`/`.popout-chrome` markup; close routes through the Go
- * window registry via api.closeWindow("comms"), which persists geometry and is
+ * Renders the LOCAL client's radios: `radios[selfGuid]`, keyed by the
+ * session's own GUID resolved from the client-state snapshot. (Previously
+ * this rendered `Object.values(radios)[0]` -- the first entry of the WHOLE
+ * radios map, which is any client's radios, not necessarily ours. Harmless
+ * while nobody else was connected; wrong the moment voice makes
+ * multi-client sessions real.) If there are no radios it shows an empty
+ * state. The window chrome (title + close) uses the ported
+ * `.popout`/`.popout-chrome` markup; close routes through the Go window
+ * registry via api.closeWindow("comms"), which persists geometry and is
  * more reliable than the in-webview Window.Close().
+ *
+ * Also hydrates the selected-radio id (api.voiceState) and subscribes to
+ * hotkey:pressed/released to track which PTT actions are currently held,
+ * both of which RadioCard needs to show live transmit state.
  */
 export function CommsApp() {
   const radios = useRadios((s) => s.radios);
+  const selfGuid = useSession((s) => s.selfGuid);
 
   // Subscribes this window to settings:changed / keybinds:changed /
   // hotkeys:state. Without it the popout only ever saw the state it was
@@ -38,18 +50,36 @@ export function CommsApp() {
   useEffect(() => {
     api
       .getClientState()
-      .then((snap) => useRadios.getState().replaceAll(snap.radios ?? {}))
+      .then((snap) => {
+        useRadios.getState().replaceAll(snap.radios ?? {});
+        useSession.getState().setSelfGuid(snap.self_guid ?? "");
+      })
       .catch(() => {
         /* not connected yet — ignore */
       });
 
-    const off = on<RadioUpdatePayload>(EV.radioUpdate, (d) =>
-      useRadios.getState().setForGuid(d.guid, d.radio),
-    );
-    return () => off();
+    api
+      .voiceState()
+      .then((vs) => useRadios.getState().setSelectedRadioId(vs.selected_radio))
+      .catch(() => {
+        /* not connected yet — ignore */
+      });
+
+    const offs = [
+      on<RadioUpdatePayload>(EV.radioUpdate, (d) =>
+        useRadios.getState().setForGuid(d.guid, d.radio),
+      ),
+      on<HotkeyEventPayload>(EV.hotkeyPressed, (d) =>
+        useRadios.getState().setPTTHeld(d.action_id, true),
+      ),
+      on<HotkeyEventPayload>(EV.hotkeyReleased, (d) =>
+        useRadios.getState().setPTTHeld(d.action_id, false),
+      ),
+    ];
+    return () => offs.forEach((off) => off());
   }, []);
 
-  const entry = Object.values(radios)[0];
+  const entry = selfGuid ? radios[selfGuid] : undefined;
 
   return (
     <div
@@ -90,7 +120,7 @@ export function CommsApp() {
             No radios — connect first
           </div>
         ) : (
-          <div className="col gap-4" style={{ padding: 12 }}>
+          <div className="col gap-4" role="listbox" aria-label="Radios" style={{ padding: 12 }}>
             {entry.radios.map((r) => (
               <RadioCard key={r.id} radio={r} allRadios={entry.radios} muted={entry.muted} />
             ))}

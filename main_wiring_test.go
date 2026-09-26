@@ -101,8 +101,8 @@ func TestStdlogLevelIsPinnedBeforeSetDefault(t *testing.T) {
 
 // readMainGo is a small helper shared by the audio-wiring tests below --
 // unlike TestJoystickBackendIsWired and its siblings above, which each
-// re-read the file inline, these three all need the same source text more
-// than once per test.
+// re-read the file inline, these all need the same source text more than
+// once per test.
 func readMainGo(t *testing.T) string {
 	t.Helper()
 	src, err := os.ReadFile("main.go")
@@ -177,5 +177,53 @@ func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
 	if !strings.Contains(text, "defer am.Stop()") {
 		t.Error("main.go does not defer the audio manager's Stop() -- devices would " +
 			"never be released cleanly on shutdown")
+	}
+}
+
+// TestMainWiringClosesBackendAfterManagerStop pins the shutdown ordering
+// main.go depends on. Stop()'s joins are bounded, so dspLoop can still be
+// running when Stop() returns; closing the backend before Stop() would let
+// an abandoned dspLoop touch a freed malgo context. Phase 5's socket-owning
+// sink is what makes a slow WriteFrame -- and therefore an abandoned
+// dspLoop -- reachable in practice.
+//
+// This reads main.go's source rather than executing it, because the
+// ordering being asserted is the order of two `defer` statements inside
+// func main(), which no test can observe at runtime without launching the
+// real GUI.
+func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
+	text := readMainGo(t)
+	stopIdx := strings.Index(text, "defer am.Stop()")
+	closeIdx := strings.Index(text, "defer backend.Close()")
+	if stopIdx < 0 {
+		t.Fatal("main.go no longer contains `defer am.Stop()`; update this test deliberately, not reflexively")
+	}
+	if closeIdx < 0 {
+		t.Fatal("main.go no longer contains `defer backend.Close()`; update this test deliberately, not reflexively")
+	}
+	// defers run LIFO, so the one registered FIRST runs LAST.
+	// backend.Close() must run last, so it must be registered first.
+	if closeIdx > stopIdx {
+		t.Fatalf("`defer backend.Close()` (offset %d) must be registered BEFORE `defer am.Stop()` (offset %d) so it runs after it; see Stop()'s doc on bounded joins", closeIdx, stopIdx)
+	}
+}
+
+// TestVoiceBridgeIsWiredAsBothSinkAndSource guards Task 11's own version of
+// the TestJoystickBackendIsWired failure mode, made worse: registering ONLY
+// AddSink wires transmit, and every test in the repo (including Task 9's own
+// RX suite, which exercises internal/voice directly rather than through the
+// Manager) stays green while received audio is silently discarded. There is
+// no failing test anywhere else that would catch a missing SetSource call --
+// this grep is it.
+func TestVoiceBridgeIsWiredAsBothSinkAndSource(t *testing.T) {
+	text := readMainGo(t)
+	for _, want := range []string{
+		"gui.VoiceBridge()",
+		"am.AddSink(",
+		"am.SetSource(",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("main.go does not call %s -- the voice Sink/Source bridge would be inert", want)
+		}
 	}
 }
