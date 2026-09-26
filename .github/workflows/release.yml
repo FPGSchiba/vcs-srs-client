@@ -44,11 +44,18 @@ jobs:
       # Wails' own GTK/WebKit dependencies only. internal/hotkeys adds
       # nothing: -tags purego selects gohook's pure-Go X11 backend (see the
       # note at the top of Taskfile.yml).
+      #
+      # These MUST match test.yml's list. They previously named GTK 3 and
+      # WebKit2GTK 4.1, which Wails v3 beta.22 does not link against -- it
+      # wants GTK 4 and WebKitGTK 6.0, so `go install wails3` died at the
+      # link step with "cannot find -lgtk-4 / -lwebkitgtk-6.0". Nothing
+      # caught it because this workflow only fires on a `v*` tag and no tag
+      # has ever been pushed, so it had never run this far.
       - name: Install Linux GUI deps
         if: matrix.platform == 'linux-amd64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libx11-dev
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev
 
       # srspb/ is gitignored and generated, so a fresh checkout has no Go
       # bindings at all. This has to run BEFORE `wails3 generate bindings`,
