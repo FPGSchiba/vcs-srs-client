@@ -70,6 +70,7 @@ func (n *Notifier) coalesce(key string, window time.Duration, fn func() bool) {
 		n.mu.Unlock()
 		return
 	}
+	gen := n.cancelGen
 	n.mu.Unlock()
 
 	// Leading edge. Apply first, and open the window only if that was a real
@@ -83,6 +84,19 @@ func (n *Notifier) coalesce(key string, window time.Duration, fn func() bool) {
 	if _, raced := n.pending[key]; raced {
 		// Another goroutine opened the window while fn ran. Its timer is as
 		// good as ours would have been; a second one would double-fire.
+		return
+	}
+	if n.cancelGen != gen {
+		// A Dismiss, Clear or StopTimers landed in the gap between fn()
+		// publishing and this arm. cancelPendingLocked already ran and found
+		// nothing to cancel, because the window did not exist yet -- so
+		// arming now would leave a window OPEN carrying apply == nil. The
+		// timer retires harmlessly when it fires, but until then the key
+		// looks busy, and the next genuine change would be deferred to the
+		// trailing edge (up to 10s, for audio) instead of being the
+		// immediate leading edge this function's ordering exists to
+		// guarantee. Skipping the arm errs the safe way: the next change is
+		// a leading edge, which is the no-coalescing default.
 		return
 	}
 	n.armLocked(key, window)
@@ -143,6 +157,13 @@ func (n *Notifier) windowClosed(key string) {
 		// a timer for a key the user has just cleared has nothing to defend.
 		return
 	}
+	if window <= 0 {
+		// windowFor found nothing recorded -- unreachable today (see its
+		// doc). Retire rather than arm a zero-delay timer whose only effect
+		// would be to re-enter this function.
+		n.retirePendingLocked(key)
+		return
+	}
 	if !changed && p.apply == nil {
 		// The window closed on a no-op and nothing new arrived while it ran,
 		// so the published state already IS the source's state. Retire the
@@ -157,13 +178,23 @@ func (n *Notifier) windowClosed(key string) {
 	n.armLocked(key, window)
 }
 
-// windowFor recalls the window a key was last coalesced with, so a
-// re-armed trailing timer uses the same period. Caller holds mu.
+// windowFor recalls the window a key was last coalesced with, so a re-armed
+// trailing timer uses the same period. Caller holds mu.
+//
+// A miss returns ZERO, and deliberately not some default. This package is
+// source-agnostic -- see the window constants above, whose whole rule is that
+// a new source declares its own window rather than inheriting one tuned for
+// someone else's loop -- and a fallback here would be the one place that rule
+// was silently broken, re-arming (say) an audio key on the joystick's 2s.
+//
+// The miss is unreachable today: armLocked is the only writer of n.windows
+// and writes it while creating the n.pending entry, retirePendingLocked
+// deletes the two together, and both happen under the same mu that
+// windowClosed holds when it calls this after finding the pending entry. Zero
+// is therefore a "cannot happen" answer, and windowClosed treats it the way
+// coalesce treats a non-positive window: no window, so nothing to keep open.
 func (n *Notifier) windowFor(key string) time.Duration {
-	if w, ok := n.windows[key]; ok {
-		return w
-	}
-	return WindowJoystick
+	return n.windows[key]
 }
 
 // StopTimers cancels every armed trailing timer. Called on shutdown so a
@@ -181,6 +212,7 @@ func (n *Notifier) windowFor(key string) time.Duration {
 func (n *Notifier) StopTimers() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.cancelGen++ // see coalesce: a leading edge in flight must not re-arm
 	for key, p := range n.pending {
 		if p.timer != nil {
 			p.timer.Stop()
@@ -192,7 +224,15 @@ func (n *Notifier) StopTimers() {
 // cancelPendingLocked drops a key's armed timer and pending change, so a
 // window opened before the user dismissed or cleared the item cannot fire
 // afterwards and resurrect it. Caller holds mu.
+//
+// The generation bump is unconditional, BEFORE the "is there anything to
+// cancel" check, because the case that needs it is precisely the one where
+// there is nothing: a Dismiss landing between a leading edge publishing and
+// coalesce arming its window finds no pending entry, and without the bump
+// coalesce would go on to arm one for a key the user has just silenced. See
+// coalesce.
 func (n *Notifier) cancelPendingLocked(key string) {
+	n.cancelGen++
 	p, ok := n.pending[key]
 	if !ok {
 		return

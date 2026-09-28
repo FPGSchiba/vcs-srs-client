@@ -241,3 +241,52 @@ func TestWindowClosingOnANoOpDoesNotHoldItselfOpen(t *testing.T) {
 		t.Fatal("a genuine change was deferred: a window that closes on a no-op must retire rather than re-arm itself")
 	}
 }
+
+// TestDismissDuringTheLeadingEdgeDoesNotArmAnEmptyWindow closes the narrow
+// hole the leading-edge ordering left open: a Dismiss (or Clear, or
+// StopTimers) landing AFTER the leading edge published and BEFORE coalesce
+// armed its window.
+//
+// cancelPendingLocked runs while there is nothing to cancel -- the window
+// does not exist yet -- so, before the cancelGen check, coalesce went on to
+// arm one anyway. The window then stood open for a full period carrying
+// apply == nil. It retires harmlessly when the timer fires, but until then
+// the key looks busy, and the next genuine change is deferred to the trailing
+// edge instead of being the immediate leading edge -- up to 10s for audio,
+// i.e. a narrow reappearance of exactly what the fn()-before-armLocked
+// ordering exists to prevent.
+//
+// The interleaving is forced by calling the unexported coalesce directly with
+// an fn that dismisses what it just raised. That is the real sequence, with
+// the timing hazard removed.
+func TestDismissDuringTheLeadingEdgeDoesNotArmAnEmptyWindow(t *testing.T) {
+	n := New(Options{})
+
+	n.coalesce("audio.input", time.Hour, func() bool {
+		n.Raise("audio.input", Item{Title: "Microphone unavailable", Severity: SeverityError})
+		var id string
+		for _, it := range n.Snapshot().Items {
+			if it.Key == "audio.input" {
+				id = it.ID
+			}
+		}
+		if id == "" {
+			t.Fatal("the raise inside the leading edge produced no item")
+		}
+		n.Dismiss(id)
+		return true // it genuinely published
+	})
+
+	n.mu.Lock()
+	p, open := n.pending["audio.input"]
+	var empty bool
+	if open {
+		empty = p.apply == nil
+	}
+	n.mu.Unlock()
+
+	if open {
+		n.StopTimers() // do not leave an hour-long timer behind
+		t.Fatalf("a window is open for a key dismissed during the leading edge (carrying no pending change: %v) -- the next genuine change would be deferred by a full period", empty)
+	}
+}

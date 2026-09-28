@@ -9,6 +9,26 @@
 // Modelled on internal/connhealth: it depends only on injected function
 // values and an injected clock, never on internal/app or any subsystem, so
 // it is unit-testable with no sockets and no goroutines but its own timers.
+//
+// # The three named window constants are a deliberate exception
+//
+// WindowHotkeys, WindowJoystick and WindowAudio (coalesce.go) name sources
+// inside a package that is otherwise studiously ignorant of them, and a
+// future reader will be tempted to "fix" that. Do not. The binding invariant
+// is on the IMPORT graph, not on vocabulary -- verify it with
+//
+//	go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/notify/
+//
+// which must show only standard-library packages, never a text grep (ruling
+// R7: the doc comments here name hotkeys, joystick and audio precisely in
+// order to explain what the package does NOT know about them, so a grep
+// cannot answer an import question). These three are the package's own
+// vocabulary for per-source tuning: a coalescing window has to be several
+// times its source's period to coalesce rather than beat against it, so the
+// value is meaningless without saying whose period it was chosen against.
+// Collapsing them into one constant, or moving them out to the adapters,
+// would either mistune a source or scatter the reasoning that keeps them
+// tuned. See coalesce.go's constant block for that reasoning.
 package notify
 
 import (
@@ -137,7 +157,34 @@ type Notifier struct {
 	seq   uint64
 	// suppressed records keys the user dismissed, mapped to the fingerprint
 	// they were dismissed at. See store.go's Dismiss.
+	//
+	// Deliberately NOT pruned, which is the opposite treatment to pending and
+	// windows (see retirePendingLocked) and worth the asymmetry:
+	//
+	//   - There is no moment at which pruning would be correct. An entry's
+	//     whole job is to outlive the item: Dismiss deletes the item and
+	//     KEEPS the entry, because a condition that still holds would
+	//     otherwise be re-announced on the next routine re-emission. Pruning
+	//     against n.items would undo the very dismissal the user asked for,
+	//     and pruning on cap eviction would do it silently. The two events
+	//     that DO mean "this is news again" -- a Raise at a differing
+	//     fingerprint and a Resolve -- already delete the entry.
+	//   - The growth argument is different in kind. pending and windows are
+	//     written by every incoming Raise/Resolve, so a 7.3/7.4 per-client or
+	//     per-frequency key set would let a REMOTE party's traffic grow them.
+	//     An entry here is only ever created by a deliberate human click
+	//     (Dismiss, or Clear over what is on screen), on a key that is
+	//     already in the capped list. It is bounded by the user's own
+	//     dismissals, at one map entry -- a key plus a 64-char hex digest --
+	//     each.
 	suppressed map[string]string
+	// cancelGen counts user-driven retirements -- Dismiss, Clear and
+	// StopTimers, via cancelPendingLocked. coalesce samples it before running
+	// the leading edge and re-checks it before arming, so a cancel that lands
+	// in that gap cannot leave a window armed for a key that has just been
+	// dismissed, cleared or shut down. Guarded by mu like everything below
+	// it. See coalesce.
+	cancelGen uint64
 	// pending holds coalescing state per key. See coalesce.go.
 	pending map[string]*pendingChange
 	// windows records the window each key's OPEN coalescing window was armed
