@@ -118,7 +118,10 @@ func main() {
 
 	// Wire backend: emitter → session → window registry → bindings.
 	emitter := app.NewWailsEmitter(wailsApp)
-	sess := session.New(gui.Store(), emitter, session.Deps{Version: version.Client})
+	sess := session.New(gui.Store(), emitter, session.Deps{
+		Version:   version.Client,
+		TLSCAFile: cfg.TLSCAFile,
+	})
 
 	winPath, winPathErr := config.WindowStateFilePath()
 	if winPathErr != nil {

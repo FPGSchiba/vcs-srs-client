@@ -25,6 +25,10 @@ type Dialer func(ctx context.Context) (*grpc.ClientConn, error)
 type Deps struct {
 	Dialer  Dialer // if nil, Connect builds an insecure-localhost dialer from serverURL
 	Version string
+	// TLSCAFile is config.Config.TLSCAFile, threaded here so dialerFor can
+	// reach it. Connect and Reconnect both build dialers, so it belongs on
+	// the dependency struct rather than on the Connect call signature.
+	TLSCAFile string
 
 	// OnControlState observes every control-link transition, alongside the
 	// events.EventControlConnection emission. It exists so the connection-

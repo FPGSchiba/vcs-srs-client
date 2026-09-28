@@ -680,3 +680,47 @@ func TestRewritingAKeyboardOnlyConfigIsByteIdentical(t *testing.T) {
 		t.Errorf("load-then-save changed the file.\nbefore:\n%s\nafter:\n%s", first, second)
 	}
 }
+
+func TestConfig_TLSCAFile(t *testing.T) {
+	t.Run("defaults to empty", func(t *testing.T) {
+		if got := config.Default().TLSCAFile; got != "" {
+			t.Fatalf("expected empty default, got %q", got)
+		}
+	})
+
+	t.Run("round-trips through TOML", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+
+		cfg := config.Default()
+		cfg.TLSCAFile = "/certs/srs-cert.pem"
+		if err := config.Save(path, cfg); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+
+		loaded, err := config.LoadOrCreate(path)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if loaded.TLSCAFile != "/certs/srs-cert.pem" {
+			t.Fatalf("expected the pinned CA path to survive a round trip, got %q", loaded.TLSCAFile)
+		}
+	})
+
+	t.Run("absent key loads as empty, not an error", func(t *testing.T) {
+		// An older config.toml written before this key existed must still
+		// load: the whole point of defaulting every new field.
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(path, []byte("log_level = \"INFO\"\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		loaded, err := config.LoadOrCreate(path)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if loaded.TLSCAFile != "" {
+			t.Fatalf("expected empty, got %q", loaded.TLSCAFile)
+		}
+	})
+}
