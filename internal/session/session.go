@@ -23,8 +23,15 @@ type Dialer func(ctx context.Context) (*grpc.ClientConn, error)
 
 // Deps are injected dependencies (the Dialer is overridable in tests).
 type Deps struct {
-	Dialer  Dialer // if nil, Connect builds an insecure-localhost dialer from serverURL
+	// Dialer opens the connection. If nil, Connect builds one from serverURL
+	// and TLSCAFile via dialerFor: insecure only for a loopback host, TLS
+	// (system roots, or the pinned CA when TLSCAFile is set) otherwise.
+	Dialer  Dialer
 	Version string
+	// TLSCAFile is config.Config.TLSCAFile, threaded here so dialerFor can
+	// reach it. Connect and Reconnect both build dialers, so it belongs on
+	// the dependency struct rather than on the Connect call signature.
+	TLSCAFile string
 
 	// OnControlState observes every control-link transition, alongside the
 	// events.EventControlConnection emission. It exists so the connection-
@@ -223,7 +230,7 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 
 	dialer := s.dep.Dialer
 	if dialer == nil {
-		d, err := insecureDialer(serverURL)
+		d, err := dialerFor(serverURL, s.dep.TLSCAFile)
 		if err != nil {
 			return err
 		}

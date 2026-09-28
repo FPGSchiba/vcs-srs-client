@@ -2,12 +2,16 @@ package session
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
@@ -30,6 +34,22 @@ const (
 	clientKeepaliveTimeout = 10 * time.Second
 )
 
+// dialTimeout bounds a single dial attempt made by the Dialer returned by
+// dialerFor.
+//
+// Without it, a dial made with a caller context that carries no deadline of
+// its own -- as internal/app's Connect and Reconnect currently do -- never
+// returns on a persistent handshake failure: grpc.DialContext with
+// grpc.WithReturnConnectionError() retries indefinitely with backoff and
+// only surfaces its last error once the context is done. That silently
+// defeats explainDialError, since it is never reached and the dial just
+// hangs forever.
+//
+// 10 seconds is the pre-login Welcome-screen wait a user tolerates before
+// being told what is wrong, with comfortable margin over a healthy TLS
+// handshake plus the server's auth round trip.
+const dialTimeout = 10 * time.Second
+
 // ClientKeepaliveTime exposes the configured keepalive period so a test can
 // pin it against the server's enforcement floor. See clientKeepaliveTime.
 func ClientKeepaliveTime() time.Duration { return clientKeepaliveTime }
@@ -45,9 +65,56 @@ func keepaliveOption() grpc.DialOption {
 	})
 }
 
-// insecureDialer returns a Dialer for serverURL. Insecure transport is only
-// permitted for localhost/127.0.0.1; remote hosts fail closed until TLS lands.
-func insecureDialer(serverURL string) (Dialer, error) {
+// transportCredentials picks the transport for host, honouring caFile.
+//
+// Three deterministic branches, in this order:
+//
+//  1. caFile set    -> TLS trusting ONLY that pool, whatever the host. This
+//     is what a self-hosted server with no public DNS and no CA-signed
+//     certificate needs, and because it is not gated on the host it doubles
+//     as the local-TLS development and test path.
+//  2. host loopback -> insecure, unchanged from Phase 1.
+//  3. otherwise     -> TLS against the OS trust store.
+//
+// There is deliberately no plaintext-remote escape hatch: the Phase 1
+// fail-closed rule inverts rather than relaxes, so what used to be refused
+// outright is now required to be encrypted. There is equally no fallback to
+// plaintext when a handshake fails, because a fallback is a downgrade attack
+// with extra steps.
+//
+// A caFile that cannot be read, or that holds no certificate, is an ERROR
+// rather than a quiet fall-through to system roots. An explicit pin that
+// silently stops pinning is the precise failure this sub-phase exists to
+// prevent.
+func transportCredentials(host, caFile string) (credentials.TransportCredentials, error) {
+	if caFile != "" {
+		pemBytes, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read tls_ca_file %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("tls_ca_file %q contains no PEM certificate", caFile)
+		}
+		// MinVersion is set explicitly (and again below) even though
+		// credentials.NewTLS already defaults an unset MinVersion to TLS 1.2
+		// itself: this future-proofs against a grpc-go that stops doing so.
+		// It has no dedicated test -- grpc-go's identical default makes the
+		// two indistinguishable from any public accessor, handshake, or even
+		// reflection into the credentials' own private config, so no test
+		// could tell "we set it" apart from "grpc-go defaulted it" and catch
+		// a regression here.
+		return credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}), nil
+	}
+	if isLocal(host) {
+		return insecure.NewCredentials(), nil
+	}
+	return credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}), nil
+}
+
+// dialerFor returns a Dialer for serverURL with credentials chosen by
+// transportCredentials. It replaces Phase 1's insecureDialer.
+func dialerFor(serverURL, caFile string) (Dialer, error) {
 	if serverURL == "" {
 		return nil, fmt.Errorf("server address is empty")
 	}
@@ -55,19 +122,83 @@ func insecureDialer(serverURL string) (Dialer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server address must be host:port: %w", err)
 	}
-	if !isLocal(host) {
-		return nil, fmt.Errorf("refusing insecure connection to non-local host %q (TLS not yet supported)", host)
+	creds, err := transportCredentials(host, caFile)
+	if err != nil {
+		return nil, err
 	}
 	return func(ctx context.Context) (*grpc.ClientConn, error) {
-		return grpc.DialContext(ctx, serverURL,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			keepaliveOption(),
-			grpc.WithBlock(),
-		)
+		conn, err := boundedDial(ctx, dialTimeout, serverURL, creds)
+		if err != nil {
+			return nil, explainDialError(err, serverURL, caFile)
+		}
+		return conn, nil
 	}, nil
+}
+
+// boundedDial performs the actual gRPC dial behind dialerFor's returned
+// closure. It is split out so a test can drive it directly against a network
+// transport that hangs by construction -- an un-Accepted bufconn listener,
+// via extraOpts -- instead of a real socket, which the development sandbox's
+// bind/connect calls are blocked from using (see grpctest.StartWith's doc
+// comment for the same constraint). Production calls it with dialTimeout and
+// no extraOpts; TestDialerFor_BoundsAnUnreachableDial passes its own short
+// timeout so it does not spend the real 10s production value on every run --
+// the mechanism under test, that a caller context with no deadline of its own
+// still gets bounded, is identical at any duration.
+func boundedDial(ctx context.Context, timeout time.Duration, serverURL string, creds credentials.TransportCredentials, extraOpts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	// Derived from the caller's context, so a SHORTER caller deadline still
+	// wins -- the refusalCtx-based tests in tls_integration_test.go depend on
+	// that. Without this bound, a caller context with no deadline of its own
+	// (context.Background(), as internal/app's Connect and Reconnect pass)
+	// never returns on a persistent handshake failure; see dialTimeout.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	opts := append([]grpc.DialOption{
+		grpc.WithTransportCredentials(creds),
+		keepaliveOption(),
+		// Replaces WithBlock. It blocks identically, but returns the last
+		// connection error instead of a bare context deadline. Without it
+		// every TLS failure reaches the user as "context deadline
+		// exceeded" and explainDialError has nothing to work with.
+		grpc.WithReturnConnectionError(),
+	}, extraOpts...)
+	return grpc.DialContext(ctx, serverURL, opts...)
 }
 
 func isLocal(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1" ||
 		strings.HasPrefix(host, "127.")
+}
+
+// explainDialError turns a gRPC transport failure into something a user can
+// act on.
+//
+// The cases are matched on crypto/tls and crypto/x509 error TEXT because
+// gRPC surfaces them as an opaque wrapped string with no typed cause to
+// inspect -- there is no errors.As target available here. That is fragile by
+// nature, so the default is the original error: a change in Go's wording
+// degrades the message rather than hiding the failure or mislabelling it.
+//
+// The original is always wrapped, never replaced, so errors.Is still reaches
+// it for the log.
+func explainDialError(err error, serverURL, caFile string) error {
+	if err == nil {
+		return nil
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "first record does not look like a TLS handshake"):
+		return fmt.Errorf("%s is not speaking TLS -- the server most likely has no clientTLS block configured: %w", serverURL, err)
+
+	case strings.Contains(s, "certificate is valid for"):
+		return fmt.Errorf("%s presented a certificate for a different name -- connect by the server's hostname, or have its certificate reissued with this address in the SANs: %w", serverURL, err)
+
+	case strings.Contains(s, "certificate signed by unknown authority"),
+		strings.Contains(s, "failed to verify certificate"):
+		if caFile != "" {
+			return fmt.Errorf("%s presented a certificate not issued by the authority in tls_ca_file %q: %w", serverURL, caFile, err)
+		}
+		return fmt.Errorf("%s presented a certificate that no system root trusts -- if this is a self-hosted server, point tls_ca_file at its certificate: %w", serverURL, err)
+	}
+	return err
 }

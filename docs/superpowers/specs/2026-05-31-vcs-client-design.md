@@ -119,7 +119,7 @@ a different concern" is not a justification — that is what TOML tables are for
 | General settings (tray, transmitter name, …) | `config.toml` → `[general]` | TOML | no |
 | Keybinds | `config.toml` → `[keybinds]` | TOML | no |
 | Window geometry per window | `%APPDATA%/VCS/windows.json` | JSON | **J2** — written on every move/resize; would rewrite config on every window drag |
-| Session token from last login | `%APPDATA%/VCS/session.json` (chmod 0600 on Unix) | JSON | **J3** — secret; needs 0600, must not appear in a config a user might paste into a bug report, and migrates to the OS keychain in Phase 7 (R4) |
+| Session token from last login | **In memory only** — `session.Session.lastToken`; never written to disk | n/a | n/a — **corrected 2026-09-28**: this row previously described a `%APPDATA%/VCS/session.json` (chmod 0600) file that was never implemented. `lastToken` is read only by `Reconnect` and has no writer to disk at any point. Keychain-backed persistence is deferred to Phase 2 (R4, closed not-applicable in Phase 7.1) |
 | Radio profiles | user-chosen dir; default `%APPDATA%/VCS/profiles/` | JSON | **J1** — import/export is an explicit Phase 7 deliverable |
 | Ship & role catalog | `%APPDATA%/VCS/ships.toml`, `roles.toml` | TOML | **J4** — local mirror of data destined for a server RPC (see `PROTO_GAPS.md` §Ships/Roles); a catalog refresh must not touch user settings |
 | Ephemeral runtime state | in-memory only | n/a | n/a |
@@ -129,7 +129,7 @@ phase design doc, or put it in a `config.toml` section.** Keybinds originally
 had a `keybinds.toml` of its own for no stated reason; re-examined in the Phase 3
 design (§5.3), it cited none of J1–J4 and was folded into `[keybinds]`.
 
-Token storage is not OS-keychain-protected in v1; this is a known security gap (R4) tracked in Risks.
+**Corrected 2026-09-28.** There is no token storage at all, keychain-protected or otherwise — the session token lives only in `session.Session.lastToken` (in-memory, never persisted). See R4 in Risks, closed not-applicable.
 
 ### 4.4 Frontend build
 
@@ -198,7 +198,7 @@ github.com/FPGSchiba/vcs-srs-client/
     auth/                       AuthService gRPC client
       auth.go                   InitAuth -> flow discovery -> start/continue -> UnitSelect
       guest.go                  GuestLogin path (name + password + unit_id)
-      session.go                token persistence (session.json)
+      session.go                token held in memory only (`lastToken`); corrected 2026-09-28 — no `session.json` was ever implemented, see §4.3 and R4
     control/                    SRSService gRPC client + SubscribeToUpdates stream
       client.go                 Sync/UpdateClientInfo/UpdateRadioInfo/Disconnect/GetServerSettings
       ping.go                   latency probe ticker
@@ -441,8 +441,8 @@ Tracked in [`docs/PROTO_GAPS.md`](../../PROTO_GAPS.md). Summary:
 | R1 | ~~Wails v3 pre-stable; API churn breaks builds~~ **RETIRED 2026-09-15** | — | Upgraded to `v3.0.0-beta.22`, which ships a stable desktop API and an explicit compatibility promise. Version stays pinned in `go.mod` and both CI workflows; the thin windowing adapter (`internal/app/windows.go`) is kept regardless |
 | R2 | UDP voice protocol unknown — Phase 5 blocked | H | Phase 1 – 4 don't touch voice; `internal/voice` ships as interface-only; spec defers Phase 5 until user provides server-side reference |
 | R3 | ~~malgo native deps complicate cross-platform builds~~ **RETIRED 2026-09-24** | — | Phase 4's per-OS CI matrix (`test.yml`, `{ubuntu-latest, macos-latest, windows-latest}`) landed in Task 1 and is green with both cgo dependencies — malgo and the vendored RNNoise C sources. It did its job: it caught a Linux-only libm link failure that macOS and Windows both hid, which is exactly the toolchain-divergence risk this mitigation existed to surface |
-| R4 | Session token persisted to disk without OS-keychain protection in v1 | M | Document trade-off; `os.Chmod(0600)` on Unix; ticket a follow-up to use a keychain library in Phase 7 |
-| R5 | gRPC insecure transport during dev → secrets in cleartext | M | Insecure permitted only for literal `127.0.0.1` / `localhost`; fail-closed on remote hosts; switch to TLS in Phase 7 |
+| R4 | ~~Session token persisted to disk without OS-keychain protection in v1~~ **CLOSED — NOT APPLICABLE, 2026-09-28** | — | The described `session.json` was never implemented; the token lives only in `session.Session.lastToken` (in-memory, never persisted), so there was never a file to protect. Keychain-backed session persistence is deferred to Phase 2, where plugin SSO makes re-authentication expensive enough to justify a keyring dependency — today it would only save re-typing one coalition password inside an 8-hour token expiry. No keyring dependency was added in Phase 7.1 |
+| R5 | ~~gRPC insecure transport during dev → secrets in cleartext~~ **CLOSED by Phase 7.1, 2026-09-28** | — | Transport is now chosen by address and `tls_ca_file`: loopback (`localhost` / `127.*` / `::1`) stays insecure; every other host requires TLS (OS trust store, or pinned to `tls_ca_file` for any host, loopback included). No plaintext-remote path, and no fallback to plaintext on handshake failure — Phase 1's fail-closed rule inverted rather than relaxed. Closing this required a `vngd-srs-server` change: `clientGrpcServer` (the SRSService/AuthService listener this client dials) had no `grpc.Creds(...)` option at all; `feat/client-port-tls` adds a `clientTLS` config block and applies credentials to that listener |
 | R6 | TanStack Query + gRPC streaming awkward fit | L | Query only wraps unary calls; streams feed Zustand via events |
 | R7 | Multi-window state divergence | M | Every binding mutates Go state and re-emits; FE stores re-hydrate via `GetClientState` on window open; no optimistic FE-only updates |
 | R8 | Hot-reload across multiple Vite entries during `wails dev` | M | If broken, fall back to single-bundle in dev / multi-bundle in prod |
@@ -489,7 +489,10 @@ log/
 *.log
 
 # local-only configs that should never be committed
-session.json
+# session.json never materialized -- corrected 2026-09-28: no token file was ever
+# implemented (token is in-memory only, see §4.3 and R4), so there is nothing here
+# to ignore; the entry has been removed from the real .gitignore rather than kept
+# around for a file nothing writes
 config.toml.local
 
 # IDE

@@ -23,8 +23,17 @@ type General struct {
 // Config holds the persisted user/app settings. New fields MUST get a default
 // in Default() so older config files still load.
 type Config struct {
-	LogLevel            string `toml:"log_level"`
-	ServerURL           string `toml:"server_url"`
+	LogLevel  string `toml:"log_level"`
+	ServerURL string `toml:"server_url"`
+	// TLSCAFile optionally pins the control connection to one certificate
+	// authority. Empty (the default) means the OS trust store is used for
+	// remote hosts, which is what the public deployment needs. Set it to a
+	// PEM file to trust ONLY that issuer -- the case for a self-hosted
+	// server with no public DNS and no CA-signed certificate.
+	//
+	// Setting it also forces TLS for loopback, which is how the local
+	// development and test path exercises a real handshake.
+	TLSCAFile           string `toml:"tls_ca_file"`
 	PingIntervalSeconds int    `toml:"ping_interval_seconds"`
 
 	General General `toml:"general"`
@@ -278,6 +287,7 @@ func Default() *Config {
 	return &Config{
 		LogLevel:            "INFO",
 		ServerURL:           "",
+		TLSCAFile:           "",
 		PingIntervalSeconds: 5,
 		General: General{
 			StartMinimized:       false,

@@ -157,6 +157,26 @@ message ServerSyncResult {
 
 ---
 
+## 11. Voice payload encryption
+
+**Where it shows up:** Every UDP voice packet, on every frequency.
+
+**Today:** None. Phase 7.1 secured the gRPC control plane with TLS, which
+protects credentials, the voice secret in transit, radio state and the client
+roster. The voice payload itself is unencrypted Opus over the custom UDP
+protocol from Phase 5, so anyone on the path can capture and decode a
+conversation.
+
+This is a deliberate V1 decision, not an oversight. Encrypting voice needs a
+key exchange the C# peer implements too, and cross-client interop is
+currently blocked on `VNGD-SimpleRadioStandalone` PR #253.
+
+**Suggested proto change:** a key-agreement step in the control plane whose
+material both clients feed into a per-frequency AEAD over the UDP payload.
+Requires agreement with the C# peer before either side implements it.
+
+---
+
 ## How to use this document
 
 When the server team wants to extend `srs.proto`, this list is the priority queue. Each item also pairs with a client commit that swaps the local fallback for the wire-backed implementation; those commits should bump the `ClientCapabilities.version` so the server can degrade gracefully for older clients.

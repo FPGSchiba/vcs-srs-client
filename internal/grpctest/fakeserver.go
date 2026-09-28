@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
@@ -148,21 +149,58 @@ func (f *Fake) LastRadioInfo() *srspb.RadioInfo {
 	return f.LastRadio
 }
 
-// Start launches the fake on a bufconn and returns a dialer + cleanup.
+// Start launches the fake on a plaintext bufconn and returns a dialer +
+// cleanup. Preserved for the tests written before TLS existed.
+//
+// Its dialer is now BLOCKING where it was previously lazy: StartWith's
+// grpc.WithReturnConnectionError() implies WithBlock(), so the returned
+// dial func waits for the connection attempt to resolve instead of handing
+// back an unconnected *grpc.ClientConn immediately. Every existing caller
+// already passes a context with a deadline or awaits the result, so this is
+// unobserved today -- but a future caller dialing with a cancelled or very
+// short-lived context would now see that context's error instead of a
+// nil-error, not-yet-connected ClientConn.
 func Start(t *testing.T, f *Fake) (dial func(context.Context) (*grpc.ClientConn, error), cleanup func()) {
 	t.Helper()
+	dialWith, cleanup := StartWith(t, f, nil)
+	return func(ctx context.Context) (*grpc.ClientConn, error) {
+		return dialWith(ctx, insecure.NewCredentials())
+	}, cleanup
+}
+
+// StartWith launches the fake on a bufconn with the given SERVER transport
+// credentials (nil means plaintext) and returns a dialer that lets each test
+// choose its own CLIENT credentials.
+//
+// Splitting the two sides is what makes the mismatch cases testable at all:
+// a TLS client against a plaintext server, and a client pinning the wrong
+// issuer. And running TLS over bufconn rather than a real socket is
+// deliberate -- TLS is just a byte stream over the conn, so the genuine
+// handshake runs with no call to bind(2), which the development sandbox
+// blocks.
+func StartWith(t *testing.T, f *Fake, serverCreds credentials.TransportCredentials) (dialWith func(context.Context, credentials.TransportCredentials) (*grpc.ClientConn, error), cleanup func()) {
+	t.Helper()
 	lis := bufconn.Listen(1024 * 1024)
-	srv := grpc.NewServer()
+
+	var opts []grpc.ServerOption
+	if serverCreds != nil {
+		opts = append(opts, grpc.Creds(serverCreds))
+	}
+	srv := grpc.NewServer(opts...)
 	srspb.RegisterAuthServiceServer(srv, f)
 	srspb.RegisterSRSServiceServer(srv, f)
 	go func() { _ = srv.Serve(lis) }()
 
-	dial = func(ctx context.Context) (*grpc.ClientConn, error) {
+	dialWith = func(ctx context.Context, clientCreds credentials.TransportCredentials) (*grpc.ClientConn, error) {
 		return grpc.DialContext(ctx, "bufnet",
 			grpc.WithContextDialer(func(c context.Context, _ string) (net.Conn, error) { return lis.DialContext(c) }),
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithTransportCredentials(clientCreds),
+			// Without this a failed handshake surfaces as a bare context
+			// deadline and the real cause is lost, which would make the
+			// refusal tests below unable to tell a rejection from a timeout.
+			grpc.WithReturnConnectionError(),
 		)
 	}
 	cleanup = func() { srv.Stop(); _ = lis.Close() }
-	return dial, cleanup
+	return dialWith, cleanup
 }
