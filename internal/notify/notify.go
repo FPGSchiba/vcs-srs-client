@@ -140,6 +140,9 @@ type Notifier struct {
 	suppressed map[string]string
 	// pending holds coalescing state per key. See coalesce.go.
 	pending map[string]*pendingChange
+	// windows records the window each key was last coalesced with, so a
+	// re-armed trailing timer uses the same period.
+	windows map[string]time.Duration
 }
 
 // New constructs a Notifier with an empty list.
@@ -155,6 +158,7 @@ func New(opt Options) *Notifier {
 		items:      []Item{},
 		suppressed: map[string]string{},
 		pending:    map[string]*pendingChange{},
+		windows:    map[string]time.Duration{},
 	}
 }
 

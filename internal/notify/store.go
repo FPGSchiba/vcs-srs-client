@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"io"
 	"strconv"
+	"time"
 )
 
 // Post records a DISCRETE event -- something that happened once and is never
@@ -304,6 +305,9 @@ func (n *Notifier) Dismiss(id string) {
 	}
 	it := n.items[idx]
 	if it.Key != "" {
+		n.cancelPendingLocked(it.Key)
+	}
+	if it.Key != "" {
 		n.suppressed[it.Key] = fingerprint(it)
 	}
 	n.items = append(n.items[:idx], n.items[idx+1:]...)
@@ -353,10 +357,40 @@ func (n *Notifier) Clear() {
 		if it.Key != "" {
 			n.suppressed[it.Key] = fingerprint(it)
 		}
+		if it.Key != "" {
+			n.cancelPendingLocked(it.Key)
+		}
 	}
 	n.items = []Item{}
 	snap := n.snapshotLocked()
 	n.mu.Unlock()
 
 	n.publish(snap)
+}
+
+// RaiseWindowed is Raise with a coalescing window. See coalesce.go for why
+// the window is per-source rather than one constant.
+func (n *Notifier) RaiseWindowed(key string, item Item, window time.Duration) {
+	if key == "" {
+		n.Post(item)
+		return
+	}
+	n.rememberWindow(key, window)
+	n.coalesce(key, window, func() { n.Raise(key, item) })
+}
+
+// ResolveWindowed is Resolve with a coalescing window.
+func (n *Notifier) ResolveWindowed(key string, window time.Duration) {
+	if key == "" {
+		return
+	}
+	n.rememberWindow(key, window)
+	n.coalesce(key, window, func() { n.Resolve(key) })
+}
+
+// rememberWindow records a key's window for windowFor.
+func (n *Notifier) rememberWindow(key string, window time.Duration) {
+	n.mu.Lock()
+	n.windows[key] = window
+	n.mu.Unlock()
 }
