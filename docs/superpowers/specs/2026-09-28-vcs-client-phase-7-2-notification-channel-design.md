@@ -317,6 +317,21 @@ Wiring: `gui.SetNotifier(n)` in `main.go`, alongside the existing
 notifier is legal and inert, so every existing test constructing an `App`
 without one keeps compiling.
 
+**The two adapters `main.go` drives are reached through package-level
+functions, not methods on `App`.** `main.go` registers `gui` with
+`application.NewService`, so every exported *method* on `*App` is callable
+from the webview. `app.NotifyAudioState(gui, dto)` and
+`app.PlayNotificationSFX(gui, severity)` are package-level, and the methods
+behind them (`notifyAudioState`, `playNotificationSFX`) are unexported — the
+same rule `setCaptureTimeout` and `setNotifyWindows` follow (ruling R13).
+Exported, they would let the renderer fabricate an error-severity
+"Microphone unavailable" notification with arbitrary body text, fire the
+alert sound on demand, or — by passing a clean DTO — silently *resolve* a
+genuine microphone fault out of the user's list. The renderer is
+first-party, so the impact was low; applying the branch's own rule
+consistently is the point. Pinned by
+`TestNotificationAdaptersStayOffTheBoundServiceSurface`.
+
 ### 3.4 Action kinds are a closed set
 
 The prototype dispatches actions with an `if` ladder
@@ -471,9 +486,23 @@ suppression has anything to attach to — dismissing one simply removes it.
 ### 4.2 Flap suppression, with a per-source window
 
 Each key carries a coalescing window. A change arriving inside a key's open
-window is recorded but not emitted; a trailing timer — reset on each
-coalesced change, injected in tests — emits the settled state when the window
-closes.
+window is recorded but not emitted; a trailing timer — injected in tests —
+emits the settled state when the window closes.
+
+**A FIXED window, not a debounce.** A change landing inside an open window
+records itself and nothing more; it does **not** reset the armed timer. The
+timer fires one window after the edge that opened it, whatever the source
+does in between, and a fresh window is armed only if something was applied
+or is still waiting. Resetting per change would mean a source flapping
+*faster* than its own window emitted **nothing at all** until the flap
+stopped — a broken joystick toggling at ~50 Hz against a 2 s window would
+tell the user nothing for as long as it stayed broken. DoD 3's "at most one
+emit per window" is an upper bound with no matching lower one, so this is
+pinned by a test of its own
+(`TestAFlapFasterThanItsWindowStillEmitsOnTheBoundary`) rather than by
+counting emits. (An earlier revision of this paragraph, and of `coalesce`'s
+own doc comment, said "reset on each coalesced change"; the code never did
+that, and making the code match the prose left the whole suite green.)
 
 The trailing timer is not optional. Without it, a flap that simply *stops*
 would leave its final state never emitted, so a joystick that settles into a
