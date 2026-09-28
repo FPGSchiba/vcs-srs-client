@@ -1,6 +1,8 @@
 import { Icon } from "./Icon";
 import { activatable } from "./activatable";
+import { api } from "../api/client";
 import { useBuildInfo } from "../hooks/useBuildInfo";
+import { useNotifications } from "../store/notifications";
 import {
   useConnection,
   controlDot,
@@ -65,6 +67,7 @@ function Segment({
 export function StatusBar({ onNavigate }: StatusBarProps) {
   const conn = useConnection((s) => s.conn);
   const build = useBuildInfo();
+  const unread = useNotifications((s) => s.snap.unread);
   const goServer = () => onNavigate?.("server");
 
   return (
@@ -97,9 +100,15 @@ export function StatusBar({ onNavigate }: StatusBarProps) {
       <span className="sb-btn">
         <Icon name="help" size={11} /> HELP
       </span>
-      <span className="sb-btn">
+      <span
+        data-bell="alerts"
+        className={`sb-btn${unread > 0 ? " has-unread" : ""}`}
+        {...activatable(() => void api.toggleWindow("notifications"))}
+        title="Open Notifications"
+      >
         <Icon name="bell" size={11} />
         ALERTS
+        {unread > 0 && <span className="sb-bell-count">{unread}</span>}
       </span>
     </div>
   );

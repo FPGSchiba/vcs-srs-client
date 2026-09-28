@@ -2,12 +2,21 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { StrictMode } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 
+const toggleWindow = vi.fn();
+
+vi.mock("../api/client", () => ({
+  api: {
+    toggleWindow: (...args: unknown[]) => toggleWindow(...args),
+  },
+}));
+
 vi.mock("../hooks/useBuildInfo", () => ({
   useBuildInfo: () => ({ client_version: "0.1.0", protocol_version: "1", build: "dev" }),
 }));
 
 import { StatusBar } from "./StatusBar";
 import { useConnection, emptyConnection, type ConnectionState } from "../store/connection";
+import { useNotifications, emptySnapshot } from "../store/notifications";
 
 const snapshot = (over: Partial<ConnectionState> = {}): ConnectionState => ({
   server: "127.0.0.1:5002",
@@ -17,7 +26,11 @@ const snapshot = (over: Partial<ConnectionState> = {}): ConnectionState => ({
 });
 
 describe("StatusBar", () => {
-  beforeEach(() => useConnection.setState({ conn: emptyConnection() }));
+  beforeEach(() => {
+    toggleWindow.mockClear();
+    useConnection.setState({ conn: emptyConnection() });
+    useNotifications.setState({ snap: emptySnapshot() });
+  });
 
   it("renders both segments of the dual-pill", () => {
     useConnection.setState({ conn: snapshot() });
@@ -117,6 +130,28 @@ describe("StatusBar", () => {
     fireEvent.click(container.querySelector(".dual-pill")!);
 
     expect(onNavigate).toHaveBeenCalledWith("server");
+  });
+
+  it("wires the ALERTS bell to the notifications popout with its unread count", () => {
+    useNotifications.setState({ snap: { items: [], unread: 2 } });
+    const { container } = render(<StatusBar />);
+
+    const bell = container.querySelector('[data-bell="alerts"]') as HTMLElement;
+    expect(bell).not.toBeNull();
+    expect(bell.className).toContain("has-unread");
+    expect(bell.querySelector(".sb-bell-count")?.textContent).toBe("2");
+
+    fireEvent.click(bell);
+    expect(toggleWindow).toHaveBeenCalledWith("notifications");
+  });
+
+  it("drops has-unread and the count when nothing is unread", () => {
+    useNotifications.setState({ snap: { items: [], unread: 0 } });
+    const { container } = render(<StatusBar />);
+    const bell = container.querySelector('[data-bell="alerts"]') as HTMLElement;
+
+    expect(bell.className).not.toContain("has-unread");
+    expect(bell.querySelector(".sb-bell-count")).toBeNull();
   });
 });
 
