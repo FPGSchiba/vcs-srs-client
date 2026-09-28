@@ -45,8 +45,12 @@ func (n *Notifier) insertLocked(item Item) string {
 	item.Resolved = false
 	// Info is raised ALREADY-READ. This is the one rule that makes
 	// "informational, never a failure" structural rather than cosmetic: an
-	// info item cannot reach the badge, the bell or a toast, because none of
-	// those surfaces counts a read item.
+	// info item can reach neither the badge nor the bell, because both count
+	// only unread items (TopBar.tsx, StatusBar.tsx). The TOAST is barred by a
+	// second, independent mechanism, not by this one: ToastHost.tsx filters
+	// on severity == "error" and never reads the unread count at all. Both
+	// are load-bearing -- this flag alone would not stop a toast, and the
+	// severity filter alone would not stop the badge.
 	item.Unread = item.Severity != SeverityInfo
 	if item.Context == nil {
 		item.Context = []KV{}
