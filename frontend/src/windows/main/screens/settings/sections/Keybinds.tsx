@@ -114,9 +114,12 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    (see Go's App.notifyHotkeyState / notifyJoystickState) -- the right home for
  *    something the user must learn about without having Settings open. What
  *    stays is `PermissionCard`, the remediation the user can only act on
- *    here, keyed on `hotkeys.permission === "denied"` rather than on
- *    `!hotkeys.registered`: keyed the old way it would vanish the moment
- *    registration happened to succeed while the grant was still absent.
+ *    here. It renders for two states, and `!hotkeys.registered` alone is
+ *    neither of them: `permission === "denied"` gets the grant affordance
+ *    (keyed the old way it would vanish the moment registration happened to
+ *    succeed while the grant was still absent), and
+ *    `permission === "granted" && !hotkeys.registered` gets the restart
+ *    hint. Every other combination renders nothing.
  *
  * 5. One capture affordance, either input. Rather than making the user
  *    choose "keyboard or joystick" first, a single capture accepts

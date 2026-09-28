@@ -45,7 +45,7 @@ import { useSettingsSync } from "./useSettingsSync";
 
 const settings = {
   start_minimized: false, minimize_to_tray: true, show_transmitter_name: true,
-  play_connection_sounds: true, radio_switch_as_ptt: false,
+  play_connection_sounds: true, play_notification_sounds: true, radio_switch_as_ptt: false,
 };
 
 function Probe() {

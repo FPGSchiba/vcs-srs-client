@@ -17,12 +17,14 @@ import { useSettings } from "../../../../../../shared/store/settings";
  * back without prompting. Lifting them into Go would mean inventing backend
  * state that exists solely to track a macOS prompt.
  *
- * Rendered on `permission === "denied"` rather than on `!registered`, which
- * is a deliberate change from the banner it replaces: keyed on the old
- * condition it would vanish the moment registration happened to succeed
- * while the grant was still absent. Only macOS ever reports "denied";
- * "not_applicable" (Windows, Linux/X11) and "unknown" render nothing,
- * because there is nothing to grant and a button would be a dead end.
+ * Rendered for two states, neither of which is `!registered` alone:
+ * `permission === "denied"` (the grant affordance) and
+ * `permission === "granted" && !registered` (the restart hint). Keying the
+ * first on `!registered` -- what the banner this replaces did -- would make
+ * it vanish the moment registration happened to succeed while the grant was
+ * still absent. Only macOS ever reports either; "not_applicable" (Windows,
+ * Linux/X11) and "unknown" render nothing, because there is nothing to grant
+ * and a button would be a dead end.
  */
 export function PermissionCard() {
   const hotkeys = useSettings((s) => s.hotkeys);
