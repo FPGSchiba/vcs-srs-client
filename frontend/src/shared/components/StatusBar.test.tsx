@@ -66,6 +66,49 @@ describe("StatusBar", () => {
     expect(container.querySelector(".seg.voice .d.alert")).toBeNull();
   });
 
+  it("activates the pill from the keyboard, not just the mouse", () => {
+    // SonarCloud typescript:S1082. The design prototype uses a plain div
+    // with onClick, so without explicit key handling the pill is
+    // unreachable for anyone not using a pointer.
+    useConnection.setState({ conn: snapshot() });
+    const onNavigate = vi.fn();
+    const { container } = render(<StatusBar onNavigate={onNavigate} />);
+    const pill = container.querySelector(".dual-pill")!;
+
+    expect(pill.getAttribute("role")).toBe("button");
+    expect(pill.getAttribute("tabindex")).toBe("0");
+
+    fireEvent.keyDown(pill, { key: "Enter" });
+    expect(onNavigate).toHaveBeenCalledWith("server");
+
+    fireEvent.keyDown(pill, { key: " " });
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores unrelated keys on the pill", () => {
+    useConnection.setState({ conn: snapshot() });
+    const onNavigate = vi.fn();
+    const { container } = render(<StatusBar onNavigate={onNavigate} />);
+
+    fireEvent.keyDown(container.querySelector(".dual-pill")!, { key: "a" });
+
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("activates the NETWORK button from the keyboard", () => {
+    useConnection.setState({ conn: snapshot() });
+    const onNavigate = vi.fn();
+    const { container } = render(<StatusBar onNavigate={onNavigate} />);
+    const netBtn = Array.from(container.querySelectorAll(".sb-btn")).find((el) =>
+      el.textContent?.includes("NETWORK"),
+    )!;
+
+    expect(netBtn.getAttribute("role")).toBe("button");
+    fireEvent.keyDown(netBtn, { key: "Enter" });
+
+    expect(onNavigate).toHaveBeenCalledWith("server");
+  });
+
   it("navigates to Server Details when the pill is clicked", () => {
     useConnection.setState({ conn: snapshot() });
     const onNavigate = vi.fn();

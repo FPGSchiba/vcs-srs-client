@@ -1,3 +1,5 @@
+import type React from "react";
+
 import { Icon } from "./Icon";
 import { useBuildInfo } from "../hooks/useBuildInfo";
 import {
@@ -61,6 +63,26 @@ function Segment({
  *
  * classNames are byte-identical to the design so the ported CSS applies.
  */
+/** Makes a non-button element activate like one from the keyboard.
+ *  The design prototype uses plain `div`/`span` with `onClick` and the
+ *  ported CSS keys off those classNames, so the elements stay as they are
+ *  and gain the semantics instead: focusable, announced as a button, and
+ *  activated by Enter or Space like a real one. */
+function activatable(onActivate: () => void) {
+  return {
+    role: "button",
+    tabIndex: 0,
+    onClick: onActivate,
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        // Space would otherwise scroll the page.
+        e.preventDefault();
+        onActivate();
+      }
+    },
+  };
+}
+
 export function StatusBar({ onNavigate }: StatusBarProps) {
   const conn = useConnection((s) => s.conn);
   const build = useBuildInfo();
@@ -71,7 +93,7 @@ export function StatusBar({ onNavigate }: StatusBarProps) {
       <span className="sb-item">v{build?.client_version ?? "—"}</span>
       <span className="sb-divider"></span>
 
-      <div className="dual-pill" onClick={goServer} title="Open Server Details">
+      <div className="dual-pill" {...activatable(goServer)} title="Open Server Details">
         <Segment
           kind="ctrl"
           label="CTRL"
@@ -90,7 +112,7 @@ export function StatusBar({ onNavigate }: StatusBarProps) {
 
       <span className="sb-spacer"></span>
 
-      <span className="sb-btn" onClick={goServer}>
+      <span className="sb-btn" {...activatable(goServer)}>
         <Icon name="server" size={11} /> NETWORK
       </span>
       <span className="sb-btn">
