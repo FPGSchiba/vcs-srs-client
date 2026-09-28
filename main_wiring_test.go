@@ -227,3 +227,48 @@ func TestVoiceBridgeIsWiredAsBothSinkAndSource(t *testing.T) {
 		}
 	}
 }
+
+// TestSFXDedup_SkipsExactRepeat is F4's regression test (Phase 6
+// whole-branch review): monitor.SetControlState dedupes against the state it
+// already holds, but gui.PlayConnectionSFX does not, and a known, accepted
+// duplicate `disconnected` (Disconnect firing after the probe detector has
+// already declared loss) used to reach PlayConnectionSFX twice.
+func TestSFXDedup_SkipsExactRepeat(t *testing.T) {
+	d := &sfxDedup{}
+
+	if !d.shouldPlay("connected") {
+		t.Error("shouldPlay(\"connected\") on a fresh gate = false, want true")
+	}
+	if d.shouldPlay("connected") {
+		t.Error("shouldPlay(\"connected\") repeated = true, want false (this is the F4 bug)")
+	}
+	// A third repeat must stay suppressed -- shouldPlay must record the
+	// state even on the call it rejects, not just the one it lets through.
+	if d.shouldPlay("connected") {
+		t.Error("shouldPlay(\"connected\") a third time = true, want false")
+	}
+}
+
+// TestSFXDedup_PlaysEveryGenuineTransition guards against an over-broad fix:
+// the gate must not suppress a genuinely different state, including a
+// transition back to one already seen earlier in the sequence (a flap).
+func TestSFXDedup_PlaysEveryGenuineTransition(t *testing.T) {
+	d := &sfxDedup{}
+	seq := []string{"reconnecting", "connected", "reconnecting", "disconnected", "connected"}
+	for i, s := range seq {
+		if !d.shouldPlay(s) {
+			t.Errorf("shouldPlay(%q) at step %d = false, want true (genuine transition)", s, i)
+		}
+	}
+}
+
+// TestSFXGateIsWiredIntoTheObserver guards against the fix existing as dead
+// code -- the exact failure mode TestJoystickBackendIsWired documents --
+// main.go could define sfxDedup and never actually gate PlayConnectionSFX
+// with it.
+func TestSFXGateIsWiredIntoTheObserver(t *testing.T) {
+	text := readMainGo(t)
+	if !strings.Contains(text, "sfxGate.shouldPlay(") {
+		t.Error("main.go does not call sfxGate.shouldPlay(...) -- PlayConnectionSFX would be ungated again")
+	}
+}

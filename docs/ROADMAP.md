@@ -103,7 +103,7 @@ Numbered 3.5 rather than renumbering Phases 4–10: it was pulled in ahead of Au
 
 **Verification status:** the full automated suite is green (`go build`/`go vet`/`go test -race ./...` across all packages, frontend `vitest`/`tsc --noEmit`/production build — see Task 18's report). **The phase has NOT been verified on real hardware** — no audio device or GUI could be exercised in the environment that closed out the phase. A concrete manual checklist covering every hardware-dependent DoD item (device enumeration and selection per OS, the macOS microphone TCC prompt and its denied/recovery paths, unplug/replug and Bluetooth mid-session, System Default following an OS change, Star-Citizen audio coexistence in both launch orders, PTT from keyboard and joystick including the Phase 3.5 refcount now made audible, AGC/NS audibly doing what they claim, the four level knobs, latency/glitching with overrun/underrun counters, and the concurrency fixes around a device-unplug racing a Stop/restart) is written up and waiting for a human to run: [`2026-09-23-phase-4-manual-verification.md`](./superpowers/plans/2026-09-23-phase-4-manual-verification.md). Treat Phase 4 as code-complete, not field-verified, until that checklist has been executed.
 
-**The SFX sample pack is still outstanding.** The engine is asset-agnostic by design (D11) — a missing sample is silent and logged once, never a crash — but until the seven WAV files from the credited contributors land, every effect PREVIEW is silent. This is a real, open dependency on the user, not a soft caveat.
+**The SFX sample pack is still outstanding.** The engine is asset-agnostic by design (D11) — a missing sample is silent and logged once, never a crash — but until the WAV files from the credited contributors land, every effect PREVIEW is silent: seven from this phase, plus `connect.wav` and `disconnect.wav` added by Phase 6 — nine outstanding in total. This is a real, open dependency on the user, not a soft caveat.
 
 **Design doc:** [`2026-09-23-vcs-client-phase-4-audio-io-design.md`](./superpowers/specs/2026-09-23-vcs-client-phase-4-audio-io-design.md)
 
@@ -159,15 +159,32 @@ Found during implementation and review; deliberately **not fixed** as part of Ph
 
 ## Phase 6 — Connection-status surface
 
-**Status:** `[ ]`
+**Status:** `[x]` complete 2026-09-26 — control-plane liveness detection, the ping ticker (closing master spec §6 DoD 9), the `connhealth` dual-plane model, `connection:state`, the status bar's dual-pill, all three ConnBanner variants and a working reconnect UX landed on `feat/phase-6-connection-status`.
+
+**Verification status:** the full automated suite is green (`go build`/`go vet`/`go test -race ./...` with `-tags purego`, frontend `vitest`/`tsc --noEmit`/production build). **The phase has NOT been verified on real hardware, and nobody has ever watched this client lose a control connection to a real server.** The 5s × 3 failure threshold, the half-open detection claim and the ~70s transport floor are all designed from the server's source, not measured; voice RTT has never been read by a human. Checklist: [`2026-09-26-phase-6-manual-verification.md`](./superpowers/plans/2026-09-26-phase-6-manual-verification.md).
+
+**Design doc:** [`2026-09-26-vcs-client-phase-6-connection-status-design.md`](./superpowers/specs/2026-09-26-vcs-client-phase-6-connection-status-design.md)
+
+**Four gaps this phase found and closed** (none of them recorded in this file beforehand):
+1. **`ConnBanner` was live code that could essentially never fire.** Both `ConsumeUpdates` goroutines discarded the stream's terminating error, so a server restart or network drop emitted nothing and the UI reported `connected` indefinitely.
+2. **The Phase 1 ping ticker was never wired.** `PingOnce` had zero callers, `PingIntervalSeconds` zero readers, and the server's `LatencyToControlMs` read zero for every VCS client.
+3. **Phase 5's `voice:state` was emitted into the void** — absent from the frontend's `EV` map. `voice.Session.RTT()` was surfaced nowhere at all.
+4. **The prototype's status bar rendered a server name and region not on the wire.** Filed as PROTO_GAPS #10.
 
 **Headline deliverables**
-- ConnBanner integrated with real control + voice state
-- Status bar `dual-pill` for distributed mode (still shown in standalone form here; full distributed UI in Phase 9)
-- Reconnect flow UX (manual reconnect button on banner)
-- Standalone path fully wired
+- `internal/connhealth`: derived dual-plane model, one ticker, one `connection:state` event
+- Stream-termination detection under intent and generation guards; `MarkControlLost`
+- Ping ticker at 5s with a 3-failure loss threshold, mirroring `internal/voice`'s own budget
+- gRPC client keepalive at 75s, respecting the server's `MinTime: 60s` enforcement floor
+- Status bar `dual-pill`, rendered unconditionally (standalone included), with a fourth `unavailable` state for voice
+- All three `ConnBanner` variants, in-flight reconnect state, and failure reasons surfaced
+- `App.ReconnectVoice()`; connection SFX wired asset-agnostically (ships silent)
 
-**Blocking deps:** Phase 5
+**Blocking deps:** none remaining.
+
+**Two server behaviours made visible, not fixed** — both cross-repo, neither confirmed to fire. `SubscribeToUpdates` rejects a duplicate subscription while the old stream's cleanup is pending; a dead stream leaves the client in `serverState.Clients`. Both are on the manual checklist.
+
+**Still outstanding:** the SFX sample pack is now **nine** files, not seven — `connect.wav` and `disconnect.wav` joined the seven from Phase 4.
 
 ---
 

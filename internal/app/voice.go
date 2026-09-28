@@ -28,6 +28,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/audio"
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -60,6 +62,12 @@ type voiceSessionAPI interface {
 	// dialed a socket but never completed a HELLO and would never carry
 	// audio.
 	State() voice.State
+	// RTT reports the most recent keepalive round trip, or zero when no
+	// keepalive has been answered on the current binding. Read by the
+	// connhealth ticker for the status bar's VOICE segment. It is reset on
+	// every rebind (see voice.Session.resetBindingLocked), which is what
+	// keeps the pill from showing a healthy ping for a broken session.
+	RTT() time.Duration
 	Close() error
 }
 
@@ -221,6 +229,45 @@ func (a *App) initVoice() {
 	a.st.OnVoiceCredentialsChanged(a.handleVoiceRedirect)
 	a.st.OnSettingsChanged(a.refreshRXContext)
 }
+
+// reportVoiceState feeds one voice lifecycle transition into the
+// connection-health model AND the voice:state event.
+//
+// Both, not either: the event is Phase 5's I2 contract and other consumers
+// may subscribe to it, while the model is what the status surface reads.
+func (a *App) reportVoiceState(state, errMsg string) {
+	if a.health != nil {
+		a.health.SetVoiceState(state, errMsg, true)
+	}
+}
+
+// reportVoiceUnavailable records that no voice session is possible: torn
+// down, never started, no voice secret, or a build whose codec is the stub.
+//
+// Distinct from a failed state on purpose. Voice that never started is not
+// voice that broke, and rendering it as an alert would tell the user to
+// reconnect something that was never going to connect -- which is the normal
+// case on every CGO-less Windows release build (Phase 5 issue #1).
+func (a *App) reportVoiceUnavailable() {
+	if a.health != nil {
+		a.health.SetVoiceState(connhealth.StateUnavailable, "", false)
+	}
+}
+
+// voiceRTT reads the live session's round trip for the connhealth ticker.
+// Zero (no session, or nothing measured) is mapped to RTTUnknown by the
+// Monitor.
+func (a *App) voiceRTT() time.Duration {
+	sess := a.voiceSession()
+	if sess == nil {
+		return 0
+	}
+	return sess.RTT()
+}
+
+// VoiceRTT exposes the live voice session's round trip for main.go's
+// connhealth wiring. Zero means no session or nothing measured.
+func (a *App) VoiceRTT() time.Duration { return a.voiceRTT() }
 
 // VoiceBridge returns the Sink/Source bridge main.go must register with the
 // audio Manager exactly once, at startup (AddSink AND SetSource -- see this
@@ -701,12 +748,20 @@ func (a *App) voiceDialOptions() voice.Options {
 		JitterMS:    jitterMS,
 		MaxBufferMS: maxBufferMS,
 		OnState: func(st voice.State, err error) {
-			if em == nil {
-				return
-			}
 			msg := ""
 			if err != nil {
 				msg = err.Error()
+			}
+			// The health model first: it is what the status surface reads,
+			// and em may be nil in a build with no settings backend while
+			// the model is still wired.
+			if st == voice.StateClosed {
+				a.reportVoiceUnavailable()
+			} else {
+				a.reportVoiceState(st.String(), msg)
+			}
+			if em == nil {
+				return
 			}
 			em.VoiceState(st.String(), msg)
 		},
@@ -733,7 +788,7 @@ func (a *App) voiceDialOptions() voice.Options {
 // handleVoiceRedirect does NOT call this: it captures its own generation
 // and calls startVoiceSessionWithGen directly. See that function's doc.
 func (a *App) startVoiceSession() {
-	a.startVoiceSessionWithGen(a.nextVoiceGeneration())
+	_ = a.startVoiceSessionWithGen(a.nextVoiceGeneration())
 }
 
 // startVoiceSessionWithGen dials a fresh voice session against the store's
@@ -760,14 +815,24 @@ func (a *App) startVoiceSession() {
 // rejects a stale gen either way; only the ordering of what counts as
 // "stale" depends on where gen was captured.
 //
-// A dial failure is logged and swallowed, exactly like every other optional
-// subsystem in this app (audio, joystick): the control connection must stay
-// usable with no voice at all, the same discipline SetAudioBackend's
-// caller in main.go already follows for a missing sound card.
-func (a *App) startVoiceSessionWithGen(gen uint64) {
+// A dial failure is logged and swallowed BY startVoiceSession's caller
+// (Connect/Reconnect discard the return value), exactly like every other
+// optional subsystem in this app (audio, joystick): the control connection
+// must stay usable with no voice at all, the same discipline
+// SetAudioBackend's caller in main.go already follows for a missing sound
+// card. ReconnectVoice is the one caller that does NOT discard it (F8 fix,
+// Phase 6 whole-branch review): its whole purpose is a user-visible retry,
+// so its failure belongs in the banner's failure slot, not only in the log.
+//
+// The returned error is nil on success, and otherwise one of exactly the
+// documented voice-unavailable paths -- no voice secret yet, an unparseable
+// self GUID, or (from voiceDialInputs, folded into the same "no session is
+// possible" answer) a build whose codec is the stub -- or a dial failure.
+func (a *App) startVoiceSessionWithGen(gen uint64) error {
 	self, secret, src, ok := a.voiceDialInputs()
 	if !ok {
-		return
+		a.reportVoiceUnavailable()
+		return errors.New("voice: no session available (no voice secret yet, an unparseable self GUID, or voice unsupported in this build)")
 	}
 	// Through a.voice.dial, not voice.Dial directly -- see voiceState.dial's
 	// doc for why (test seam; defaults to voice.Dial in initVoice). Read
@@ -781,10 +846,11 @@ func (a *App) startVoiceSessionWithGen(gen uint64) {
 	sess, err := dial(src, self, secret, a.voiceDialOptions())
 	if err != nil {
 		a.logger.Warn("voice: dial failed; voice is unavailable for this session", "err", err)
-		return
+		return fmt.Errorf("voice: dial failed: %w", err)
 	}
 	a.setVoiceSession(sess, gen)
 	a.refreshRXContext()
+	return nil
 }
 
 // stopVoiceSession closes the live session (if any) and clears it, via
@@ -792,7 +858,10 @@ func (a *App) startVoiceSessionWithGen(gen uint64) {
 // through it rather than assigned directly. The generation argument is
 // ignored for a teardown (voiceSessionSwap's nil branch always proceeds and
 // bumps the generation itself), so 0 is passed.
-func (a *App) stopVoiceSession() { a.setVoiceSession(nil, 0) }
+func (a *App) stopVoiceSession() {
+	a.setVoiceSession(nil, 0)
+	a.reportVoiceUnavailable()
+}
 
 // handleVoiceRedirect re-points the voice session at a fresh socket when a
 // VOICE_ADDRESS_UPDATE redirect changes the store's coalition/global

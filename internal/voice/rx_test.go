@@ -193,11 +193,19 @@ func dialRX(t *testing.T, mutate func(*Options)) *rxFixture {
 // what makes the assertions afterwards deterministic despite UDP.
 func (f *rxFixture) send(t *testing.T, sender uuid.UUID, seq uint32, freq KHz, marker byte) {
 	t.Helper()
-	before := f.s.RXStats().Received
+	before := f.s.RXStats().Processed
 	payload := []byte{marker, 1, 2, 3, 4, 5, 6, 7}
 	f.ts.sendToClient(t, NewVoice(sender, seq, freq, payload, true, false))
-	waitFor(t, "the RX path to count the datagram", func() bool {
-		return f.s.RXStats().Received > before
+	// Processed, NOT Received. received is incremented on ENTRY to rxVoice,
+	// before the frequency filter, the own-echo drop, the stream-cap
+	// decision or the jitter push have run -- so waiting on it returned
+	// while the very work every caller asserts on was still outstanding.
+	// TestRXBoundsTheNumberOfStreams was the one caller with no following
+	// send to mask the gap, and it failed on macOS CI with
+	// "DroppedStreamCap = 0, want 1". The other six callers were latently
+	// racy for the same reason.
+	waitFor(t, "the RX path to finish routing the datagram", func() bool {
+		return f.s.RXStats().Processed > before
 	})
 }
 

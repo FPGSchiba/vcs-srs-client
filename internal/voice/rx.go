@@ -117,6 +117,9 @@ type rxEffects struct{ voice, clipping string }
 // Concealed/Decoded ratio is the client-side packet-loss figure.
 type RXStats struct {
 	Received uint64
+	// Processed counts datagrams the RX path has finished routing. It
+	// trails Received by whatever is in flight. See rxState.processed.
+	Processed uint64
 
 	DroppedOwn       uint64
 	DroppedFreq      uint64
@@ -247,6 +250,14 @@ type rxState struct {
 	ringFrames   int
 
 	received atomic.Uint64
+
+	// processed counts datagrams rxVoice has FINISHED with, on every path
+	// including the early drops. received is bumped on entry and so says
+	// only that a datagram arrived; processed says the routing decision --
+	// frequency filter, own-echo drop, stream-cap drop, jitter push -- has
+	// actually been made. Tests that assert on those outcomes must
+	// synchronise on this, not on received.
+	processed atomic.Uint64
 
 	dropOwn       atomic.Uint64
 	dropFreq      atomic.Uint64
@@ -407,6 +418,7 @@ func (s *Session) RXStats() RXStats {
 	r := &s.rx
 	st := RXStats{
 		Received:         r.received.Load(),
+		Processed:        r.processed.Load(),
 		DroppedOwn:       r.dropOwn.Load(),
 		DroppedFreq:      r.dropFreq.Load(),
 		DroppedEmpty:     r.dropEmpty.Load(),
@@ -486,6 +498,8 @@ func (s *Session) ReadInto(buf []float32) {
 func (s *Session) rxVoice(pkt *Packet, at time.Time) {
 	r := &s.rx
 	r.received.Add(1)
+	// Deferred so every early return below is covered; see processed's doc.
+	defer r.processed.Add(1)
 
 	ctx := r.ctx.Load()
 	if ctx == nil {
