@@ -9,6 +9,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, "main.html"),
         comms: resolve(__dirname, "comms.html"),
+        notifications: resolve(__dirname, "notifications.html"),
       },
     },
   },
