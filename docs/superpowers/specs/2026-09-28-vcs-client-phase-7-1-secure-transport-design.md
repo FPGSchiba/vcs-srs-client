@@ -102,19 +102,29 @@ precisely the man-in-the-middle exposure R5 exists to close.
 
 ### 4.1 Configuration
 
-`state.ServerSettings.Control` gains a TLS block, shaped to match the
-`VoiceControlSettings` fields that already exist (`state/settings.go:97`):
+`SettingsState` gains a **top-level** `clientTLS` block, sibling to the
+`voiceControl` block it deliberately mirrors (`state/settings.go:97`):
 
 ```yaml
-servers:
-  control:
-    host: 0.0.0.0
-    port: 5002
-    tls:
-      certificateFile: /certs/srs-cert.pem
-      privateKeyFile:  /certs/srs-private-key.pem
-      serverName:      vcs.vngd.net
+clientTLS:
+  certificateFile: /certs/srs-cert.pem
+  privateKeyFile:  /certs/srs-private-key.pem
+  serverName:      vcs.vngd.net
 ```
+
+**It is top-level rather than nested under `servers.control`, and that is a
+correctness requirement, not a style preference.** `app/settings.go:44`
+`SaveServerSettings` assigns `a.SettingsState.Servers = *newSettings` — a
+wholesale replacement — and `graphql/schema.resolvers.go:76` rebuilds
+`ServerSettings` from GraphQL input carrying only host and port. TLS nested
+inside `Servers` would therefore be erased by any admin-UI settings save and
+persisted as plaintext by the following `Save()`, silently downgrading the
+server on its next restart. A top-level block is outside that write path, and
+needs no GraphQL schema change.
+
+This corrects the `servers.control.tls` shape proposed when this spec was
+first approved; the discovery came from tracing the admin write path during
+planning.
 
 ### 4.2 Behaviour
 
