@@ -180,6 +180,33 @@ func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
 	}
 }
 
+// deferOffset returns the offset of a `defer` statement in main.go, and
+// FAILS if the literal does not appear exactly once.
+//
+// The count is the load-bearing half. strings.Index returns the FIRST
+// occurrence, so a comment in main.go that merely SPELLS OUT one of these
+// statements above the real one would make an ordering assertion compare the
+// wrong offset -- and for TestNotifierStopTimersIsRegisteredBeforeTheSources
+// that yields a false PASS on a genuinely inverted shutdown order, which is
+// the one direction these grep-style tests must never fail in. (Everything
+// else about the pattern degrades to a false FAILURE, which is noisy but
+// safe.) Measured: a decoy comment plus a real registration moved after
+// `defer am.Stop()` passed the unguarded test.
+//
+// A duplicate is therefore an explicit failure rather than a silently wrong
+// answer -- which also enforces main.go's standing rule that its prose must
+// not spell out these three literals.
+func deferOffset(t *testing.T, text, lit string) int {
+	t.Helper()
+	switch n := strings.Count(text, lit); {
+	case n == 0:
+		t.Fatalf("main.go no longer contains `%s`; update this test deliberately, not reflexively", lit)
+	case n > 1:
+		t.Fatalf("main.go contains `%s` %d times, want exactly 1 -- an ordering assertion indexes the FIRST occurrence, so a second one (a comment spelling out the statement, say) would silently compare the wrong offset; keep main.go's prose from naming these literals", lit, n)
+	}
+	return strings.Index(text, lit)
+}
+
 // TestMainWiringClosesBackendAfterManagerStop pins the shutdown ordering
 // main.go depends on. Stop()'s joins are bounded, so dspLoop can still be
 // running when Stop() returns; closing the backend before Stop() would let
@@ -193,14 +220,8 @@ func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
 // real GUI.
 func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
 	text := readMainGo(t)
-	stopIdx := strings.Index(text, "defer am.Stop()")
-	closeIdx := strings.Index(text, "defer backend.Close()")
-	if stopIdx < 0 {
-		t.Fatal("main.go no longer contains `defer am.Stop()`; update this test deliberately, not reflexively")
-	}
-	if closeIdx < 0 {
-		t.Fatal("main.go no longer contains `defer backend.Close()`; update this test deliberately, not reflexively")
-	}
+	stopIdx := deferOffset(t, text, "defer am.Stop()")
+	closeIdx := deferOffset(t, text, "defer backend.Close()")
 	// defers run LIFO, so the one registered FIRST runs LAST.
 	// backend.Close() must run last, so it must be registered first.
 	if closeIdx > stopIdx {
@@ -228,17 +249,11 @@ func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
 // job for the backend/manager pair, for why it reads the source.
 func TestNotifierStopTimersIsRegisteredBeforeTheSources(t *testing.T) {
 	text := readMainGo(t)
-	stopTimersIdx := strings.Index(text, "defer notifier.StopTimers()")
-	if stopTimersIdx < 0 {
-		t.Fatal("main.go no longer contains `defer notifier.StopTimers()`; update this test deliberately, not reflexively")
-	}
+	stopTimersIdx := deferOffset(t, text, "defer notifier.StopTimers()")
 	// defers run LIFO, so the one registered FIRST runs LAST. StopTimers
 	// must run last of the three, so it must be registered first.
 	for _, source := range []string{"defer jm.Close()", "defer am.Stop()"} {
-		idx := strings.Index(text, source)
-		if idx < 0 {
-			t.Fatalf("main.go no longer contains `%s`; update this test deliberately, not reflexively", source)
-		}
+		idx := deferOffset(t, text, source)
 		if idx < stopTimersIdx {
 			t.Errorf("`%s` (offset %d) is registered BEFORE `defer notifier.StopTimers()` (offset %d), so LIFO runs StopTimers first -- a poll tick from that source could then arm a coalescing window nothing will ever cancel", source, idx, stopTimersIdx)
 		}
