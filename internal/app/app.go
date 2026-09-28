@@ -12,6 +12,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -79,6 +80,11 @@ type App struct {
 	// as settings.audio and settings.joy: nil in tests and in any build
 	// where wiring failed, so every use site must check.
 	health *connhealth.Monitor
+
+	// notif is the notification channel. Optional, the same discipline as
+	// settings.audio, settings.joy and health: nil in tests and in any
+	// build where wiring failed, so every use site must check.
+	notif *notify.Notifier
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.

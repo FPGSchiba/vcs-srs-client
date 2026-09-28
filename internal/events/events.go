@@ -96,6 +96,17 @@ const (
 	// exactly why doing it costs almost nothing on top: at 0.2 Hz across a
 	// handful of windows, the traffic either way is negligible.
 	EventConnectionState = "connection:state"
+	// EventNotifications carries the FULL notification Snapshot, not a
+	// delta -- same reasoning as EventKeybindsChanged: the list is capped
+	// (notify.DefaultCap) and a replacement removes a class of
+	// frontend/backend divergence bug.
+	//
+	// Broadcast to every window, because the notification store is
+	// Go-owned. A popout is a separate webview with its own JS heap, so a
+	// list held in the main window's Zustand store would be invisible to
+	// the Notifications window -- the same reason connection:state and
+	// window:state are Go-owned.
+	EventNotifications = "notifications:changed"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -382,3 +393,9 @@ func (t *Tagged) VoiceState(state, errMsg string) {
 func (t *Tagged) ConnectionHealth(payload any) {
 	t.em.Emit(EventConnectionState, payload)
 }
+
+// Notifications emits EventNotifications with the full snapshot. The payload
+// is typed as any for the same reason KeybindsChanged's is: the concrete
+// shape is notify.Snapshot, and naming it here would make this package
+// depend on one of its own consumers' collaborators for no benefit.
+func (t *Tagged) Notifications(payload any) { t.em.Emit(EventNotifications, payload) }
