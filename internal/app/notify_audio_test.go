@@ -2,6 +2,7 @@ package app
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,14 +11,26 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 )
 
+// TestXrunCountersProduceNoNotification is the HEALTHY-DTO half of the xrun
+// guard, and on its own it is much weaker than it looks -- it was once the
+// only guard on DoD 9 and it could not see the bug DoD 9 exists to prevent.
+//
+// Nothing here carries a fault, so all four raiseOrResolve calls in
+// NotifyAudioState take the RESOLVE branch and no notify.Item is ever
+// constructed. The projection's CONTENTS therefore go unevaluated: folding
+// dto.Overruns straight into the item's Context -- exactly the mistake the
+// projection exists to prevent -- left this test passing.
+//
+// Keep it; "a healthy engine that is merely glitching says nothing" is a
+// real assertion. But the fingerprint claim is carried by its two siblings
+// below, which hold a fault OPEN while only the counters move.
 func TestXrunCountersProduceNoNotification(t *testing.T) {
 	a, n := withNotifier(t)
 
-	// THE critical audio test. emitStateIfChanged compares the whole State
-	// struct, xrun counters included, and runs every 2s poll tick -- so a
-	// glitching engine emits ~1800 times an hour with nothing the user can
-	// see having changed. The adapter's projection is what makes including
-	// audio safe at all.
+	// emitStateIfChanged compares the whole State struct, xrun counters
+	// included, and runs every 2s poll tick -- so a glitching engine emits
+	// ~1800 times an hour with nothing the user can see having changed. The
+	// adapter's projection is what makes including audio safe at all.
 	base := AudioStateDTO{Running: true, InputDevice: "mic-1", OutputDevice: "spk-1"}
 	for i := 0; i < 1800; i++ {
 		st := base
@@ -28,6 +41,139 @@ func TestXrunCountersProduceNoNotification(t *testing.T) {
 
 	if got := len(n.Snapshot().Items); got != 0 {
 		t.Fatalf("Items = %d, want 0 -- xrun counters must never produce a notification", got)
+	}
+}
+
+// withCountingNotifier builds an App whose notifier reports how often it
+// actually published and how often it asked for a sound. Counting is the
+// only way to see churn: the notification LIST is idempotent under a
+// re-raise of the same key, so a snapshot cannot distinguish "raised once"
+// from "raised, re-raised and re-sounded 1800 times".
+//
+// The counters are mutex-guarded because a trailing coalescing timer can
+// deliver on its own goroutine, not only on the caller's.
+type notifyCounts struct {
+	mu      sync.Mutex
+	changes int
+	sounds  int
+}
+
+func (c *notifyCounts) read() (changes, sounds int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.changes, c.sounds
+}
+
+func withCountingNotifier(t *testing.T) (*App, *notify.Notifier, *notifyCounts) {
+	t.Helper()
+	c := &notifyCounts{}
+	a := NewForTest(state.New(), nil, nil)
+	n := notify.New(notify.Options{
+		// Neither callback re-enters the Notifier -- see notify.Options.
+		OnChange: func(notify.Snapshot) {
+			c.mu.Lock()
+			c.changes++
+			c.mu.Unlock()
+		},
+		OnSound: func(notify.Item) {
+			c.mu.Lock()
+			c.sounds++
+			c.mu.Unlock()
+		},
+	})
+	a.SetNotifier(n)
+	t.Cleanup(n.StopTimers)
+	return a, n, c
+}
+
+// TestPersistentFaultWithMovingXrunsDoesNotChurn is the real guard on DoD 9's
+// "Overruns/Underruns movement provably produces NO notification", and the
+// one that evaluates the projection's contents.
+//
+// The mic is dead and STAYS dead, so every poll constructs the
+// "Microphone unavailable" item for real; the only thing that moves between
+// polls is the xrun counters. Folding those into the item -- Context,
+// Body, anywhere notify.fingerprint reaches -- makes every poll a
+// content-change, which republishes the Snapshot and re-fires OnSound.
+//
+// A short injected window rather than the real 10s notify.WindowAudio, so
+// each poll is a leading edge that applies synchronously instead of being
+// swallowed by the coalescing window. Coalescing is NOT what is under test
+// here -- it would mask the bug rather than expose it, which is precisely
+// why the counters have to be checked against un-coalesced polls.
+func TestPersistentFaultWithMovingXrunsDoesNotChurn(t *testing.T) {
+	a, n, counts := withCountingNotifier(t)
+	a.setNotifyWindows(0, 5*time.Millisecond)
+
+	base := AudioStateDTO{
+		Running:      true,
+		InputDevice:  "mic-1",
+		OutputDevice: "spk-1",
+		InputError:   "device not found", // the fault is PERSISTENT
+	}
+	for i := 0; i < 20; i++ {
+		st := base
+		st.Overruns = uint64(i)
+		st.Underruns = uint64(i * 2)
+		a.NotifyAudioState(st)
+		time.Sleep(10 * time.Millisecond) // outlast the window: next poll is a leading edge
+	}
+
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items = %d, want 1 -- one persistent fault is one item", got)
+	}
+	changes, sounds := counts.read()
+	if changes != 1 {
+		t.Fatalf("OnChange fired %d times, want 1 -- a fault that has not changed must be published once, however far the xrun counters have moved", changes)
+	}
+	if sounds != 1 {
+		t.Fatalf("OnSound fired %d times, want 1 -- the alert must not re-sound every poll tick of a glitching engine", sounds)
+	}
+}
+
+// TestXrunMovementDoesNotResurrectADismissedFault is the same defect seen
+// from the user's side, and it runs at the REAL notify.WindowAudio because
+// this is exactly what production does.
+//
+// The mic is dead, the user dismisses the notification, and the mic stays
+// dead. Dismiss retires the key's coalescing window (cancelPendingLocked),
+// so the very next poll is a leading edge again. If the xrun counters are in
+// the fingerprint, raiseLocked sees a fingerprint differing from the one the
+// item was dismissed at, drops the suppression, re-inserts the item unread
+// and re-lights the badge, the bell and the sound -- the R20
+// dismissal-resurrection bug, on the most severe audio key there is.
+func TestXrunMovementDoesNotResurrectADismissedFault(t *testing.T) {
+	a, n, counts := withCountingNotifier(t)
+
+	base := AudioStateDTO{Running: true, InputDevice: "mic-1", InputError: "device not found"}
+	a.NotifyAudioState(base)
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	n.Dismiss(items[0].ID)
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d after Dismiss, want 0", got)
+	}
+	_, soundsAtDismiss := counts.read()
+
+	// The poll continues. The mic is still dead; only the counters move.
+	for i := 1; i < 10; i++ {
+		st := base
+		st.Overruns = uint64(i)
+		st.Underruns = uint64(i * 2)
+		a.NotifyAudioState(st)
+	}
+
+	snap := n.Snapshot()
+	if len(snap.Items) != 0 {
+		t.Fatalf("Items = %d, want 0 -- a dismissed fault must not come back because the xrun counters moved; the fault is unchanged", len(snap.Items))
+	}
+	if snap.Unread != 0 {
+		t.Fatalf("Unread = %d, want 0", snap.Unread)
+	}
+	if _, sounds := counts.read(); sounds != soundsAtDismiss {
+		t.Fatalf("OnSound fired %d more times after the dismissal, want 0", sounds-soundsAtDismiss)
 	}
 }
 
