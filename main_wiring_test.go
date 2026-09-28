@@ -208,6 +208,43 @@ func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
 	}
 }
 
+// TestNotifierStopTimersIsRegisteredBeforeTheSources pins the other half of
+// main.go's shutdown ordering, the half notify.StopTimers' own doc used to
+// get wrong. It claimed "StopTimers runs before the event bus is torn down";
+// it does not -- every defer in main() runs only after wailsApp.Run() has
+// returned.
+//
+// What IS true, and what actually makes "cancels every armed timer" a final
+// statement rather than a racy one, is defer LIFO: `defer notifier.StopTimers()`
+// is registered BEFORE `defer jm.Close()` and `defer am.Stop()`, so those two
+// run FIRST and the joystick and audio poll goroutines -- the sources that
+// raise into the notifier and therefore arm its windows -- are already
+// stopped by the time StopTimers runs. Registered the other way round, a poll
+// tick landing between StopTimers and the source's own shutdown would arm a
+// fresh window that nothing would ever cancel.
+//
+// That ordering was load-bearing, undocumented and unguarded. This is the
+// guard; see TestMainWiringClosesBackendAfterManagerStop, which does the same
+// job for the backend/manager pair, for why it reads the source.
+func TestNotifierStopTimersIsRegisteredBeforeTheSources(t *testing.T) {
+	text := readMainGo(t)
+	stopTimersIdx := strings.Index(text, "defer notifier.StopTimers()")
+	if stopTimersIdx < 0 {
+		t.Fatal("main.go no longer contains `defer notifier.StopTimers()`; update this test deliberately, not reflexively")
+	}
+	// defers run LIFO, so the one registered FIRST runs LAST. StopTimers
+	// must run last of the three, so it must be registered first.
+	for _, source := range []string{"defer jm.Close()", "defer am.Stop()"} {
+		idx := strings.Index(text, source)
+		if idx < 0 {
+			t.Fatalf("main.go no longer contains `%s`; update this test deliberately, not reflexively", source)
+		}
+		if idx < stopTimersIdx {
+			t.Errorf("`%s` (offset %d) is registered BEFORE `defer notifier.StopTimers()` (offset %d), so LIFO runs StopTimers first -- a poll tick from that source could then arm a coalescing window nothing will ever cancel", source, idx, stopTimersIdx)
+		}
+	}
+}
+
 // TestVoiceBridgeIsWiredAsBothSinkAndSource guards Task 11's own version of
 // the TestJoystickBackendIsWired failure mode, made worse: registering ONLY
 // AddSink wires transmit, and every test in the repo (including Task 9's own

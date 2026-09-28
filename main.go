@@ -175,8 +175,22 @@ func main() {
 		OnSound:  func(it notify.Item) { gui.PlayNotificationSFX(string(it.Severity)) },
 	})
 	gui.SetNotifier(notifier)
-	// Cancels any armed trailing timer so a coalesced emit cannot fire into
-	// a torn-down event bus during shutdown.
+	// Cancels every armed trailing timer on shutdown.
+	//
+	// Registered HERE, before the joystick manager's Close and the audio
+	// manager's Stop are deferred further down, and that order is
+	// load-bearing: defers run LIFO, so those two poll goroutines -- the
+	// things that raise into the notifier -- are stopped FIRST and this runs
+	// last, with nothing left that could arm a new window while or after it
+	// cancels. Moving this registration below either of them would let a poll
+	// tick arm a window after StopTimers had already run. Pinned by
+	// TestNotifierStopTimersIsRegisteredBeforeTheSources, which greps for the
+	// literal defer statements -- do not spell them out in prose here, or
+	// that test and its two siblings will match the comment instead.
+	//
+	// It does NOT run before the event bus is torn down -- every defer in
+	// this function runs only after wailsApp.Run() has returned. See
+	// notify.StopTimers' doc for what that does and does not cover.
 	defer notifier.StopTimers()
 
 	// session.New's construction above is unchanged. The observer is
