@@ -5,14 +5,20 @@
 **Branch:** `feat/phase-7-2-notification-channel` (off `main` at `ed35789`)
 **Parent:** [`2026-09-28-vcs-client-phase-7-decomposition-design.md`](./2026-09-28-vcs-client-phase-7-decomposition-design.md)
 
-Phase 7.2 builds the client's general notification channel and makes hotkey
-and joystick registration failures its first consumers, replacing Phase 3's
-inline banner in the Keybinds section.
+Phase 7.2 builds the client's general notification channel, gives it the
+three consumers `internal/events/events.go:56` names — hotkeys, joystick and
+audio — and fills the mixer's notification bus so an alert can be heard as
+well as seen.
 
-**The channel is the deliverable; hotkeys are the first caller.** Nothing in
-`internal/notify` knows what a hotkey is. 7.2 comes before 7.3 and 7.4
-precisely so Ship, Fleet and Messages find a channel already there instead of
-three consumers being retrofitted onto one built for keybinds.
+**The channel is the deliverable; hotkeys are merely the first caller.**
+Nothing in `internal/notify` knows what a hotkey, a joystick or an audio
+device is. 7.2 comes before 7.3 and 7.4 precisely so Ship, Fleet and Messages
+find a channel already there instead of three consumers being retrofitted
+onto one built for keybinds.
+
+Hotkeys and joystick replace Phase 3's inline banner in the Keybinds section,
+which is the ROADMAP's stated deliverable; audio and the sound engine are
+additions made during design (§1.5, §1.7).
 
 ---
 
@@ -82,7 +88,7 @@ pieces of *local* React state — `requested` and `promptSpent`
 macOS provides no way to ask whether an app's one-shot Accessibility prompt
 has been spent. Moving the banner is not a copy-paste. See §6.4.
 
-### 1.5 Notification sound is blocked twice over, not just on the WAV pack
+### 1.5 The "no notification engine" comment overstates what is missing
 
 `internal/audio/manager.go:938`:
 
@@ -90,10 +96,22 @@ has been spent. Moving the banner is not a copy-paste. See §6.4.
 notifBuf := make([]float32, FrameSamples) // no notification engine yet (Phase 4 scope); always silent.
 ```
 
-The mixer's notification bus (`internal/audio/mixer.go:9,59`) and its level
-slider exist and are wired to **nothing**. So beyond the nine undelivered WAV
-files there is no engine to play them through. Building one is out of scope
-(§8). **Every notification in 7.2 is silent.**
+Read literally that sounds like a subsystem to build. It is not. `notifBuf`
+is **already** handed to `mixer.Mix` (`manager.go:1118`); the notification bus
+already has its own gain, taper and Settings → Audio slider
+(`mixer.go:9,59`); and `voicePool.mixInto(dst, lookup)` (`sfx.go:250`) is
+**generic over the sample lookup**, with the DSP loop running the identical
+call for SFX one line earlier (`manager.go:1116`).
+
+What is genuinely absent is a second voice pool, a second sample set, and a
+`PlayNotification` mirroring `PlayEffect` — see §3.8. What is absent and
+*cannot be supplied by this phase* is the sample itself: the pack is a
+dependency on the user, and `internal/audio/assets/README.md` records it as
+"not something to substitute".
+
+**So every notification in 7.2 is silent — but by missing asset, not missing
+code.** The distinction matters: the path becomes audible the day a WAV
+lands, with no further work.
 
 ### 1.6 Two delivery traps
 
@@ -103,23 +121,44 @@ files there is no engine to play them through. Building one is out of scope
 - `StatusBar.tsx:121` already renders the ALERTS bell, but it is completely
   inert: no handler, no count, no `.has-unread`.
 
-### 1.7 `EventAudioState`'s comment contradicts the ROADMAP — resolved
+### 1.7 `EventAudioState`'s comment contradicts the ROADMAP — the comment wins
 
 `internal/events/events.go:56` claims Phase 7's notification channel "absorbs
 all three uniformly" — hotkeys, joystick **and audio**. The ROADMAP's 7.2 row
 names only hotkeys and joystick.
 
-**Resolution: the comment describes the eventual shape, not 7.2's scope.**
-Audio is deferred, and the source-adapter seam (§3.3) is built so adding it
-later is one ~30-line adapter and no change to `internal/notify`.
+**Resolution: audio is in, and the comment is honoured rather than amended.**
 
-The reason is not merely scope discipline. Phase 4 has never run against a
-real audio device, so **nobody knows how chattily `audio:state` fires during a
-hot-unplug/reopen cycle**, and Phase 4's bounded-backoff reopen loop is
-exactly the shape that flaps. Wiring a notification source to an event whose
-real-world frequency has never been observed is the trap the decomposition
-spec §4 warns about. The comment at `events.go:56` is amended by this phase to
-say so rather than left to read as a commitment.
+The first draft of this spec deferred audio on the grounds that "nobody knows
+how chattily `audio:state` fires". That was a reason to go and look, not a
+reason to stop. Having looked:
+
+- `emitStateIfChanged` (`internal/audio/manager.go:503`) runs at the end of
+  every poll tick, and `PollInterval` defaults to **2 s**
+  (`manager.go:291`, "design spec §8: ~2s hot-plug poll").
+- It compares the **whole `State` struct** (`manager.go:63-70`), which
+  includes `Overruns` and `Underruns` — **monotonic counters**. So while the
+  engine is glitching, `audio:state` fires every 2 s indefinitely: ~30 per
+  minute, ~1800 per hour.
+
+So the chattiness is real, but it is a 0.5 Hz ceiling rather than the
+unbounded churn the joystick's 100 Hz loop implies — and §4.1's fingerprint
+already neutralises it, because the fingerprint is computed over what the
+**user sees**, not over the payload. The audio adapter (§5.4) projects those
+nine fields down to the four that are faults and drops both counters, both
+device ids, `Running` and `Starting`. 1800 emissions per hour collapse to one
+notification, with no new machinery.
+
+Two facts make that projection stable rather than merely plausible:
+
+- The error text comes straight from the backend with no attempt counter or
+  timestamp (`m.inputErr = err.Error()`, `manager.go:1402`, and the
+  symmetric `manager.go:687`).
+- The bounded-backoff reopen (1 s → 30 s doubling, `manager.go:35-36`) makes
+  no new attempt during the wait, so nothing rewrites the error text while a
+  device is down.
+
+What remains unobserved is narrower than "how often does it fire" — see §7 item 2.
 
 ---
 
@@ -132,8 +171,13 @@ say so rather than left to read as a commitment.
 3. Unread surfacing that reaches a user who never opens that popout: the
    TopBar launcher badge, the status-bar ALERTS bell, and an error-severity
    toast stack.
-4. Hotkey and joystick registration failures routed through the channel as
-   its first consumers, replacing Phase 3's inline Keybinds banner.
+4. Three first consumers routed through the channel: hotkey registration
+   failures, joystick availability, and audio device faults — the three
+   `events.go:56` names. Hotkeys and joystick replace Phase 3's inline
+   Keybinds banner.
+5. The notification sound engine (§3.8) — the second voice pool that finally
+   fills the mixer's notification bus. Ships **silent**: the sample pack is
+   an outstanding dependency on the user and must not be substituted.
 
 **Out:** see §8.
 
@@ -233,17 +277,38 @@ Read/dismiss surface: `MarkRead(id)`, `MarkAllRead()`, `Dismiss(id)`,
 
 ### 3.3 The source-adapter seam
 
-`internal/app` gains one small file per notification source. 7.2 adds
-`internal/app/notify_keybinds.go`, holding the hotkey and joystick adapters
-and nothing else. Later phases add siblings. **`internal/notify` is not
-touched when a source is added.**
+One small adapter per notification source, each turning a subsystem's DTO
+into an `Item`. **`internal/notify` is not touched when a source is added.**
+A reviewer should be able to grep it for "hotkey", "joystick" or "audio" and
+find nothing.
 
-The adapters hang off the two existing emit funnels rather than off the event
-bus, because each is already the sole caller of its emitter — verified:
-`emitHotkeyState` (`settings.go:994`) is the only caller of
-`events.Tagged.HotkeysState`, and `emitJoystickState` (`settings.go:170`) the
-only caller of `JoystickState`. Both already build the exact DTO an adapter
-needs. Tapping the funnel means no second path can bypass the channel.
+Two sources tap a funnel inside `internal/app`, because each is already the
+**sole** caller of its emitter — verified: `emitHotkeyState`
+(`settings.go:994`) is the only caller of `events.Tagged.HotkeysState`, and
+`emitJoystickState` (`settings.go:170`) the only caller of `JoystickState`.
+Both already build the exact DTO an adapter needs, so tapping the funnel
+means no second path can bypass the channel. These live in
+`internal/app/notify_keybinds.go`.
+
+**Audio wires differently, and deliberately so.** It has *two* emit sites,
+both in `main.go` and neither inside `internal/app`:
+
+| Site | Condition |
+|---|---|
+| `main.go:225` | `audio.NewMalgoBackend()` failed — no Manager exists, so an `AudioStateDTO` is hand-pushed with both error fields set |
+| `main.go:251` | the Manager's `OnState` callback, for everything after that |
+
+An adapter hung only off `OnState` would miss the most severe audio failure
+there is — "audio features are disabled", the case where no Manager was ever
+constructed. So the audio adapter lives in `main.go` beside `SetNotifier`,
+covering both sites, in `notifyAudioState(app.AudioStateDTO)`.
+
+(Checked and *not* a third site: `am.Start()` returning an error at
+`main.go:279` reaches only slog. That is harmless, because `Start` does not
+abort on enumeration failure — it logs, falls through with empty device
+lists, and still reaches `emitState()` at `manager.go:720`. The only error
+`Start` returns is `ErrStartInProgress` from a concurrent call, which
+`main.go` cannot produce.)
 
 Wiring: `gui.SetNotifier(n)` in `main.go`, alongside the existing
 `SetConnHealth` / `SetSettingsBackend` / `SetJoystickBackend` calls. A nil
@@ -290,7 +355,8 @@ Bindings on `App`: `GetNotifications()`, `MarkNotificationRead(id)`,
 ### 3.7 Concurrency
 
 `emitJoystickState` runs on the joystick manager's poll goroutine;
-`emitHotkeyState` runs on Wails binding goroutines. The store is
+`emitHotkeyState` runs on Wails binding goroutines; the audio adapter runs on
+the audio Manager's poll goroutine. The store is
 goroutine-safe and follows `connhealth`'s documented lock ordering exactly —
 `emitMu → mu → mutate → unlock mu → publish → unlock emitMu` — so `OnChange`
 delivery is serialised and never reentrant. `OnChange` is documented as
@@ -299,6 +365,60 @@ must-not-call-back, as `connhealth.Options.OnChange` is
 
 Coalescing timers fire on their own goroutines and publish through the same
 path.
+
+### 3.8 Notification sound playback
+
+`internal/audio/manager.go:938` reads:
+
+```go
+notifBuf := make([]float32, FrameSamples) // no notification engine yet (Phase 4 scope); always silent.
+```
+
+That comment understates how much already exists. `notifBuf` is **already
+passed to `mixer.Mix`** (`manager.go:1118`), the notification bus already has
+its own gain and its own Settings → Audio slider
+(`mixer.go:9,59`; `AudioLevels.notification`), and — decisively —
+`voicePool.mixInto(dst, lookup)` (`sfx.go:250`) is **generic over the sample
+lookup**. The DSP loop already runs the identical call one line earlier for
+SFX:
+
+```go
+sfxVoices.mixInto(sfxBuf, m.sfx.sampleFor)      // manager.go:1116, exists
+notifVoices.mixInto(notifBuf, m.notif.sampleFor) // this phase, same shape
+```
+
+So the engine is a **second voice pool over a second sample set**, plus
+`Manager.PlayNotification(id)` mirroring `PlayEffect` (`manager.go:400`) and
+the same per-generation epoch discipline `sfxVoices` already carries
+(`manager.go:203,668,672,805`). Every hard part — the fixed-capacity ring,
+oldest-voice eviction, the `TryLock` drain that keeps `play` off the realtime
+path, the limiter — is existing, tested code.
+
+**Sound follows the toast.** Rather than a sound per severity, exactly what
+toasts also sounds, which under §5 means **error severity only**. This avoids
+the worst outcome — a sound with no visible cause — and it means one new
+manifest slot, `notify_alert`, rather than three. Warn items reach the badge
+and bell silently; info items, being raised already-read (§5.3), do nothing
+at all, which falls out of that existing rule rather than needing its own.
+
+Firing is governed entirely upstream: §4.1 means a sound plays only when an
+item is genuinely created or content-changed, and §4.2's window means a
+flapping device produces at most one sound per window. This is Phase 6's
+`c8cdb75` concern ("dedupe connection SFX") solved in the store rather than
+bolted onto the play site.
+
+A new setting `play_notification_sounds` (default true) mirrors the existing
+`play_connection_sounds`. The prototype's per-category Toast/Sound/Silent
+table (`settings.jsx:245`) stays out of scope (§8).
+
+**This ships silent, and that is the honest state, not a shortfall.**
+`internal/audio/assets/README.md` records that the sample pack "is supplied
+by the project … and is a **blocking dependency tracked in the Phase 4
+spec**, not something to substitute", so no placeholder tone is synthesised.
+`notify_alert` reports `available: false` and plays nothing — exactly how all
+nine existing SFX slots ship today. **The outstanding ask on the user grows
+from nine WAV files to ten.** The path becomes audible the day that file
+lands, with no further code change.
 
 ---
 
@@ -346,18 +466,33 @@ either of the two things that mean "this is news again":
 the same reason. `Post` items have no key, so neither dismissal nor
 suppression has anything to attach to — dismissing one simply removes it.
 
-### 4.2 Flap suppression (required by the 100 Hz joystick poll)
+### 4.2 Flap suppression, with a per-source window
 
-Each key carries a coalescing window, **default 2 s**. A change arriving
-inside a key's open window is recorded but not emitted; a trailing timer —
-reset on each coalesced change, injected in tests — emits the settled state
-when the window closes.
+Each key carries a coalescing window. A change arriving inside a key's open
+window is recorded but not emitted; a trailing timer — reset on each
+coalesced change, injected in tests — emits the settled state when the window
+closes.
 
 The trailing timer is not optional. Without it, a flap that simply *stops*
 would leave its final state never emitted, so a joystick that settles into a
 persistent error would show nothing.
 
-**This is designed, not measured.** See §7.
+**The window is a per-source parameter, not one global constant.** The first
+draft of this spec used a single 2 s value, which was an artefact of having
+only one poll loop in view. The three sources have genuinely different
+cadences:
+
+| Source | Underlying cadence | Window | Why |
+|---|---|---|---|
+| Hotkeys | event-driven, no poll | **0** | Nothing polls. Identity dedupe (§4.1) is the whole defence; a window would only delay an honest edge. |
+| Joystick | 100 Hz poll (`manager.go` `tick`) | **2 s** | A flapping `Poll()` error toggles the edge at up to ~50 Hz. |
+| Audio | 2 s poll (`manager.go:291`) | **10 s** | A 2 s window would *beat* against a 2 s poll, letting a device flapping at the poll rate through roughly every other tick. The window must be several times the source's own period to coalesce anything. |
+
+`Notifier` takes the window per `Raise` call site (via the adapter), so a new
+source in 7.3/7.4 declares its own rather than inheriting a value tuned for
+someone else's loop.
+
+**These values are designed, not measured.** See §7.
 
 ### 4.3 Worked example
 
@@ -371,9 +506,10 @@ A joystick failing every other poll at 100 Hz:
 
 ---
 
-## 5. The three required cases
+## 5. The cases
 
-The ROADMAP's 7.2 paragraph is binding. These three stay distinct.
+§§5.1–5.3 are the ROADMAP's 7.2 paragraph, which is binding: **these three
+stay distinct.** §5.4 is the audio source added during design (§1.7).
 
 ### 5.1 Global hotkey failure — notifies **once**, carrying permission state
 
@@ -437,6 +573,51 @@ in the colour of a border. This is the same instinct `connhealth`'s
 `StateUnavailable` already encodes: "voice that never started is not voice
 that broke" (`connhealth.go:28-35`).
 
+### 5.4 Audio device faults — the fourth case
+
+Not in the ROADMAP's 7.2 paragraph; added by the decision recorded in §1.7,
+honouring `events.go:56`.
+
+The adapter projects `audio.State`'s **nine** fields (`manager.go:63-70`)
+down to the **four** that are faults. This projection is the whole reason
+audio is safe to include:
+
+| Field | In the fingerprint? | Why |
+|---|---|---|
+| `InputError`, `OutputError` | **yes** | the fault itself |
+| `InputSubstituted`, `OutputSubstituted` | **yes** | audio works, but not on the chosen device |
+| `Overruns`, `Underruns` | **no** | monotonic counters — the sole reason the raw event fires every 2 s during a glitch (§1.7) |
+| `Running`, `Starting` | **no** | lifecycle, not a fault |
+| `InputDevice`, `OutputDevice` | **no** | which device is in use is already carried by the substitution flags |
+
+| Condition | Key | Severity | Title |
+|---|---|---|---|
+| `InputError != ""` | `audio.input` | **`error`** | `Microphone unavailable — <error>` |
+| `OutputError != ""` | `audio.output` | **`error`** | `Audio output unavailable — <error>` |
+| `InputSubstituted` | `audio.input.substituted` | `warn` | `Using the system default microphone` |
+| `OutputSubstituted` | `audio.output.substituted` | `warn` | `Using the system default audio output` |
+
+Four independent keys, not one, so a failed input and a substituted output
+are separate items that resolve independently. Each resolves when its
+condition clears. Body text for the substitution pair names the configured
+device id that could not be opened, taken from `AudioSettings.input_device` /
+`output_device`; context carries `IN USE: <resolved id>`.
+
+Errors are **`error` severity, so they toast and sound** (§3.8): a dead
+microphone in a voice-comms client is the most urgent thing this channel
+carries, and today it is visible only if the user happens to open
+Settings → Audio. Substitution is `warn` — audio still works, so badge and
+bell are proportionate.
+
+Coalescing window **10 s** (§4.2), not the joystick's 2 s: a 2 s window
+against a 2 s poll would beat rather than coalesce.
+
+The no-backend case (`main.go:225`, where `NewMalgoBackend` failed and no
+Manager exists) arrives as an `AudioStateDTO` with **both** error fields set,
+so it raises `audio.input` and `audio.output` together. That is correct —
+both directions genuinely are dead — and is the case an adapter hung only off
+`OnState` would have missed entirely (§3.3).
+
 ---
 
 ## 6. Frontend
@@ -478,8 +659,12 @@ open. Three surfaces prevent that, all with CSS already ported:
 Comms deliberately gets no toast host: it is a narrow radio panel and a toast
 stack would cover the radios. Recorded as a limit, not an oversight.
 
-Because info items are raised already-read (§5.3), none of the three ever
-fires for macOS's "joystick unsupported".
+The **sound** (§3.8) is fired by the Go store, not by `ToastHost`, so it
+reaches a user whose main window is closed or backgrounded — but it fires on
+exactly the same items the toast does. One rule, two surfaces: error toasts
+and sounds, warn does neither, info does nothing at all because it is raised
+already-read (§5.3). So none of the four surfaces ever fires for macOS's
+"joystick unsupported".
 
 ### 6.3 State
 
@@ -524,15 +709,30 @@ designed-from-source values as such.
    notify are read from `internal/joystick/manager.go`; the flap they imply is
    inferred. **The 2 s coalescing window in §4.2 is a guess sized to that read
    loop, not a measurement.**
-2. **macOS Accessibility denial has never been exercised on hardware.**
+2. **What a real audio device failure looks like is unknown** — but this is
+   now a *narrow* gap, not the open-ended one the first draft claimed. The
+   emission *rate* is measured from source (§1.7): bounded at one per 2 s
+   poll tick, collapsing to one notification under the §5.4 projection. What
+   remains unobserved is the *content*: whether malgo's error string for an
+   unplugged USB microphone is one stable value or varies per attempt, and
+   whether a hot-unplug yields a clean `Substituted` transition or flaps
+   through an error state first. Worst case is one notification per distinct
+   error string — a constant to tune, not a redesign. **The 10 s audio window
+   is likewise sized to a read poll interval, not measured.**
+3. **macOS Accessibility denial has never been exercised on hardware.**
    Phase 3's manual checklist is unrun. The permission transitions driving
    §5.1's fingerprint — and `promptSpent`'s "the one-shot is spent" inference
    — are read from source, not observed.
-3. **Every notification in 7.2 is silent** (§1.5). No engine, no samples.
-   Anything this design calls "alerting the user" means visually, and the
-   badge/bell/toast triad in §6.2 is therefore the *only* alerting mechanism,
-   not a visual supplement to a sound.
-4. **Nothing in this phase can be field-verified in the environment that
+4. **The notification sound has never been heard, and cannot be.** §3.8
+   builds the full playback path, but `notify_alert` has no sample and the
+   pack must not be substituted, so **no human can confirm by ear that any of
+   it works**. The engine is verifiable only by unit test — that
+   `PlayNotification` queues into the pool, that the pool mixes into
+   `notifBuf`, and that the notification bus gain is applied. That the
+   resulting sound is audible, correctly levelled against voice, and not
+   startling over a live transmission is **entirely unverified** and joins
+   the manual checklist.
+5. **Nothing in this phase can be field-verified in the environment that
    writes it.** 7.2 adds its own manual checklist under
    `docs/superpowers/plans/`, joining the six already unrun.
 
@@ -542,9 +742,9 @@ designed-from-source values as such.
 
 | Excluded | Why / where it goes |
 |---|---|
-| Audio as a notification source | §1.7. Deferred; the §3.3 seam makes it one ~30-line adapter later. |
-| The notification mix engine and sound playback | §1.5. No engine exists; the nine WAVs are undelivered. Phase 4 follow-up. |
-| Per-category Toast / Sound / Silent settings table | Prototype `settings.jsx:245`. Needs sound to mean anything. |
+| The `notify_alert` WAV itself | A dependency on the user, not work. §3.8: the pack "is not something to substitute", so no placeholder tone is synthesised. The ask grows from nine files to ten. |
+| Per-category Toast / Sound / Silent settings table | Prototype `settings.jsx:245`. 7.2 ships one global `play_notification_sounds` toggle instead; a per-category matrix needs sounds that exist to mean anything. |
+| Per-severity sounds | §3.8: sound follows the toast, so one slot. A distinct warn sound can be added later without touching the engine. |
 | Persistence across restart | 7.3 owns local persistence. §3.1 explains why 7.2 loses nothing. |
 | Server-pushed notifications | PROTO_GAPS #8. No proto change in this phase. |
 | Radio profiles, transmission history | 7.3 |
@@ -557,12 +757,14 @@ designed-from-source values as such.
 1. `internal/notify` exists as a pure package with `Post` / `Raise` /
    `Resolve` / `MarkRead` / `MarkAllRead` / `Dismiss` / `Clear`, an injected
    clock and an injected `OnChange`, and no import of `internal/app`,
-   `internal/hotkeys` or `internal/joystick`.
+   `internal/hotkeys`, `internal/joystick` or `internal/audio`. Grepping it
+   for "hotkey", "joystick" or "audio" returns nothing.
 2. Identity dedupe: rebinding nineteen actions with one unregisterable chord
    produces exactly **one** notification, proven by test.
 3. Flap suppression: a 50 Hz Raise/Resolve flap produces at most one emit per
    window, and a flap that stops still emits its settled state — both proven
-   under an injected clock.
+   under an injected clock. The window is a **per-source** parameter
+   (hotkeys 0, joystick 2 s, audio 10 s), not one constant.
 4. `Post` is never deduped and never coalesced, proven by test.
 5. Dismissing a keyed item whose condition still holds does **not** let the
    next identical `Raise` resurrect it, and a changed fingerprint or a
@@ -575,21 +777,30 @@ designed-from-source values as such.
 8. All three ROADMAP cases behave as §5 specifies, including macOS
    "unsupported" never rendering as an error and never reaching the badge,
    bell or toast.
-9. Phase 3's inline Keybinds banner is gone; `PermissionCard` renders on
+9. Audio device faults raise as §5.4 specifies, from **both** emit sites —
+   including the no-backend path at `main.go:225`, which an adapter hung
+   only off the Manager's `OnState` would miss. `Overruns`/`Underruns`
+   movement provably produces **no** notification, proven by test.
+10. Phase 3's inline Keybinds banner is gone; `PermissionCard` renders on
    `permission === "denied"`; the per-row failure text remains.
-10. `ToastHost` has a StrictMode test **and** a real-unmount control proving
+11. `ToastHost` has a StrictMode test **and** a real-unmount control proving
    its dismiss timer is scheduled once and cleared once.
-11. Every clickable non-button element added or touched carries `role`,
+12. Every clickable non-button element added or touched carries `role`,
     `tabIndex` and Enter/Space handling via the shared `activatable` helper
     lifted out of `StatusBar.tsx:71` — TopBar's launcher (which fixes a
     pre-existing gap), the ALERTS bell, and `NotifRow`'s header.
-12. `events.go:56`'s comment is amended to state that audio is deferred and
-    why, rather than reading as a commitment.
-13. Automated suite green: `go build` / `go vet` / `go test -race ./...` with
+13. The notification sound engine is wired end to end: `PlayNotification`
+    queues into a second voice pool, the pool mixes into `notifBuf`, the
+    notification bus gain applies, and `play_notification_sounds` gates it.
+    Error-severity items play; warn and info do not. Proven by unit test —
+    **`notify_alert` has no sample, so nothing is verifiable by ear (§7 item 4)**.
+14. `events.go:56`'s comment is confirmed accurate rather than amended: all
+    three sources are now absorbed.
+15. Automated suite green: `go build` / `go vet` / `go test -race ./...` with
     `-tags purego`, `npx tsc --noEmit`, `vitest`, frontend production build.
-14. A manual verification checklist is written to
+16. A manual verification checklist is written to
     `docs/superpowers/plans/` covering everything §7 says is unobserved.
-15. `docs/ROADMAP.md`'s 7.2 row is updated; PROTO_GAPS #8 is confirmed
+17. `docs/ROADMAP.md`'s 7.2 row is updated; PROTO_GAPS #8 is confirmed
     unchanged.
 
 ---
@@ -613,9 +824,23 @@ designed-from-source values as such.
 through the funnels and asserting the resulting items, including §5.2's
 `Registered == true` guard.
 
+Audio adapter (`main.go`'s `notifyAudioState`, exercised through a test
+seam rather than `main`): the §5.4 projection — four independent keys raising
+and resolving independently; **`Overruns`/`Underruns` movement producing no
+notification at all**, which is the single most important audio test; and the
+no-backend DTO (both error fields set) raising both error keys.
+
+`internal/audio`, the sound engine (§3.8): `PlayNotification` queueing into
+the notification voice pool; the pool mixing into `notifBuf`; the
+notification bus gain applying; an unavailable id being a silent no-op; and
+`PlayNotification` on a stopped Manager dropping rather than lingering — each
+mirroring the existing `PlayEffect` / `sfx` tests. **These prove the path,
+not the sound: `notify_alert` has no sample, so nothing here is verifiable by
+ear (§7 item 4).**
+
 Frontend (`vitest`): `NotifRow` rendering each severity and an action;
 `NotificationsApp` filter, mark-all-read, clear-all and empty state;
-`ToastHost`'s StrictMode pair (DoD 10); badge and bell counts; keyboard
+`ToastHost`'s StrictMode pair (DoD 11); badge and bell counts; keyboard
 activation of all three clickable non-buttons.
 
 ---
