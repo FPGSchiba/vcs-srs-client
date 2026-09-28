@@ -18,6 +18,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
 	"github.com/FPGSchiba/vcs-srs-client/internal/session"
 	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 	"github.com/FPGSchiba/vcs-srs-client/pkg/logger"
@@ -158,6 +159,25 @@ func main() {
 	gui.SetConnHealth(monitor)
 	monitor.Start()
 	defer monitor.Stop()
+
+	// The notification channel. Constructed before the settings, joystick
+	// and audio backends because all three raise into it during their own
+	// wiring -- applyHotkeys runs inside SetSettingsBackend, and the
+	// joystick manager's first enumeration fires as soon as Start is called.
+	//
+	// OnSound is routed through gui rather than straight to the audio
+	// Manager: the Manager does not exist yet at this point, and the gate
+	// also has to consult general.play_notification_sounds, which lives in
+	// the settings backend. See app.PlayNotificationSFX.
+	notifEvents := vcsevents.New(emitter)
+	notifier := notify.New(notify.Options{
+		OnChange: func(s notify.Snapshot) { notifEvents.Notifications(s) },
+		OnSound:  func(it notify.Item) { _ = it }, // TASK 12: route to gui.PlayNotificationSFX
+	})
+	gui.SetNotifier(notifier)
+	// Cancels any armed trailing timer so a coalesced emit cannot fire into
+	// a torn-down event bus during shutdown.
+	defer notifier.StopTimers()
 
 	// session.New's construction above is unchanged. The observer is
 	// installed after the monitor exists, because the two halves need each

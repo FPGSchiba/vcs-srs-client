@@ -272,3 +272,29 @@ func TestSFXGateIsWiredIntoTheObserver(t *testing.T) {
 		t.Error("main.go does not call sfxGate.shouldPlay(...) -- PlayConnectionSFX would be ungated again")
 	}
 }
+
+// TestNotificationChannelIsWired guards the same failure mode as its
+// neighbours above -- TestJoystickBackendIsWired and TestAudioBackendIsWired
+// in particular: a fully-tested notification store (internal/notify, Task 2)
+// with a live App wiring point (SetNotifier, Task 6) that nothing in the
+// shipped binary ever constructs, leaving the whole channel inert while
+// every unit test in both packages passes.
+//
+// This is a source-text assertion, not a behavioural one, because no test
+// inside internal/notify or internal/app can observe whether main.go
+// actually builds a *notify.Notifier and hands it to the App -- exactly the
+// reasoning documented on TestJoystickBackendIsWired and readMainGo above.
+func TestNotificationChannelIsWired(t *testing.T) {
+	text := readMainGo(t)
+	for _, want := range []string{
+		"notify.New(",
+		"gui.SetNotifier(",
+		"notifEvents.Notifications(",
+		"OnSound:",
+		"defer notifier.StopTimers()",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("main.go does not call %s -- the notification channel would be inert", want)
+		}
+	}
+}
