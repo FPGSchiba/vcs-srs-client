@@ -127,7 +127,7 @@ func (n *Notifier) Raise(key string, item Item) { _ = n.raiseReport(key, item) }
 //
 // The bool exists for coalesce: a window must only be opened on a real edge.
 // Without it a source that re-emits a level far faster than its own window
-// -- NotifyAudioState calls raise-or-resolve for all four audio keys on
+// -- notifyAudioState calls raise-or-resolve for all four audio keys on
 // every audio:state emission, which on a healthy system is four no-op
 // Resolves every 2s -- would hold a 10s window permanently open on nothing,
 // and defer the first genuine device fault by a full window.
@@ -193,11 +193,42 @@ func (n *Notifier) raiseLocked(key string, item Item) (bool, string) {
 			item.Actions = []Action{}
 		}
 		n.items[idx] = item
-		delete(n.suppressed, key) // the condition changed: it is news again
+		// There is deliberately NO delete(n.suppressed, key) here, and its
+		// absence is the documented state of affairs rather than an
+		// oversight: this branch cannot be reached while a suppression
+		// entry for key exists, so a delete would be dead code and a
+		// comment claiming it lifts a suppression would describe an
+		// invariant the branch cannot observe.
+		//
+		// The branch requires an UNRESOLVED item under key. A suppression
+		// entry can never coexist with one:
+		//
+		//   - suppressed[K] is written only by Dismiss and Clear, only for
+		//     an item that is unresolved at that moment -- and both then
+		//     REMOVE that item from the list.
+		//   - at most one unresolved item exists per key, and it is the
+		//     newest: the new-occurrence branch below inserts one only when
+		//     findByKeyLocked misses or the newest is resolved, Resolve
+		//     marks the newest, and Post cannot create a keyed item at all
+		//     (it clears Key -- that line is load-bearing for THIS argument,
+		//     not only for Post's own separation from the condition path).
+		//
+		// So on reaching here, suppressed[key] is absent: it either never
+		// existed, or the identity check above returned, or the
+		// new-occurrence branch below already deleted it. Pinned by
+		// TestSuppressionNeverCoexistsWithAnUnresolvedItem.
 		return true, id
 	}
 
-	// No item, or the previous one is resolved: this is a new occurrence.
+	// No item, or the previous one is resolved: this is a new occurrence, so
+	// whatever the user dismissed is news again.
+	//
+	// This is the ONLY live delete of a dismissal suppression on the Raise
+	// path (Resolve has its own). Without it a condition dismissed at
+	// content A, changed to B, and then reverted to A would match the stale
+	// fingerprint and be suppressed for the life of the process, leaving the
+	// list showing a B that is no longer true. See
+	// TestARevertedConditionIsNotSuppressedByItsOwnStaleFingerprint.
 	delete(n.suppressed, key)
 	return true, n.insertLocked(item)
 }

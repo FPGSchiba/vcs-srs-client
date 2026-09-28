@@ -666,3 +666,271 @@ func TestDismissStillSuppressesWhenARaiseIsPending(t *testing.T) {
 		t.Fatalf("Items after the re-emission = %d, want 0 -- a condition that STILL HOLDS must stay suppressed after a dismissal", got)
 	}
 }
+
+// TestARevertedConditionIsNotSuppressedByItsOwnStaleFingerprint pins the
+// delete(n.suppressed, key) on raiseLocked's NEW-OCCURRENCE path. Removing
+// that line left the whole suite green.
+//
+// The sequence is ordinary: the user dismisses a fault at content A, the
+// fault then changes to content B (a different error string from the same
+// device is enough), and later reverts to A. Without the delete, the
+// suppression recorded at fingerprint(A) survives the B occurrence, so the
+// reverting Raise matches it and is swallowed -- and because Raise is the
+// only thing that would have updated the row, the list goes on showing a B
+// that is no longer true, for the life of the process.
+func TestARevertedConditionIsNotSuppressedByItsOwnStaleFingerprint(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	const key = "audio.input"
+	fault := func(body string) Item {
+		return Item{Category: "system", Severity: SeverityError, Icon: "mic",
+			Title: "Microphone unavailable", Body: body}
+	}
+
+	n.Raise(key, fault("device not found"))
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	n.Dismiss(items[0].ID) // suppressed at fingerprint(A)
+
+	// The fault CHANGES. A different fingerprint, so this is news again and
+	// a new occurrence -- which is exactly where the suppression must be
+	// dropped, because nothing else on this path will ever drop it.
+	n.Raise(key, fault("device is busy"))
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items = %d after the changed fault, want 1", got)
+	}
+
+	// The fault REVERTS to what the user dismissed. It is a live, currently
+	// true condition again, and the stale entry must not silence it.
+	n.Raise(key, fault("device not found"))
+
+	items = n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	if items[0].Body != "device not found" {
+		t.Fatalf("Body = %q, want %q -- the reverting Raise matched the fingerprint the "+
+			"user dismissed THREE states ago and was swallowed, so the row still shows a "+
+			"fault that is no longer the one occurring", items[0].Body, "device not found")
+	}
+}
+
+// TestSuppressionNeverCoexistsWithAnUnresolvedItem pins the invariant that
+// makes raiseLocked's in-place branch unable to observe a suppression entry
+// -- the reason that branch carries no delete(n.suppressed, key).
+//
+// If this ever fails, restore the delete: the in-place branch would then be
+// updating a row whose key is still suppressed, and the next identical Raise
+// would be swallowed by an entry the condition has already moved past.
+func TestSuppressionNeverCoexistsWithAnUnresolvedItem(t *testing.T) {
+	const key = "audio.input"
+	fault := func(body string) Item {
+		return Item{Category: "system", Severity: SeverityError, Title: "Microphone unavailable", Body: body}
+	}
+
+	check := func(t *testing.T, n *Notifier) {
+		t.Helper()
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if len(n.suppressed) == 0 {
+			t.Fatal("no suppression was recorded at all; this scenario is not exercising the invariant")
+		}
+		for k := range n.suppressed {
+			for _, it := range n.items {
+				if it.Key == k && !it.Resolved {
+					t.Fatalf("suppressed[%q] coexists with an UNRESOLVED item under the same "+
+						"key (%+v) -- raiseLocked's in-place branch is now reachable with a "+
+						"stale suppression present, and needs its delete back", k, it)
+				}
+			}
+		}
+	}
+
+	t.Run("dismiss of a lone unresolved item", func(t *testing.T) {
+		now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+		n := New(Options{Now: fixedClock(&now)})
+		n.Raise(key, fault("a"))
+		n.Dismiss(n.Snapshot().Items[0].ID)
+		check(t, n)
+	})
+
+	t.Run("dismiss with an older resolved item still under the key", func(t *testing.T) {
+		now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+		n := New(Options{Now: fixedClock(&now)})
+		// Two items end up sharing the key: Resolve retains the first, and
+		// the recurrence inserts a second rather than reviving it.
+		n.Raise(key, fault("a"))
+		n.Resolve(key)
+		n.Raise(key, fault("b"))
+		items := n.Snapshot().Items
+		if len(items) != 2 {
+			t.Fatalf("Items = %d, want 2 -- a recurrence is a new occurrence, not a revival", len(items))
+		}
+		n.Dismiss(items[0].ID) // the newest, which is the unresolved one
+		check(t, n)
+		// And the survivor is the RESOLVED one, so a differing Raise takes
+		// the new-occurrence branch rather than the in-place branch.
+		rest := n.Snapshot().Items
+		if len(rest) != 1 || !rest[0].Resolved {
+			t.Fatalf("remaining items = %+v, want exactly one RESOLVED item", rest)
+		}
+	})
+
+	t.Run("clear over a mixed list", func(t *testing.T) {
+		now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+		n := New(Options{Now: fixedClock(&now)})
+		n.Raise(key, fault("a"))
+		n.Raise("hotkeys.global", hotkeyItem("no backend"))
+		n.Post(Item{Title: "unkeyed", Severity: SeverityWarn})
+		n.Clear()
+		check(t, n)
+		if got := len(n.Snapshot().Items); got != 0 {
+			t.Fatalf("Items = %d after Clear, want 0", got)
+		}
+	})
+}
+
+// TestPostIsNeverAConditionEvenWhenHandedAKey pins Post's item.Key = "".
+// Removing it left the suite green, and it is load-bearing twice over: a
+// keyed Post would become findable by findByKeyLocked and start
+// participating in Raise dedupe, Resolve and dismissal suppression -- all of
+// which Post's own doc says it is separate from -- and it would break the
+// one-unresolved-item-per-key invariant raiseLocked's in-place branch relies
+// on for its missing suppression delete.
+func TestPostIsNeverAConditionEvenWhenHandedAKey(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	const key = "audio.input"
+	body := Item{Category: "system", Severity: SeverityError, Title: "Microphone unavailable", Body: "device not found"}
+
+	posted := body
+	posted.Key = key
+	postedID := n.Post(posted)
+
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	if items[0].Key != "" {
+		t.Fatalf("the posted item kept Key = %q -- a discrete event that carries a "+
+			"condition key is findable by findByKeyLocked and joins dedupe, resolution "+
+			"and dismissal suppression, none of which Post has any part in", items[0].Key)
+	}
+
+	// The condition path must not see it: an otherwise IDENTICAL Raise under
+	// that key is a separate, new item, not a dedupe against the Post.
+	n.Raise(key, body)
+	items = n.Snapshot().Items
+	if len(items) != 2 {
+		t.Fatalf("Items = %d, want 2 -- the Raise deduped against a POST, so the condition "+
+			"was never recorded and can never be resolved", len(items))
+	}
+
+	// Nor may Resolve reach the posted item.
+	n.Resolve(key)
+	for _, it := range n.Snapshot().Items {
+		if it.ID == postedID && it.Resolved {
+			t.Fatal("Resolve marked a POSTED item resolved -- a discrete event has no condition to clear")
+		}
+	}
+}
+
+// TestFingerprintCoversEveryActionField pins the Actions block in
+// fingerprint. Dropping it left the suite green, and the doc's claim is that
+// the hash covers everything the USER CAN SEE -- buttons included. Without
+// it, a Raise that changes only its action buttons dedupes as identical, so
+// the row keeps a button that no longer applies and no publish ever corrects
+// it.
+func TestFingerprintCoversEveryActionField(t *testing.T) {
+	base := Action{Label: "OPEN AUDIO SETTINGS", Icon: "settings", Kind: "navigate", Target: "settings"}
+	for _, tc := range []struct {
+		name string
+		next Action
+	}{
+		{"label", Action{Label: "RETRY", Icon: "settings", Kind: "navigate", Target: "settings"}},
+		{"icon", Action{Label: "OPEN AUDIO SETTINGS", Icon: "mic", Kind: "navigate", Target: "settings"}},
+		{"kind", Action{Label: "OPEN AUDIO SETTINGS", Icon: "settings", Kind: "open-window", Target: "settings"}},
+		{"target", Action{Label: "OPEN AUDIO SETTINGS", Icon: "settings", Kind: "navigate", Target: "comms"}},
+		{"primary", Action{Label: "OPEN AUDIO SETTINGS", Icon: "settings", Kind: "navigate", Target: "settings", Primary: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+			published := 0
+			n := New(Options{Now: fixedClock(&now), OnChange: func(Snapshot) { published++ }})
+
+			const key = "audio.input"
+			item := Item{Category: "system", Severity: SeverityWarn, Title: "Microphone unavailable"}
+			first := item
+			first.Actions = []Action{base}
+			n.Raise(key, first)
+
+			second := item
+			second.Actions = []Action{tc.next}
+			n.Raise(key, second)
+
+			if published != 2 {
+				t.Fatalf("OnChange fired %d times, want 2 -- a Raise that changes only its "+
+					"action buttons was deduped as identical", published)
+			}
+			got := n.Snapshot().Items[0].Actions
+			if len(got) != 1 || got[0] != tc.next {
+				t.Fatalf("Actions = %+v, want %+v -- the row is left showing a button the "+
+					"condition no longer offers", got, tc.next)
+			}
+		})
+	}
+}
+
+// TestFingerprintSeparatesAdjacentFields pins the h.Write([]byte{0}) after
+// every written part. Dropping it left the suite green while reintroducing
+// exactly the collision its own comment names: "ab"+"c" hashes the same as
+// "a"+"bc", so two genuinely different conditions share a fingerprint and
+// the second is deduped away as identical.
+func TestFingerprintSeparatesAdjacentFields(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second Item
+	}{
+		{
+			name:   "title/body boundary",
+			first:  Item{Severity: SeverityWarn, Title: "ab", Body: "c"},
+			second: Item{Severity: SeverityWarn, Title: "a", Body: "bc"},
+		},
+		{
+			name:   "context key/value boundary",
+			first:  Item{Severity: SeverityWarn, Title: "t", Context: []KV{{Key: "ab", Value: "c"}}},
+			second: Item{Severity: SeverityWarn, Title: "t", Context: []KV{{Key: "a", Value: "bc"}}},
+		},
+		{
+			name:   "action label/icon boundary",
+			first:  Item{Severity: SeverityWarn, Title: "t", Actions: []Action{{Label: "ab", Icon: "c"}}},
+			second: Item{Severity: SeverityWarn, Title: "t", Actions: []Action{{Label: "a", Icon: "bc"}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const key = "audio.input"
+			a, b := tc.first, tc.second
+			a.Key, b.Key = key, key
+			if fingerprint(a) == fingerprint(b) {
+				t.Fatalf("fingerprint collision between %+v and %+v -- adjacent fields are "+
+					"concatenated with no separator, so the second condition is deduped "+
+					"away as identical to the first and never reaches the user", a, b)
+			}
+
+			// And the consequence, through the public path.
+			now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+			n := New(Options{Now: fixedClock(&now)})
+			n.Raise(key, tc.first)
+			n.Raise(key, tc.second)
+			got := n.Snapshot().Items[0]
+			if got.Title != tc.second.Title || got.Body != tc.second.Body {
+				t.Fatalf("the row shows %q/%q, want the SECOND condition %q/%q",
+					got.Title, got.Body, tc.second.Title, tc.second.Body)
+			}
+		})
+	}
+}
