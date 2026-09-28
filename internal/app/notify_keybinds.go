@@ -118,17 +118,46 @@ func (a *App) notifyHotkeyState(dto HotkeyStateDTO) {
 		}, notify.WindowHotkeys)
 	}
 
-	// Resolve any per-binding item whose action is no longer failing. The
-	// previous snapshot is the notifier's own list, so this needs no extra
-	// bookkeeping here.
-	for _, it := range n.Snapshot().Items {
-		if it.Resolved || !isBindingKey(it.Key) {
-			continue
-		}
-		if _, still := failed[actionIDFromBindingKey(it.Key)]; !still {
-			n.ResolveWindowed(it.Key, notify.WindowHotkeys)
+	// Resolve any per-binding item whose action is no longer failing.
+	//
+	// Diffed against the adapter's OWN record of what it last raised, never
+	// against the notifier's list. Reading the list back out was a real bug:
+	// CLEAR ALL empties it, so the loop lost every key it had raised and the
+	// resolve -- the only thing that lifts a dismissal suppression -- could
+	// never fire again. See App.notifFailedBindings.
+	for _, id := range a.swapFailedBindings(failed) {
+		n.ResolveWindowed(bindingKey(id), notify.WindowHotkeys)
+	}
+}
+
+// swapFailedBindings records failed as the per-binding failure set this
+// adapter has now raised, and returns the sorted action ids that were in the
+// PREVIOUS set and are not in this one -- i.e. exactly the bindings whose
+// notification should now resolve.
+//
+// Sorted for the same reason the raise loop sorts: a deterministic emit
+// order makes the resulting list order stable across runs and testable.
+// notifMu is released before the caller touches the notifier, keeping this
+// lock off every path that publishes.
+func (a *App) swapFailedBindings(failed map[string]string) []string {
+	next := make(map[string]struct{}, len(failed))
+	for id := range failed {
+		next[id] = struct{}{}
+	}
+
+	a.notifMu.Lock()
+	prev := a.notifFailedBindings
+	a.notifFailedBindings = next
+	a.notifMu.Unlock()
+
+	gone := make([]string, 0, len(prev))
+	for id := range prev {
+		if _, still := next[id]; !still {
+			gone = append(gone, id)
 		}
 	}
+	sort.Strings(gone)
+	return gone
 }
 
 // notifyJoystickState translates one JoystickStateDTO into notifications.
@@ -187,13 +216,7 @@ const (
 
 func bindingKey(actionID string) string { return bindingKeyPrefix + actionID }
 
-func isBindingKey(key string) bool {
-	return len(key) > len(bindingKeyPrefix) && key[:len(bindingKeyPrefix)] == bindingKeyPrefix
-}
-
-func actionIDFromBindingKey(key string) string {
-	if !isBindingKey(key) {
-		return ""
-	}
-	return key[len(bindingKeyPrefix):]
-}
+// There is deliberately no inverse (isBindingKey/actionIDFromBindingKey).
+// The pair existed solely so the resolve loop could recover action ids by
+// parsing keys out of the notifier's list; swapFailedBindings keeps the ids
+// themselves, so nothing ever has to read a key backwards.

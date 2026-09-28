@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -97,6 +98,27 @@ type App struct {
 	// suite. See setNotifyWindows.
 	notifWinJoystick time.Duration
 	notifWinAudio    time.Duration
+
+	// notifMu guards notifFailedBindings. Its own mutex, in the same style
+	// as presscount's and windowRegistry's: it protects exactly one piece of
+	// state, it is never held across a call into the notifier, and it is
+	// deliberately not settingsBackend.mu, which emitHotkeyState's callers
+	// have already released by the time they reach this path.
+	notifMu sync.Mutex
+
+	// notifFailedBindings is the per-binding failure set the LAST
+	// notifyHotkeyState raised, and it is the adapter's own memory on
+	// purpose.
+	//
+	// It used to be derived by reading the notifier's list back out
+	// (n.Snapshot().Items). That coupled the adapter's memory to a surface
+	// the USER can empty: CLEAR ALL emptied the list, so the resolve loop
+	// could no longer see which bindings it had raised, and the matching
+	// ResolveWindowed -- the only thing that lifts dismissal suppression --
+	// could never fire again. A binding warning cleared that way never
+	// returned, for the life of the process. State a sink can drop is not a
+	// source of truth; the adapter keeps its own.
+	notifFailedBindings map[string]struct{}
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.

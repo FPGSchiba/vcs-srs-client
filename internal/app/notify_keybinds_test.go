@@ -204,3 +204,69 @@ func TestNotifyWithNoNotifierDoesNotPanic(t *testing.T) {
 	a.notifyHotkeyState(HotkeyStateDTO{Registered: false, Error: "e"})
 	a.notifyJoystickState(JoystickStateDTO{Supported: false})
 }
+
+func TestPerBindingFailureReturnsAfterClearAll(t *testing.T) {
+	a, n := withNotifier(t)
+
+	failing := HotkeyStateDTO{
+		Registered: true,
+		Failed:     map[string]string{"global.ptt": "unsupported key"},
+		Permission: "granted",
+	}
+	a.notifyHotkeyState(failing)
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items = %d, want 1 before CLEAR ALL", got)
+	}
+
+	// The user presses CLEAR ALL. The chord is STILL unregisterable, so the
+	// warning is expected back the next time the state is emitted -- once
+	// the condition has been through a clear-and-recur cycle. Without the
+	// adapter's own memory the resolve loop lost the key with the list, so
+	// the dismissal suppression Clear installed could never be lifted and
+	// the warning never returned, for the life of the process.
+	n.Clear()
+
+	// A rebind that fixes the chord, then breaks it again: exactly what the
+	// user does next.
+	a.notifyHotkeyState(HotkeyStateDTO{Registered: true, Failed: map[string]string{}, Permission: "granted"})
+	a.notifyHotkeyState(failing)
+
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1 -- the per-binding warning never came back after CLEAR ALL", len(items))
+	}
+	if items[0].Resolved {
+		t.Fatal("the returning warning is already resolved")
+	}
+	if items[0].Key != bindingKey("global.ptt") {
+		t.Fatalf("Key = %q, want %q", items[0].Key, bindingKey("global.ptt"))
+	}
+}
+
+func TestPerBindingResolveSurvivesClearAll(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.notifyHotkeyState(HotkeyStateDTO{
+		Registered: true,
+		Failed:     map[string]string{"global.ptt": "unsupported key"},
+		Permission: "granted",
+	})
+	n.Clear()
+
+	// The action stops failing. The resolve must still fire even though the
+	// list the old implementation read its previous state out of is empty --
+	// a Resolve is the ONLY thing that lifts Clear's suppression, so losing
+	// it is what made the mute permanent.
+	a.notifyHotkeyState(HotkeyStateDTO{Registered: true, Failed: map[string]string{}, Permission: "granted"})
+
+	// The same condition recurs, byte-identically.
+	a.notifyHotkeyState(HotkeyStateDTO{
+		Registered: true,
+		Failed:     map[string]string{"global.ptt": "unsupported key"},
+		Permission: "granted",
+	})
+
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items = %d, want 1 -- CLEAR ALL permanently disabled this binding's warning", got)
+	}
+}
