@@ -312,13 +312,13 @@ lists, and still reaches `emitState()` at `manager.go:720`. The only error
 `Start` returns is `ErrStartInProgress` from a concurrent call, which
 `main.go` cannot produce.)
 
-Wiring: `gui.SetNotifier(n)` in `main.go`, alongside the existing
+Wiring: `app.SetNotifier(gui, n)` in `main.go`, alongside the existing
 `SetConnHealth` / `SetSettingsBackend` / `SetJoystickBackend` calls. A nil
 notifier is legal and inert, so every existing test constructing an `App`
 without one keeps compiling.
 
-**The two adapters `main.go` drives are reached through package-level
-functions, not methods on `App`.** `main.go` registers `gui` with
+**The wiring call and the two adapters `main.go` drives are reached through
+package-level functions, not methods on `App`.** `main.go` registers `gui` with
 `application.NewService`, so every exported *method* on `*App` is callable
 from the webview. `app.NotifyAudioState(gui, dto)` and
 `app.PlayNotificationSFX(gui, severity)` are package-level, and the methods
@@ -330,7 +330,37 @@ alert sound on demand, or — by passing a clean DTO — silently *resolve* a
 genuine microphone fault out of the user's list. The renderer is
 first-party, so the impact was low; applying the branch's own rule
 consistently is the point. Pinned by
-`TestNotificationAdaptersStayOffTheBoundServiceSurface`.
+`TestNotificationAdaptersStayOffTheBoundServiceSurface` (call sites, by
+source text over `main.go`) and by `internal/app`'s
+`TestNotificationSeamsAreNotOnTheExportedMethodSet` (the invariant itself,
+by reflection over `reflect.TypeOf(&App{})`'s exported method set). Both are
+needed: the first catches a call site reverting to the method form, the
+second catches the method being re-added with no `main.go` caller.
+
+**Fix wave 6 extended the same rule to the wiring setter, which was the
+worst offender of the three.** `SetNotifier` and a `Notifier()` accessor
+beside it were both bound. A renderer call to `SetNotifier(null)` sets
+`a.notif = nil`, after which every notification binding and every adapter in
+`internal/app` early-returns — the whole channel goes silently dead for the
+session: no badge, no bell, no toast, no sound, nothing logged. That is
+strictly more than either adapter allowed. `SetNotifier` is now the same
+package-level-function-plus-unexported-method pair as the adapters.
+`Notifier()` was **deleted**: it had zero callers in Go and zero in
+TypeScript, in every commit on this branch, and its doc named a `main.go`
+audio adapter that ruling R24 had already moved into `internal/app`.
+
+**Scope note — the pre-existing `Set*` wiring methods are deliberately
+untouched.** `SetApp`, `SetBackend`, `SetSettingsBackend`,
+`SetJoystickBackend`, `SetConnHealth` and their siblings all predate this
+branch (they exist at the branch point, `ed35789`) and every one of them is
+an exported method on the bound service, carrying exactly the same exposure
+as `SetNotifier` did: the renderer can hand any of them `null` and disable
+that subsystem for the session. Converting them is a mechanical but
+cross-cutting change that touches wiring this phase does not otherwise go
+near, and doing it under a notification-channel branch would make the
+whole-branch diff unreviewable. Recorded here as a known, deliberate gap for
+a separate pass, not as an oversight. Only `SetNotifier`, new on this
+branch, was in scope.
 
 ### 3.4 Action kinds are a closed set
 
@@ -367,7 +397,10 @@ small, and it removes a class of frontend/backend divergence bug" — with the
 
 Bindings on `App`: `GetNotifications()`, `MarkNotificationRead(id)`,
 `MarkAllNotificationsRead()`, `DismissNotification(id)`,
-`ClearNotifications()`.
+`ClearNotifications()`. Plus `FocusMainWindow()`, which a notification's
+`navigate` action needs from the popout. That list is exhaustive: `§3.3`'s
+seams — `SetNotifier`, `NotifyAudioState`, `PlayNotificationSFX` — are
+package-level functions and are bound by nothing.
 
 ### 3.7 Concurrency
 

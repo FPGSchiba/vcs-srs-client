@@ -81,7 +81,7 @@ func withCountingNotifier(t *testing.T) (*App, *notify.Notifier, *notifyCounts) 
 			c.mu.Unlock()
 		},
 	})
-	a.SetNotifier(n)
+	a.setNotifier(n)
 	t.Cleanup(n.StopTimers)
 	return a, n, c
 }

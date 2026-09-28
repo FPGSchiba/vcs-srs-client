@@ -2,15 +2,38 @@ package app
 
 import "github.com/FPGSchiba/vcs-srs-client/internal/notify"
 
-// SetNotifier wires the notification channel. A nil notifier is legal and
+// setNotifier wires the notification channel. A nil notifier is legal and
 // leaves every binding below inert, so a build whose wiring failed degrades
 // to "no notifications" rather than crashing.
-func (a *App) SetNotifier(n *notify.Notifier) { a.notif = n }
+//
+// UNEXPORTED, and reached from main.go through the package-level SetNotifier
+// below. application.NewService(gui) binds every exported METHOD on *App
+// into the webview, and a bound wiring setter is strictly worse than the two
+// adapters ruling R13 and M-9 already moved off this surface: those let the
+// renderer fabricate or resolve ONE item, whereas SetNotifier(null) sets
+// a.notif to nil, after which every binding and every adapter in this
+// package early-returns -- no badge, no bell, no toast, no sound, for the
+// rest of the session, with nothing logged to explain it.
+func (a *App) setNotifier(n *notify.Notifier) { a.notif = n }
 
-// Notifier returns the wired channel, or nil. Used by main.go's audio
-// adapter, which sits outside internal/app because audio has two emit sites
-// and only one of them is a Manager callback.
-func (a *App) Notifier() *notify.Notifier { return a.notif }
+// SetNotifier wires the notification channel into the App. main.go calls it
+// once, at startup.
+//
+// A package-level FUNCTION taking the App, rather than a method on it, for
+// the reason setNotifier documents: nothing package-level is bound by
+// application.NewService, so main.go keeps its call and the renderer gains
+// nothing. The same seam as NotifyAudioState and PlayNotificationSFX.
+//
+// There is deliberately no exported Notifier() accessor beside it. One
+// existed until fix wave 6 and had never had a caller in any commit on this
+// branch -- its doc named an audio adapter in main.go that ruling R24 had
+// since moved INTO this package -- while being just as bound as this setter.
+//
+// SCOPE NOTE: the Set*-for-wiring pattern is older than this branch --
+// SetApp, SetBackend, SetSettingsBackend and their siblings are all exported
+// methods on the bound service and all carry the same exposure. They are
+// deliberately left alone here; see the Phase 7.2 spec's note.
+func SetNotifier(a *App, n *notify.Notifier) { a.setNotifier(n) }
 
 // GetNotifications returns the current snapshot for a window hydrating on
 // mount. Returns an empty, non-nil list when nothing is wired: the frontend

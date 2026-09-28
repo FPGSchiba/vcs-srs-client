@@ -14,7 +14,7 @@ func withNotifier(t *testing.T) (*App, *notify.Notifier) {
 	t.Helper()
 	a := NewForTest(state.New(), nil, nil)
 	n := notify.New(notify.Options{})
-	a.SetNotifier(n)
+	a.setNotifier(n)
 	return a, n
 }
 

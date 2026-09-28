@@ -328,7 +328,7 @@ func TestSFXGateIsWiredIntoTheObserver(t *testing.T) {
 // TestNotificationChannelIsWired guards the same failure mode as its
 // neighbours above -- TestJoystickBackendIsWired and TestAudioBackendIsWired
 // in particular: a fully-tested notification store (internal/notify, Task 2)
-// with a live App wiring point (SetNotifier, Task 6) that nothing in the
+// with a live App wiring point (app.SetNotifier, Task 6) that nothing in the
 // shipped binary ever constructs, leaving the whole channel inert while
 // every unit test in both packages passes.
 //
@@ -340,7 +340,7 @@ func TestNotificationChannelIsWired(t *testing.T) {
 	text := readMainGo(t)
 	for _, want := range []string{
 		"notify.New(",
-		"gui.SetNotifier(",
+		"app.SetNotifier(gui, ",
 		"notifEvents.Notifications(",
 		"OnSound:",
 		"defer notifier.StopTimers()",
@@ -413,14 +413,26 @@ func TestAudioNotificationAdapterIsWiredAtBothEmitSites(t *testing.T) {
 // microphone fault out of the user's list. The renderer is first-party, so
 // the impact is low; the inconsistency was the finding.
 //
+// Fix wave 6 extended the rule to SetNotifier, which was worse than either
+// adapter: a bound SetNotifier(null) sets a.notif to nil and silences the
+// ENTIRE channel for the session. The dead Notifier() accessor beside it was
+// deleted outright.
+//
 // A source-text assertion for the reason all its siblings here are: the
-// binding surface is decided by main.go, and no test inside internal/app can
-// see whether a call site went back to the method form.
+// CALL SITES live in main.go, and no test inside internal/app can see
+// whether one went back to the method form. The complementary invariant --
+// that no such method exists on *App to call in the first place -- is
+// asserted directly, by reflection over the exported method set, in
+// internal/app's TestNotificationSeamsAreNotOnTheExportedMethodSet. Both are
+// needed: this one catches a call site regressing, that one catches the
+// method being re-added.
 func TestNotificationAdaptersStayOffTheBoundServiceSurface(t *testing.T) {
 	text := readMainGo(t)
 	for _, banned := range []string{
 		"gui.NotifyAudioState(",
 		"gui.PlayNotificationSFX(",
+		"gui.SetNotifier(",
+		"gui.Notifier(",
 	} {
 		if strings.Contains(text, banned) {
 			t.Errorf("main.go calls %s -- that method form is bound into the webview by "+

@@ -176,7 +176,7 @@ func main() {
 		OnChange: func(s notify.Snapshot) { notifEvents.Notifications(s) },
 		OnSound:  func(it notify.Item) { app.PlayNotificationSFX(gui, string(it.Severity)) },
 	})
-	gui.SetNotifier(notifier)
+	app.SetNotifier(gui, notifier)
 	// Cancels every armed trailing timer on shutdown.
 	//
 	// Registered HERE, before the joystick manager's Close and the audio
