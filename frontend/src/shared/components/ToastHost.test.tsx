@@ -81,10 +81,15 @@ describe("ToastHost", () => {
     });
     act(() => {
       // A full Snapshot is broadcast on EVERY change, including changes to
-      // other items. Re-toasting on each would turn one failure into a
-      // stream of identical toasts.
-      useNotifications.setState({ snap: { ...snap } });
-      useNotifications.setState({ snap: { ...snap } });
+      // other items -- and the real backend delivers a FRESH array on every
+      // `notifications:changed` (a freshly deserialized JSON payload), never
+      // the same reference twice. Spreading only the top level here would
+      // keep `snap.items` as the SAME array, which the `items` selector
+      // would never see as a change -- making this assertion vacuous even
+      // if the "toasted once" guard were deleted entirely. Rebuild the
+      // array so the effect genuinely re-fires.
+      useNotifications.setState({ snap: { items: [...snap.items], unread: 1 } });
+      useNotifications.setState({ snap: { items: [...snap.items], unread: 1 } });
     });
 
     expect(screen.getAllByText("Global hotkeys unavailable")).toHaveLength(1);
@@ -110,6 +115,29 @@ describe("ToastHost", () => {
     const dismissTimers = setSpy.mock.calls.filter((c) => c[1] === 6500);
     expect(dismissTimers).toHaveLength(1);
     setSpy.mockRestore();
+  });
+
+  it("still dismisses a toast under StrictMode when the item was already present at first mount", () => {
+    // The more StrictMode-idiomatic reproduction: seed the store BEFORE the
+    // first render, not after. StrictMode mounts, cleans up and remounts
+    // every effect for that first commit -- the cleanup effect can clear the
+    // just-scheduled timer, and since the `seen` ref survives that cycle,
+    // the item would never get its timer rescheduled without the repair
+    // clause in the items-effect. Without the fix this toast never
+    // disappears.
+    useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    render(
+      <StrictMode>
+        <ToastHost />
+      </StrictMode>,
+    );
+    expect(screen.getByText("Global hotkeys unavailable")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(6500);
+    });
+
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
   });
 
   it("clears its timers exactly once on a real unmount", () => {

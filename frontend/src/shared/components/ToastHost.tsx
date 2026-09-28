@@ -51,13 +51,22 @@ export function ToastHost() {
     const fresh = items.filter(
       (i) => i.severity === "error" && !i.resolved && !seen.current.has(i.id),
     );
-    if (fresh.length === 0) return;
+    for (const i of fresh) seen.current.add(i.id);
 
-    for (const i of fresh) {
-      seen.current.add(i.id);
-      // Guard against a double-schedule. StrictMode runs every effect
-      // twice, and a second timer for the same id would fire into a toast
-      // a later item may already have replaced.
+    // Restore the invariant "every item this host has ever toasted, that is
+    // still present and unresolved, has a live dismiss timer" -- rather than
+    // assuming it holds. StrictMode mounts, cleans up and remounts every
+    // effect: the cleanup below can clear a just-created timer before this
+    // effect's remount runs, and since `seen` is a ref that survives that
+    // cycle, the `fresh` filter above would skip the item on remount and it
+    // would never get its timer back. Driving the repair off `items` +
+    // `seen` (both already correct within this same invocation) rather than
+    // the `visible` STATE sidesteps a further hazard: `visible` may not yet
+    // reflect a `setVisible` call queued earlier in this very effect run.
+    const stillToasted = items.filter((i) => seen.current.has(i.id) && !i.resolved);
+    for (const i of stillToasted) {
+      // Guard against a double-schedule. A second timer for the same id
+      // would fire into a toast a later item may already have replaced.
       if (timers.current.has(i.id)) continue;
       timers.current.set(
         i.id,
@@ -67,7 +76,10 @@ export function ToastHost() {
         }, DISMISS_MS),
       );
     }
-    setVisible((cur) => [...cur, ...fresh]);
+
+    if (fresh.length > 0) {
+      setVisible((cur) => [...cur, ...fresh]);
+    }
   }, [items]);
 
   // Real-unmount cleanup, kept SEPARATE from the effect above so it runs

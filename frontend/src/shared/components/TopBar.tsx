@@ -42,12 +42,14 @@ const POPOUT_LAUNCHERS: Launcher[] = [
 
 /**
  * TopBar is the post-login application title bar, ported from the design
- * prototype's `shell.jsx` TopBar. The launcher strip currently wires only the
- * Comms pop-out (`api.openWindow("comms")`); the remaining launchers render but
- * are disabled placeholders for later phases. The user/callsign identity store
- * is not wired yet, so the user-menu trigger shows placeholder text. The
- * `.topbar` className carries the drag region from the ported CSS. classNames
- * are kept byte-identical to the design so the ported CSS applies unchanged.
+ * prototype's `shell.jsx` TopBar. The launcher strip wires `comms` and
+ * `notifications` through `api.toggleWindow`; `fleet`, `ship` and `messages`
+ * remain disabled placeholders for later phases. The `notifications`
+ * launcher additionally carries an unread badge. The user/callsign identity
+ * store is not wired yet, so the user-menu trigger shows placeholder text.
+ * The `.topbar` className carries the drag region from the ported CSS.
+ * classNames are kept byte-identical to the design so the ported CSS
+ * applies unchanged.
  */
 const CONN_PILL: Record<Conn, { cls: string; label: string }> = {
   connected: { cls: "conn-pill", label: "CONNECTED" },
