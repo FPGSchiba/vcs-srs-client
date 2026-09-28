@@ -1859,3 +1859,92 @@ func TestNotificationVoicePoolMixesIntoItsBuffer(t *testing.T) {
 		t.Fatalf("dst[0] = %v, want 0.5 -- the pool must mix a present sample into the notification buffer", dst[0])
 	}
 }
+
+// TestDSPLoopMixesNotificationsIntoPlayback is the ONLY guard on the audio
+// half of the seam this phase exists to build: dspLoop filling notifBuf from
+// this generation's notification voice pool.
+//
+// Deleting `clear(notifBuf); notifVoices.mixInto(...)` from dspLoop used to
+// leave the entire suite green. PlayNotification still queued, Available
+// still answered true, and the pool's own unit test still passed -- it
+// drives the pool directly and never the loop -- so the alert would have
+// gone permanently inaudible with nothing failing. Nobody could catch it by
+// ear either: notify_alert.wav does not exist (spec 9), so the slot is
+// silent in production until the pack lands.
+//
+// It is the notification-bus sibling of TestDSPLoopMixesTheRegisteredSource,
+// and belongs to the same family as TestAudioBackendIsWired and
+// TestVoiceBridgeIsWiredAsBothSinkAndSource: prove the wire, not the part.
+//
+// The sample is injected straight into m.notif.samples (same package, so the
+// unexported map is reachable) BEFORE Start, exactly as
+// TestPlayNotificationOnStoppedManagerDrops does. No WAV may be created:
+// the pack is the project's to supply and must not be substituted.
+func TestDSPLoopMixesNotificationsIntoPlayback(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	m.notif.samples[NotifyAlert] = dcFrame(0.5)
+	if !m.notif.Available(NotifyAlert) {
+		t.Fatal("the injected sample did not make NotifyAlert available; this test would be vacuous")
+	}
+	// Master and Notification both at 1, and taper(1) is 1, so the sample
+	// must arrive at the output unchanged. Voice and SFX stay at 0 so
+	// nothing else can account for a non-silent frame.
+	m.SetConfig(Config{Levels: Levels{Master: 1, Notification: 1}})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	m.PlayNotification(NotifyAlert)
+	tick <- time.Now()
+	tick <- time.Now() // returns only once the first iteration finished
+	out := readPlayback(t, m)
+
+	for i, v := range out {
+		if v < 0.49 || v > 0.51 {
+			t.Fatalf("playback sample %d = %v, want ~0.5 -- a queued notification must reach the output through dspLoop's notifBuf fill", i, v)
+		}
+	}
+}
+
+// TestDSPLoopClearsTheNotificationBufferBetweenTicks is the notification
+// bus's counterpart to TestDSPLoopClearsTheSourceBufferWhenTheSourceGoesAway.
+// notifBuf is allocated once per generation and reused, so a loop that mixed
+// without clearing would hold the last alert's final frame under everything
+// forever -- a permanent tone on the output.
+func TestDSPLoopClearsTheNotificationBufferBetweenTicks(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	m.notif.samples[NotifyAlert] = dcFrame(0.5)
+	m.SetConfig(Config{Levels: Levels{Master: 1, Notification: 1}})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	m.PlayNotification(NotifyAlert)
+	tick <- time.Now()
+	tick <- time.Now()
+	tick <- time.Now() // returns only once the second iteration finished
+
+	readPlayback(t, m) // the alert frame
+	out := readPlayback(t, m)
+	for i, v := range out {
+		if v < -0.001 || v > 0.001 {
+			t.Fatalf("playback sample %d = %v after the one-shot ended, want silence -- notifBuf must be cleared each tick", i, v)
+		}
+	}
+}
