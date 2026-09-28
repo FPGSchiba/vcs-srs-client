@@ -111,15 +111,56 @@ func dialerFor(serverURL, caFile string) (Dialer, error) {
 		return nil, err
 	}
 	return func(ctx context.Context) (*grpc.ClientConn, error) {
-		return grpc.DialContext(ctx, serverURL,
+		conn, err := grpc.DialContext(ctx, serverURL,
 			grpc.WithTransportCredentials(creds),
 			keepaliveOption(),
-			grpc.WithBlock(),
+			// Replaces WithBlock. It blocks identically, but returns the last
+			// connection error instead of a bare context deadline. Without it
+			// every TLS failure reaches the user as "context deadline
+			// exceeded" and explainDialError has nothing to work with.
+			grpc.WithReturnConnectionError(),
 		)
+		if err != nil {
+			return nil, explainDialError(err, serverURL, caFile)
+		}
+		return conn, nil
 	}, nil
 }
 
 func isLocal(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1" ||
 		strings.HasPrefix(host, "127.")
+}
+
+// explainDialError turns a gRPC transport failure into something a user can
+// act on.
+//
+// The cases are matched on crypto/tls and crypto/x509 error TEXT because
+// gRPC surfaces them as an opaque wrapped string with no typed cause to
+// inspect -- there is no errors.As target available here. That is fragile by
+// nature, so the default is the original error: a change in Go's wording
+// degrades the message rather than hiding the failure or mislabelling it.
+//
+// The original is always wrapped, never replaced, so errors.Is still reaches
+// it for the log.
+func explainDialError(err error, serverURL, caFile string) error {
+	if err == nil {
+		return nil
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "first record does not look like a TLS handshake"):
+		return fmt.Errorf("%s is not speaking TLS -- the server most likely has no clientTLS block configured: %w", serverURL, err)
+
+	case strings.Contains(s, "certificate is valid for"):
+		return fmt.Errorf("%s presented a certificate for a different name -- connect by the server's hostname, or have its certificate reissued with this address in the SANs: %w", serverURL, err)
+
+	case strings.Contains(s, "certificate signed by unknown authority"),
+		strings.Contains(s, "failed to verify certificate"):
+		if caFile != "" {
+			return fmt.Errorf("%s presented a certificate not issued by the authority in tls_ca_file %q: %w", serverURL, caFile, err)
+		}
+		return fmt.Errorf("%s presented a certificate that no system root trusts -- if this is a self-hosted server, point tls_ca_file at its certificate: %w", serverURL, err)
+	}
+	return err
 }

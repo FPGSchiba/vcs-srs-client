@@ -137,3 +137,28 @@ func TestTLS_ClientAgainstPlaintextServerFails(t *testing.T) {
 		t.Fatalf("expected a not-a-TLS-handshake failure, got: %v", err)
 	}
 }
+
+func TestTLS_PlaintextServerProducesTheExplainedError(t *testing.T) {
+	// Proves the wrapping is actually reached through the real dial path,
+	// not merely unit-tested in isolation -- and that
+	// WithReturnConnectionError really does surface the TLS cause rather
+	// than a context deadline.
+	cert := grpctest.NewTestCert(t, "localhost")
+	dialWith, cleanup := grpctest.StartWith(t, &grpctest.Fake{}, nil) // plaintext
+	t.Cleanup(cleanup)
+
+	clientCreds := credentials.NewTLS(&tls.Config{
+		RootCAs:    cert.Pool(),
+		ServerName: "localhost",
+		MinVersion: tls.VersionTLS12,
+	})
+
+	_, err := dialWith(refusalCtx(t), clientCreds)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	explained := explainDialError(err, "srs.example.org:5002", "")
+	if !strings.Contains(explained.Error(), "not speaking TLS") {
+		t.Fatalf("expected the plaintext-server diagnosis, got: %v", explained)
+	}
+}
