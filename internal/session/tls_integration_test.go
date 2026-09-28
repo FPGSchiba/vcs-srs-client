@@ -19,6 +19,21 @@ func dialCtx(t *testing.T) context.Context {
 	return ctx
 }
 
+// refusalCtx is for the tests below that expect the handshake to be refused.
+// grpc.DialContext without WithBlock retries with backoff until the context
+// deadline, and grpc.WithReturnConnectionError only surfaces the underlying
+// error once that deadline is hit -- so the wait is bounded by this
+// deadline, not by how fast the handshake itself fails. 500ms was confirmed
+// to still surface the identical handshake errors these tests assert on;
+// using it instead of dialCtx's 5s keeps three refusal tests from adding
+// ~15s to every run of this package.
+func refusalCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestTLS_TrustedCertificateConnects(t *testing.T) {
 	cert := grpctest.NewTestCert(t, "localhost")
 	dialWith, cleanup := grpctest.StartWith(t, &grpctest.Fake{}, credentials.NewServerTLSFromCert(&cert.Certificate))
@@ -63,10 +78,16 @@ func TestTLS_UntrustedCertificateIsRefused(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 	})
 
-	conn, err := dialWith(dialCtx(t), clientCreds)
+	conn, err := dialWith(refusalCtx(t), clientCreds)
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("expected a certificate signed by an untrusted issuer to be refused")
+	}
+	// Pins the failure to the untrusted-issuer verification path, not merely
+	// to "some error" -- a broken harness (e.g. a server that never started)
+	// would also produce a non-nil error here.
+	if !strings.Contains(err.Error(), "unknown authority") {
+		t.Fatalf("expected an unknown-authority verification failure, got: %v", err)
 	}
 }
 
@@ -81,7 +102,7 @@ func TestTLS_HostnameMismatchIsRefused(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 	})
 
-	conn, err := dialWith(dialCtx(t), clientCreds)
+	conn, err := dialWith(refusalCtx(t), clientCreds)
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("expected a certificate valid for a different name to be refused")
@@ -104,9 +125,15 @@ func TestTLS_ClientAgainstPlaintextServerFails(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 	})
 
-	conn, err := dialWith(dialCtx(t), clientCreds)
+	conn, err := dialWith(refusalCtx(t), clientCreds)
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("expected a TLS client against a plaintext server to fail")
+	}
+	// Pins the failure to the TLS client speaking to a plaintext peer, not
+	// merely to "some error" -- a broken harness (e.g. a closed bufconn)
+	// would also produce a non-nil error here.
+	if !strings.Contains(err.Error(), "first record does not look like a TLS handshake") {
+		t.Fatalf("expected a not-a-TLS-handshake failure, got: %v", err)
 	}
 }

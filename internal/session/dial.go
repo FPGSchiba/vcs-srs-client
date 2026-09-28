@@ -80,6 +80,14 @@ func transportCredentials(host, caFile string) (credentials.TransportCredentials
 		if !pool.AppendCertsFromPEM(pemBytes) {
 			return nil, fmt.Errorf("tls_ca_file %q contains no PEM certificate", caFile)
 		}
+		// MinVersion is set explicitly (and again below) even though
+		// credentials.NewTLS already defaults an unset MinVersion to TLS 1.2
+		// itself: this future-proofs against a grpc-go that stops doing so.
+		// It has no dedicated test -- grpc-go's identical default makes the
+		// two indistinguishable from any public accessor, handshake, or even
+		// reflection into the credentials' own private config, so no test
+		// could tell "we set it" apart from "grpc-go defaulted it" and catch
+		// a regression here.
 		return credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}), nil
 	}
 	if isLocal(host) {

@@ -151,6 +151,15 @@ func (f *Fake) LastRadioInfo() *srspb.RadioInfo {
 
 // Start launches the fake on a plaintext bufconn and returns a dialer +
 // cleanup. Preserved for the tests written before TLS existed.
+//
+// Its dialer is now BLOCKING where it was previously lazy: StartWith's
+// grpc.WithReturnConnectionError() implies WithBlock(), so the returned
+// dial func waits for the connection attempt to resolve instead of handing
+// back an unconnected *grpc.ClientConn immediately. Every existing caller
+// already passes a context with a deadline or awaits the result, so this is
+// unobserved today -- but a future caller dialing with a cancelled or very
+// short-lived context would now see that context's error instead of a
+// nil-error, not-yet-connected ClientConn.
 func Start(t *testing.T, f *Fake) (dial func(context.Context) (*grpc.ClientConn, error), cleanup func()) {
 	t.Helper()
 	dialWith, cleanup := StartWith(t, f, nil)
