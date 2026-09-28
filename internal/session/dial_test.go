@@ -1,12 +1,18 @@
 package session
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
 )
@@ -129,5 +135,56 @@ func TestDialerFor_AddressValidation(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestDialerFor_BoundsAnUnreachableDial proves boundedDial -- the function
+// behind dialerFor's returned closure -- returns even when the CALLER passes
+// context.Background(), as internal/app's Connect and Reconnect do. Without
+// the context.WithTimeout(ctx, dialTimeout) wrapping in boundedDial, a
+// grpc.DialContext using grpc.WithReturnConnectionError() retries a
+// persistently-failing dial forever, blocking on a background context that
+// never expires -- and explainDialError's diagnosis is never reached because
+// the dial never returns.
+//
+// The "unreachable target" here is a bufconn.Listener nobody ever Accepts
+// on: DialContext sends the new connection on an UNBUFFERED channel that
+// only Accept reads from, so with no Accept call that send -- and therefore
+// the whole dial -- blocks until the context is done. A real closed socket
+// would demonstrate the same thing, but net.Listen and net.Dial to a real
+// address are blocked by bind/connect restrictions in the development
+// sandbox this was written in (see grpctest.StartWith's doc comment for the
+// identical constraint); an unaccepted bufconn achieves the same "never
+// resolves on its own" property with no real socket at all.
+//
+// dialTimeout is shrunk here so this test does not spend the real 10s
+// production value on every run; the mechanism under test -- a caller
+// context with no deadline of its own still gets bounded -- is identical at
+// any duration. Removing the context.WithTimeout call in boundedDial makes
+// this test hang until its own guard fires and fail.
+func TestDialerFor_BoundsAnUnreachableDial(t *testing.T) {
+	orig := dialTimeout
+	dialTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { dialTimeout = orig })
+
+	lis := bufconn.Listen(1024)
+	t.Cleanup(func() { _ = lis.Close() })
+	neverAccepted := grpc.WithContextDialer(func(c context.Context, _ string) (net.Conn, error) {
+		return lis.DialContext(c)
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, dialErr := boundedDial(context.Background(), "unreachable", insecure.NewCredentials(), neverAccepted)
+		done <- dialErr
+	}()
+
+	select {
+	case dialErr := <-done:
+		if dialErr == nil {
+			t.Fatal("expected the dial against an unreachable target to fail")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dial did not return within the guard -- context.Background() from the caller is not being bounded by dialTimeout")
 	}
 }

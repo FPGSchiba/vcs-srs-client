@@ -41,6 +41,25 @@ func TestExplainDialError(t *testing.T) {
 			serverURL: "203.0.113.10:5002",
 			want:      []string{"203.0.113.10:5002", "different name"},
 		},
+		{
+			// Pins the case ORDER in explainDialError's switch: "certificate
+			// is valid for" must be checked before "certificate signed by
+			// unknown authority", because the name-mismatch diagnosis is the
+			// more specific, more actionable one.
+			//
+			// This string is a SYNTHETIC composite, not a realistic Go error:
+			// x509.HostnameError and x509.UnknownAuthorityError never co-occur
+			// in one real handshake failure, so no table case built from a
+			// real error text can exercise the precedence between the two
+			// switch cases -- each only ever trips one of them. Do not
+			// "fix" this into a realistic-looking string; that would stop
+			// testing the ordering. Swapping the two cases in
+			// explainDialError makes this test fail.
+			name:      "case order: name mismatch is diagnosed before unknown authority",
+			err:       errors.New(`connection error: desc = "transport: authentication handshake failed: x509: certificate is valid for srs.example.org, not 203.0.113.10 x509: certificate signed by unknown authority"`),
+			serverURL: "203.0.113.10:5002",
+			want:      []string{"203.0.113.10:5002", "different name"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
