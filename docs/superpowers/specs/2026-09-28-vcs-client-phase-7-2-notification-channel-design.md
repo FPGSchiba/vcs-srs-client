@@ -588,7 +588,8 @@ audio is safe to include:
 | `InputSubstituted`, `OutputSubstituted` | **yes** | audio works, but not on the chosen device |
 | `Overruns`, `Underruns` | **no** | monotonic counters — the sole reason the raw event fires every 2 s during a glitch (§1.7) |
 | `Running`, `Starting` | **no** | lifecycle, not a fault |
-| `InputDevice`, `OutputDevice` | **no** | which device is in use is already carried by the substitution flags |
+| `InputDevice`, `OutputDevice` | **no** | which device is in use is already carried by the substitution flags — and the resolved id is *volatile*, so hashing it would re-notify on every hot-plug reshuffle (see the substitution rule below) |
+| `AudioSettings.input_device` / `output_device` (the **configured** ids, not on `audio.State` at all) | **yes**, on the substitution pair only | the fault *is* "this configured device could not be opened"; a configured id moves only when the user moves it |
 
 | Condition | Key | Severity | Title |
 |---|---|---|---|
@@ -599,9 +600,25 @@ audio is safe to include:
 
 Four independent keys, not one, so a failed input and a substituted output
 are separate items that resolve independently. Each resolves when its
-condition clears. Body text for the substitution pair names the configured
-device id that could not be opened, taken from `AudioSettings.input_device` /
-`output_device`; context carries `IN USE: <resolved id>`.
+condition clears.
+
+The substitution pair is identified by the **configured** device that could
+not be opened, taken from `AudioSettings.input_device` / `output_device` —
+both in the body text and in context, which carries
+`CONFIGURED: <configured id>`. **Not** the resolved id
+(`audio.State.InputDevice` / `OutputDevice`).
+
+This resolves an inconsistency in an earlier revision of this section, which
+put `IN USE: <resolved id>` in context while the table above said the
+resolved ids were not in the fingerprint — `notify.fingerprint` hashes the
+ordered `Context`, so they were (ruling **R20**). The consequence was real:
+with the configured mic missing, a dismissed `audio.input.substituted`
+warning came straight back the moment the OS default changed (a headset
+plugged in) while the configured mic was *still* missing, because the
+differing fingerprint made `raiseLocked` drop the dismissal suppression.
+Nothing about the fault had changed. The configured id is stable — it moves
+only when the user changes their own settings — and it is the more useful
+fact: the user wants to know which of *their* choices failed.
 
 Errors are **`error` severity, so they toast and sound** (§3.8): a dead
 microphone in a voice-comms client is the most urgent thing this channel

@@ -1,9 +1,11 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
 )
@@ -81,6 +83,7 @@ func TestInputAndOutputAreIndependentKeys(t *testing.T) {
 
 func TestSubstitutionIsWarnNotError(t *testing.T) {
 	a, n := withNotifier(t)
+	a.settings = &settingsBackend{cfg: &config.Config{Audio: config.Audio{InputDevice: "mic-a"}}}
 
 	a.NotifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "mic-default"})
 
@@ -91,8 +94,73 @@ func TestSubstitutionIsWarnNotError(t *testing.T) {
 	if it.Key != "audio.input.substituted" {
 		t.Fatalf("Key = %q, want \"audio.input.substituted\"", it.Key)
 	}
-	if contextValue(it, "IN USE") != "mic-default" {
-		t.Fatalf("IN USE = %q, want \"mic-default\"", contextValue(it, "IN USE"))
+	// The CONFIGURED device, not the substituted-in one -- see R20 and
+	// TestSubstitutionDismissalSurvivesAHotPlugReshuffle below.
+	if got := contextValue(it, "CONFIGURED"); got != "mic-a" {
+		t.Fatalf("CONFIGURED = %q, want \"mic-a\"", got)
+	}
+	if contextValue(it, "IN USE") != "" {
+		t.Fatal("the substitution item still carries an IN USE context row -- the resolved id is volatile and must not be in the fingerprint")
+	}
+	// Spec 5.4: the body names the configured device id that could not be
+	// opened. It shipped as generic prose naming no device at all.
+	if !strings.Contains(it.Body, "mic-a") {
+		t.Fatalf("Body = %q, want it to name the configured device id", it.Body)
+	}
+}
+
+// TestSubstitutionDismissalSurvivesAHotPlugReshuffle is R20's regression
+// test, and the reason the substitution items are keyed on the CONFIGURED
+// device rather than the resolved one.
+//
+// With the configured mic missing, the user dismisses the substitution
+// warning. The OS default then changes underneath them -- a headset is
+// plugged in -- while the configured mic is STILL missing. Nothing about the
+// fault has changed, so nothing must be re-announced. While the resolved id
+// rode in Context (which notify.fingerprint hashes) the differing
+// fingerprint made raiseLocked delete the suppression and the dismissed
+// warning came straight back; without a dismissal it re-marked the item
+// unread and re-lit the launcher badge and the status-bar bell.
+func TestSubstitutionDismissalSurvivesAHotPlugReshuffle(t *testing.T) {
+	a, n := withNotifier(t)
+	a.settings = &settingsBackend{cfg: &config.Config{Audio: config.Audio{InputDevice: "mic-a"}}}
+
+	a.NotifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "os-default-1"})
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	n.Dismiss(items[0].ID)
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d after Dismiss, want 0", got)
+	}
+
+	// The OS default changes; the configured device is still missing.
+	a.NotifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "os-default-2"})
+
+	snap := n.Snapshot()
+	if len(snap.Items) != 0 {
+		t.Fatalf("Items = %d, want 0 -- a dismissed substitution warning must not come back because the OS default moved; the fault is unchanged", len(snap.Items))
+	}
+	if snap.Unread != 0 {
+		t.Fatalf("Unread = %d, want 0", snap.Unread)
+	}
+}
+
+// TestSubstitutionWithNoSettingsBackendDoesNotPanic pins the documented
+// empty-id fallback: a nil settings backend is a supported state everywhere
+// else in App, and reading the configured id must follow the same rule.
+func TestSubstitutionWithNoSettingsBackendDoesNotPanic(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.NotifyAudioState(AudioStateDTO{OutputSubstituted: true, OutputDevice: "spk-default"})
+
+	it := n.Snapshot().Items[0]
+	if contextValue(it, "CONFIGURED") != "" {
+		t.Fatalf("CONFIGURED = %q, want empty with no settings backend", contextValue(it, "CONFIGURED"))
+	}
+	if strings.Contains(it.Body, "()") {
+		t.Fatalf("Body = %q, want the unnamed form rather than an empty parenthetical", it.Body)
 	}
 }
 
