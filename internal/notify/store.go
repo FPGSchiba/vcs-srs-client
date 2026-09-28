@@ -195,6 +195,12 @@ func (n *Notifier) Resolve(key string) {
 	defer n.emitMu.Unlock()
 
 	n.mu.Lock()
+	// The condition genuinely cleared, so a later recurrence is news again --
+	// regardless of whether the item is still in the list. Dismiss removes
+	// the item from n.items but leaves the key in n.suppressed, so this must
+	// run even when findByKeyLocked comes back empty; otherwise a dismissed
+	// item's suppression would outlive the very Resolve that should lift it.
+	delete(n.suppressed, key)
 	idx := n.findByKeyLocked(key)
 	if idx < 0 || n.items[idx].Resolved {
 		n.mu.Unlock()
@@ -202,8 +208,6 @@ func (n *Notifier) Resolve(key string) {
 	}
 	n.items[idx].Resolved = true
 	n.items[idx].Unread = false
-	// The condition genuinely cleared, so a later recurrence is news again.
-	delete(n.suppressed, key)
 	snap := n.snapshotLocked()
 	n.mu.Unlock()
 
@@ -265,6 +269,92 @@ func (n *Notifier) MarkRead(id string) {
 		n.mu.Unlock()
 		return
 	}
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// Dismiss removes one item.
+//
+// For a KEYED item it also records the key as suppressed AT THAT
+// FINGERPRINT. Without that, dismissing "Global hotkeys unavailable" while
+// hotkeys are still unavailable would put it straight back on the next
+// applyHotkeys() -- which is every trigger add, every trigger removal and
+// every capture end. Suppression is cleared by a Raise whose fingerprint
+// differs (the condition changed) or by a Resolve (it cleared), both of
+// which mean the condition is news again.
+//
+// An unkeyed Post needs none of this: nothing can re-raise it.
+func (n *Notifier) Dismiss(id string) {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	idx := -1
+	for i := range n.items {
+		if n.items[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		n.mu.Unlock()
+		return
+	}
+	it := n.items[idx]
+	if it.Key != "" {
+		n.suppressed[it.Key] = fingerprint(it)
+	}
+	n.items = append(n.items[:idx], n.items[idx+1:]...)
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// MarkAllRead clears every unread flag. A no-op, with no publish, when
+// nothing is unread.
+func (n *Notifier) MarkAllRead() {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	changed := false
+	for i := range n.items {
+		if n.items[i].Unread {
+			n.items[i].Unread = false
+			changed = true
+		}
+	}
+	if !changed {
+		n.mu.Unlock()
+		return
+	}
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// Clear removes every item, suppressing each keyed one at its current
+// fingerprint for the same reason Dismiss does: CLEAR ALL must not be undone
+// by the next routine re-emission of a condition that still holds.
+func (n *Notifier) Clear() {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	if len(n.items) == 0 {
+		n.mu.Unlock()
+		return
+	}
+	for _, it := range n.items {
+		if it.Key != "" {
+			n.suppressed[it.Key] = fingerprint(it)
+		}
+	}
+	n.items = []Item{}
 	snap := n.snapshotLocked()
 	n.mu.Unlock()
 

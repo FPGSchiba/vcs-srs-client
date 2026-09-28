@@ -366,3 +366,142 @@ func TestConcurrentRaiseIsSafe(t *testing.T) {
 		t.Fatalf("Unread = %d but %d items are unread -- the count and the list disagree", snap.Unread, unread)
 	}
 }
+
+func TestDismissKeyedItemSuppressesAnIdenticalReRaise(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+	id := n.Snapshot().Items[0].ID
+	n.Dismiss(id)
+
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0 after dismiss", got)
+	}
+
+	// The condition still holds, so the next applyHotkeys() re-raises it
+	// within milliseconds. It must NOT come straight back.
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0 -- a dismissed condition must not resurrect itself on the next identical Raise", got)
+	}
+}
+
+func TestDismissSuppressionClearsOnAChangedFingerprint(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+	n.Dismiss(n.Snapshot().Items[0].ID)
+
+	// Permission went denied -> granted while registration still fails.
+	// That is genuinely new information.
+	changed := hotkeyItem("no backend")
+	changed.Context = []KV{{Key: "PERMISSION", Value: "granted"}}
+	n.Raise("hotkeys.global", changed)
+
+	snap := n.Snapshot()
+	if len(snap.Items) != 1 {
+		t.Fatalf("Items = %d, want 1 -- a changed fingerprint is news again", len(snap.Items))
+	}
+	if snap.Items[0].Context[0].Value != "granted" {
+		t.Fatalf("Context = %v, want the new value", snap.Items[0].Context)
+	}
+}
+
+func TestDismissSuppressionClearsOnResolve(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+	n.Dismiss(n.Snapshot().Items[0].ID)
+	n.Resolve("hotkeys.global") // the condition actually cleared
+
+	// A later recurrence is a new occurrence and must be shown.
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items = %d, want 1 -- resolving clears the suppression", got)
+	}
+}
+
+func TestDismissUnkeyedItemNeedsNoSuppression(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	id := n.Post(Item{Title: "discrete", Severity: SeverityWarn})
+	n.Dismiss(id)
+
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0", got)
+	}
+	// A Post has no key, so nothing can re-raise it. Posting again is a
+	// genuinely new event and must appear.
+	n.Post(Item{Title: "discrete", Severity: SeverityWarn})
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items = %d, want 1 -- a Post is never suppressed", got)
+	}
+}
+
+func TestMarkAllReadClearsEveryUnread(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	n.Post(Item{Title: "a", Severity: SeverityError})
+	n.Post(Item{Title: "b", Severity: SeverityWarn})
+	n.MarkAllRead()
+
+	snap := n.Snapshot()
+	if snap.Unread != 0 {
+		t.Fatalf("Unread = %d, want 0", snap.Unread)
+	}
+	if len(snap.Items) != 2 {
+		t.Fatalf("Items = %d, want 2 -- mark-all-read does not remove anything", len(snap.Items))
+	}
+}
+
+func TestMarkAllReadWithNothingUnreadIsANoop(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	changes := 0
+	n := New(Options{Now: fixedClock(&now), OnChange: func(Snapshot) { changes++ }})
+
+	n.Post(Item{Title: "i", Severity: SeverityInfo}) // already read
+	changes = 0
+	n.MarkAllRead()
+
+	if changes != 0 {
+		t.Fatalf("OnChange fired %d times, want 0", changes)
+	}
+}
+
+func TestClearEmptiesTheListAndSuppressesEveryKeyedItem(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+	n.Post(Item{Title: "discrete", Severity: SeverityWarn})
+	n.Clear()
+
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0", got)
+	}
+
+	// Same reasoning as Dismiss: the hotkey condition still holds, so the
+	// next emit re-raises it. CLEAR ALL must not be undone a moment later.
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0 -- Clear suppresses every keyed item it removed", got)
+	}
+}
+
+func TestClearOnAnEmptyListIsANoop(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	changes := 0
+	n := New(Options{Now: fixedClock(&now), OnChange: func(Snapshot) { changes++ }})
+
+	n.Clear()
+	if changes != 0 {
+		t.Fatalf("OnChange fired %d times, want 0", changes)
+	}
+}
