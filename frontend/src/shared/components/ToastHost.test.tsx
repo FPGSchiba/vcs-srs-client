@@ -271,4 +271,81 @@ describe("ToastHost", () => {
 
     expect(screen.getByText("device disappeared")).toBeInTheDocument();
   });
+  it("does not re-arm a dismiss timer for a NATURALLY EXPIRED toast", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+    expect(screen.getByText("Global hotkeys unavailable")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(6500);
+    });
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+
+    const setSpy = vi.spyOn(globalThis, "setTimeout");
+    act(() => {
+      // The condition has not gone away just because the toast's dwell ran
+      // out, so the item is still present and unresolved. The auto-dismiss
+      // path deletes its own timer but the id stays in `seen`, so -- unlike
+      // the hand-dismiss path, which was guarded from the start -- every
+      // subsequent republish used to arm a fresh 6.5s timer for an invisible
+      // item, each firing a setVisible that allocates and re-renders for no
+      // visual change.
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+
+    expect(setSpy.mock.calls.filter((c) => c[1] === 6500)).toHaveLength(0);
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+    setSpy.mockRestore();
+  });
+
+  it("re-toasts a naturally expired item when its content changes", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+    act(() => {
+      vi.advanceTimersByTime(6500);
+    });
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+
+    act(() => {
+      // The control, matching the hand-dismiss pair above: suppressing the
+      // re-arm must not become suppressing the item.
+      useNotifications.setState({ snap: { items: [item({ body: "device disappeared" })], unread: 1 } });
+    });
+
+    expect(screen.getByText("device disappeared")).toBeInTheDocument();
+  });
+
+  it("forgets the bookkeeping for items that leave the list", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Dismiss Global hotkeys unavailable"));
+    });
+
+    act(() => {
+      // The backend evicts it (its 200-item cap, CLEAR ALL, or a backend-side
+      // dismiss). `seen` and `retired` used to keep the id forever.
+      useNotifications.setState({ snap: emptySnapshot() });
+    });
+
+    act(() => {
+      // Ids are never reused, so an id that comes BACK can only be a fresh
+      // occurrence -- and must toast, with a full dwell, rather than be
+      // filtered out by a stale `seen` entry or a stale retirement.
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+
+    expect(screen.getByText("Global hotkeys unavailable")).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(6500);
+    });
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+  });
 });
