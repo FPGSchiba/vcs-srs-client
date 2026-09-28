@@ -190,12 +190,31 @@ Found during implementation and review; deliberately **not fixed** as part of Ph
 
 ## Phase 7 — Profiles + remaining popouts
 
-**Status:** `[ ]`
+**Status:** `[~]` in progress — decomposed into four independent sub-phases, each with its own spec/plan/execution cycle, because the original nine deliverables span four subsystems (radio profiles, four new popouts, transmission history, notification routing, OS-keychain token migration, TLS) that share no data model, code path or risk profile. See `docs/superpowers/specs/2026-09-28-vcs-client-phase-7-decomposition-design.md` for the full rationale and cross-cutting findings. Dependency order: **7.1 → 7.2 → {7.3, 7.4}**; 7.3 and 7.4 are independent of each other and may run in either order, or in parallel in separate worktrees.
+
+The original nine deliverables below are redistributed under the sub-phase that owns each — nothing is dropped.
+
+---
+
+### Phase 7.1 — Secure transport
+
+**Status:** `[x]` complete 2026-09-28 — control-plane TLS, client and server. **Design doc:** [`2026-09-28-vcs-client-phase-7-1-secure-transport-design.md`](./superpowers/specs/2026-09-28-vcs-client-phase-7-1-secure-transport-design.md)
 
 **Headline deliverables**
-- Radio profile load/save/import/export (JSON files in user-chosen dir)
-- Ship Mode popout (component registry from local TOML for now)
-- Messages popout (text channels mirroring radio frequencies; local ring buffer)
+- TLS for gRPC control connection (closes R5): transport is chosen by address and `tls_ca_file` — `tls_ca_file` set pins TLS to that CA for any host, else a loopback host (`localhost`/`127.*`/`::1`) stays insecure, else TLS via the OS trust store is required. No plaintext-remote path and no fallback to plaintext on a failed handshake — Phase 1's fail-closed rule inverted rather than relaxed. An unreadable or certificate-free `tls_ca_file` is an error, never a silent fall-through to system roots. The dial is bounded by a 10s `dialTimeout`. Three diagnosable failures get actionable text: server not speaking TLS ("no clientTLS block configured"), certificate not trusted, hostname mismatch. Closing this required a cross-repo change — `vngd-srs-server`'s `clientGrpcServer` (the listener registering `SRSService`/`AuthService`, i.e. the port this client dials) had no `grpc.Creds(...)` option at all; every existing TLS artefact in that repo served the separate server-to-server VoiceControl channel on port 14448. Branch `feat/client-port-tls` adds a top-level `clientTLS` config block and applies credentials to the client-facing listener: omitted → plaintext + startup WARN; one of certificateFile/privateKeyFile set without the other → startup fails naming the missing field; both set with files absent → a self-signed pair is generated once and reused on later starts.
+- OS-keychain migration for session token (closes R4) — **closed not-applicable**. The master spec's storage table described persisting the token to `%APPDATA%/VCS/session.json` (chmod 0600); that file was never implemented. The token is `session.Session.lastToken`, an in-memory field read only by `Reconnect` and never written to disk, so there was no persisted file to migrate to a keychain. Keychain-backed session persistence is deferred to Phase 2, where plugin SSO makes re-authentication expensive enough to justify a keyring dependency — today it would only save re-typing one coalition password inside an 8-hour token expiry. No keyring dependency was added.
+
+**Also closed this phase (not new work — confirming prior fixes):** Phase 5's issue #1 (Windows release builds ship with no audio) and issue #2 (`release.yml` never runs `buf generate`) are closed by client PR #29 (`8497c14`, on `main`), which added `buf generate` to `release.yml` plus a `CGO_ENABLED=0` release guard. The hardcoded client-version check on the server is closed by server PR #215.
+
+**Blocking deps:** none remaining.
+
+---
+
+### Phase 7.2 — Notification channel
+
+**Status:** `[ ]` not started — spec not yet written.
+
+**Headline deliverables**
 - Notifications popout (local + future server-pushed alert channel)
 - Route hotkey-registration failures through the notification channel,
   replacing Phase 3's inline banner in the Keybinds section. Two distinct
@@ -212,12 +231,33 @@ Found during implementation and review; deliberately **not fixed** as part of Ph
   a third global state that is informational rather than an error —
   "joystick input is unsupported on this platform" on macOS, which must never
   render as a failure.
-- Fleet Mode popout (C2 view)
-- Transmission history view (local JSON ring buffer)
-- OS-keychain migration for session token (closes R4)
-- TLS for gRPC control connection (closes R5)
 
-**Blocking deps:** Phase 4 for audio-aware UI
+**Blocking deps:** Phase 7.1 (dependency order — 7.1 makes remote verification possible at all; not a hard technical block).
+
+---
+
+### Phase 7.3 — Local persistence
+
+**Status:** `[ ]` not started — spec not yet written.
+
+**Headline deliverables**
+- Radio profile load/save/import/export (JSON files in user-chosen dir)
+- Transmission history view (local JSON ring buffer)
+
+**Blocking deps:** Phase 7.2 (dependency order — see decomposition spec). Independent of 7.4; may run in parallel with it.
+
+---
+
+### Phase 7.4 — Remaining popouts
+
+**Status:** `[ ]` not started — spec not yet written.
+
+**Headline deliverables**
+- Ship Mode popout (component registry from local TOML for now)
+- Messages popout (text channels mirroring radio frequencies; local ring buffer)
+- Fleet Mode popout (C2 view)
+
+**Blocking deps:** Phase 7.2 (dependency order — see decomposition spec) and Phase 4 for audio-aware UI. Independent of 7.3; may run in parallel with it.
 
 ---
 
