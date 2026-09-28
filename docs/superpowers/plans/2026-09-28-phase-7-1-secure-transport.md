@@ -13,7 +13,7 @@
 
 ## Global Constraints
 
-- **Two repositories, two branches, two PRs.** Client tasks (1–5, 10) are in `/Users/schiba/Projects/vanguard/vcs-srs-client` on `feat/phase-7-1-secure-transport` (already created, off `main` at `35b3020`). Server tasks (6–8) are in `/Users/schiba/Projects/vanguard/vngd-srs-server` on a new branch `feat/client-port-tls` off its `main` at `c54b4d4`. **Never commit server changes into the client repo or vice versa.**
+- **Two repositories, two branches, two PRs.** Client tasks (1–5, 9, 10) are in `/Users/schiba/Projects/vanguard/vcs-srs-client` on `feat/phase-7-1-secure-transport` (already created, off `main` at `35b3020`). Server tasks (6–8) are in `/Users/schiba/Projects/vanguard/vngd-srs-server` on a new branch `feat/client-port-tls` off its `main` at `c54b4d4`. **Never commit server changes into the client repo or vice versa.**
 - Every client Go invocation carries `-tags purego` and `GOCACHE=$TMPDIR/vcs-gocache`. Example: `GOCACHE=$TMPDIR/vcs-gocache go test -tags purego ./internal/session/...`
 - Server Go invocations carry `GOCACHE=$TMPDIR/vngd-gocache` and **no** `-tags purego` (that tag is a client-only concern). Example: `GOCACHE=$TMPDIR/vngd-gocache go test ./state/...`
 - Frontend typecheck, when run: `(cd frontend && npx tsc --noEmit)`. Never `npx --prefix frontend tsc --noEmit` — it prints a help banner and exits 0 without checking anything.
@@ -1517,7 +1517,7 @@ Then replace the existing `s.clientGrpcServer = grpc.NewServer(...)` call and it
 	s.clientGrpcServer = grpc.NewServer(clientOpts...)
 ```
 
-Note the `s.mu.Unlock()` before the error return: `Start` holds `s.mu` from before the listener setup through to `s.isRunning = true`, and the existing early returns in that region release it the same way. Check the surrounding code and match whatever the neighbouring error paths do — if they use a `defer`, use that instead and drop the manual unlock.
+Note the explicit `s.mu.Unlock()` before the error return. `Start` holds `s.mu` from before the listener setup through to `s.isRunning = true`. **Do not copy the neighbouring error paths here:** the existing `net.Listen` failure returns at that point *without* unlocking, which leaks the mutex. That is a pre-existing defect, it is out of scope for this task, and you must not propagate it into the new path — unlock explicitly as shown. Do not fix the pre-existing leak either; it is recorded separately for the final review.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1561,9 +1561,9 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Add the client-port TLS section**
 
-`deploy/README.md` currently documents certificates only for the voice-control channel, which has caused the client-side documentation to claim the deployed server "already has certs" when those certs serve a different port. Add a new section after the existing "Certs directory" section:
+`deploy/README.md` currently documents certificates only for the voice-control channel, which has caused the client-side documentation to claim the deployed server "already has certs" when those certs serve a different port. Add a new section after the existing "Certs directory" section. The outer fence below is four backticks because the content itself contains a fenced yaml block — what you paste into `deploy/README.md` is everything between the four-backtick markers, inner fences included:
 
-```markdown
+````markdown
 ### Client-facing TLS
 
 The `certs/` material described above secures the **voice-control channel
@@ -1596,7 +1596,7 @@ Control node generates its voice-control pair. Copy the **certificate only**
 > generated certificate carries it — the pair is only generated when the
 > files are absent, so changing `serverName` later has no effect until you
 > delete them.
-```
+````
 
 - [ ] **Step 2: Verify the markdown renders**
 
