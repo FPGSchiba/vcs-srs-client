@@ -22,7 +22,6 @@ frontend/bindings/
 *.log
 
 # local-only configs that should never be committed
-session.json
 config.toml.local
 
 # IDE

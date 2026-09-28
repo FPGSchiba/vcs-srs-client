@@ -157,15 +157,13 @@ func TestDialerFor_AddressValidation(t *testing.T) {
 // identical constraint); an unaccepted bufconn achieves the same "never
 // resolves on its own" property with no real socket at all.
 //
-// dialTimeout is shrunk here so this test does not spend the real 10s
-// production value on every run; the mechanism under test -- a caller
-// context with no deadline of its own still gets bounded -- is identical at
-// any duration. Removing the context.WithTimeout call in boundedDial makes
-// this test hang until its own guard fires and fail.
+// A short timeout is passed directly here so this test does not spend the
+// real 10s production value on every run; the mechanism under test -- a
+// caller context with no deadline of its own still gets bounded -- is
+// identical at any duration. Removing the context.WithTimeout call in
+// boundedDial makes this test hang until its own guard fires and fail.
 func TestDialerFor_BoundsAnUnreachableDial(t *testing.T) {
-	orig := dialTimeout
-	dialTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { dialTimeout = orig })
+	const testTimeout = 200 * time.Millisecond
 
 	lis := bufconn.Listen(1024)
 	t.Cleanup(func() { _ = lis.Close() })
@@ -175,7 +173,7 @@ func TestDialerFor_BoundsAnUnreachableDial(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, dialErr := boundedDial(context.Background(), "unreachable", insecure.NewCredentials(), neverAccepted)
+		_, dialErr := boundedDial(context.Background(), testTimeout, "unreachable", insecure.NewCredentials(), neverAccepted)
 		done <- dialErr
 	}()
 

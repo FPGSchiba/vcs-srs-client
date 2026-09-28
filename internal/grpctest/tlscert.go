@@ -45,12 +45,14 @@ func NewTestCert(t *testing.T, hosts ...string) TestCert {
 		Subject:               pkix.Name{Organization: []string{"VCS Test"}},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		// Self-signed and self-issued: the leaf must be a CA for a client
-		// pinning it as a root to accept it as its own issuer.
-		IsCA: true,
+		// Not a CA, matching the shape the real server issues (see
+		// vngd-srs-server's generateSelfSignedCert). A non-CA self-signed
+		// leaf still verifies fine when pinned as a root: Go's
+		// Certificate.Verify short-circuits as soon as opts.Roots contains
+		// the leaf itself, before any CA/KeyUsage checks run.
 	}
 	for _, h := range hosts {
 		if ip := net.ParseIP(h); ip != nil {

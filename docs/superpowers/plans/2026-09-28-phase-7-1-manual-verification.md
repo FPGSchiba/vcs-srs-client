@@ -80,8 +80,10 @@ _(record here)_
 allows.
 
 **Expected:**
-- Startup **fails** (server does not come up) with an error naming the
-  missing field, verbatim from `clientTransportCredentials`:
+- The client-facing gRPC port does not come up: the server process itself
+  keeps running (it does not exit or restart) and the admin HTTP/GraphQL
+  port is unaffected. The error names the missing field, verbatim from
+  `clientTransportCredentials`:
 
   > `clientTLS.certificateFile is set but clientTLS.privateKeyFile is empty: configure both or neither`
 

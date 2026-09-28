@@ -491,7 +491,8 @@ log/
 # local-only configs that should never be committed
 # session.json never materialized -- corrected 2026-09-28: no token file was ever
 # implemented (token is in-memory only, see §4.3 and R4), so there is nothing here
-# to ignore; entry kept out rather than silently dropped
+# to ignore; the entry has been removed from the real .gitignore rather than kept
+# around for a file nothing writes
 config.toml.local
 
 # IDE

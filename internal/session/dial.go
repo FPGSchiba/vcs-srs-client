@@ -48,12 +48,7 @@ const (
 // 10 seconds is the pre-login Welcome-screen wait a user tolerates before
 // being told what is wrong, with comfortable margin over a healthy TLS
 // handshake plus the server's auth round trip.
-//
-// This is a var, not a const, purely so
-// TestDialerFor_BoundsAnUnreachableDial can shrink it for the duration of
-// that one test instead of waiting out the real value on every run;
-// production always dials with the default set here.
-var dialTimeout = 10 * time.Second
+const dialTimeout = 10 * time.Second
 
 // ClientKeepaliveTime exposes the configured keepalive period so a test can
 // pin it against the server's enforcement floor. See clientKeepaliveTime.
@@ -132,7 +127,7 @@ func dialerFor(serverURL, caFile string) (Dialer, error) {
 		return nil, err
 	}
 	return func(ctx context.Context) (*grpc.ClientConn, error) {
-		conn, err := boundedDial(ctx, serverURL, creds)
+		conn, err := boundedDial(ctx, dialTimeout, serverURL, creds)
 		if err != nil {
 			return nil, explainDialError(err, serverURL, caFile)
 		}
@@ -145,14 +140,18 @@ func dialerFor(serverURL, caFile string) (Dialer, error) {
 // transport that hangs by construction -- an un-Accepted bufconn listener,
 // via extraOpts -- instead of a real socket, which the development sandbox's
 // bind/connect calls are blocked from using (see grpctest.StartWith's doc
-// comment for the same constraint). Production calls it with no extraOpts.
-func boundedDial(ctx context.Context, serverURL string, creds credentials.TransportCredentials, extraOpts ...grpc.DialOption) (*grpc.ClientConn, error) {
+// comment for the same constraint). Production calls it with dialTimeout and
+// no extraOpts; TestDialerFor_BoundsAnUnreachableDial passes its own short
+// timeout so it does not spend the real 10s production value on every run --
+// the mechanism under test, that a caller context with no deadline of its own
+// still gets bounded, is identical at any duration.
+func boundedDial(ctx context.Context, timeout time.Duration, serverURL string, creds credentials.TransportCredentials, extraOpts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	// Derived from the caller's context, so a SHORTER caller deadline still
 	// wins -- the refusalCtx-based tests in tls_integration_test.go depend on
 	// that. Without this bound, a caller context with no deadline of its own
 	// (context.Background(), as internal/app's Connect and Reconnect pass)
 	// never returns on a persistent handshake failure; see dialTimeout.
-	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	opts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(creds),

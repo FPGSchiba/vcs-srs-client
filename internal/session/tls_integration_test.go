@@ -139,10 +139,10 @@ func TestTLS_ClientAgainstPlaintextServerFails(t *testing.T) {
 }
 
 func TestTLS_PlaintextServerProducesTheExplainedError(t *testing.T) {
-	// Proves the wrapping is actually reached through the real dial path,
-	// not merely unit-tested in isolation -- and that
-	// WithReturnConnectionError really does surface the TLS cause rather
-	// than a context deadline.
+	// Proves the error string a real failed TLS handshake produces (via
+	// WithReturnConnectionError, against a genuine plaintext listener) is
+	// one explainDialError matches -- explainDialError itself is still
+	// called by hand below, not reached through dial()'s own error path.
 	cert := grpctest.NewTestCert(t, "localhost")
 	dialWith, cleanup := grpctest.StartWith(t, &grpctest.Fake{}, nil) // plaintext
 	t.Cleanup(cleanup)

@@ -250,7 +250,7 @@ Documents corrected as part of this sub-phase:
 | `CLAUDE.md` "the deployed server already has certs" | Corrected — those certs serve the VoiceControl channel |
 | `docs/ROADMAP.md` Phase 7 row | Split into 7.1–7.4 per §1 |
 | `vngd-srs-server/deploy/README.md` | Client-port TLS setup, and the IP-SAN constraint from §5.1 |
-| `vngd-srs-server/example.config.yaml` | The `servers.control.tls` block |
+| `vngd-srs-server/example.config.yaml` | The top-level `clientTLS` block (not `servers.control.tls` — see §4.1) |
 | `docs/PROTO_GAPS.md` | New entry: voice-payload encryption, recorded as a known V1 limitation (§9) |
 
 ---

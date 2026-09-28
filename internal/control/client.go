@@ -17,7 +17,11 @@ type tokenCreds struct{ token string }
 func (t tokenCreds) GetRequestMetadata(_ context.Context, _ ...string) (map[string]string, error) {
 	return map[string]string{"authorization": t.token}, nil
 }
-func (tokenCreds) RequireTransportSecurity() bool { return false } // insecure phase
+
+// RequireTransportSecurity is false because the loopback dial can still be
+// plaintext by design (see internal/session/dial.go and spec §5.1); returning
+// true here would break that dev path. Remote dials are TLS-only regardless.
+func (tokenCreds) RequireTransportSecurity() bool { return false }
 
 // Client wraps srspb.SRSServiceClient with the per-call token.
 type Client struct {
