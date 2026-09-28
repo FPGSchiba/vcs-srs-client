@@ -1,6 +1,11 @@
 package notify
 
-import "strconv"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"strconv"
+)
 
 // Post records a DISCRETE event -- something that happened once and is never
 // "resolved": a distress beacon, a client joining a frequency, an incoming
@@ -91,4 +96,177 @@ func (n *Notifier) playSound(it Item) {
 		return
 	}
 	n.opt.OnSound(it)
+}
+
+// Raise asserts a CONDITION under a stable key.
+//
+// Unlike Post, a keyed item participates in identity dedupe: raising the
+// same key with byte-identical user-visible content is a TOTAL no-op -- no
+// publish, no timestamp bump, no re-mark-unread, no sound.
+//
+// That no-op is the whole defence against level-triggered sources. Both
+// hotkey and audio state are snapshots re-emitted far more often than they
+// change: emitHotkeyState fires from nine call sites, so a nineteen-action
+// rebind re-emits roughly 38 identical payloads, and audio:state compares a
+// struct containing monotonic xrun counters, so it fires every 2s for as
+// long as the engine is glitching. Without this, either would produce one
+// notification per emission.
+//
+// A DIFFERING fingerprint updates the item in place, refreshes its
+// timestamp, re-marks it unread and sounds. A key whose previous item was
+// resolved gets a fresh item: a recurrence is a new occurrence, not a
+// revival.
+func (n *Notifier) Raise(key string, item Item) {
+	if key == "" {
+		// A keyless Raise is a Post; treating it as one is kinder than
+		// silently keying everything under "".
+		n.Post(item)
+		return
+	}
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	changed, id := n.raiseLocked(key, item)
+	if !changed {
+		n.mu.Unlock()
+		return
+	}
+	snap := n.snapshotLocked()
+	sound, wantSound := n.soundForLocked(id)
+	n.mu.Unlock()
+
+	n.publish(snap)
+	if wantSound {
+		n.playSound(sound)
+	}
+}
+
+// raiseLocked applies one Raise. Reports whether anything changed, and the
+// affected item's id. Caller holds mu.
+func (n *Notifier) raiseLocked(key string, item Item) (bool, string) {
+	item.Key = key
+	fp := fingerprint(item)
+
+	// Dismissed at this exact fingerprint: the user has already said "I know,
+	// stop telling me". See Dismiss.
+	if got, ok := n.suppressed[key]; ok && got == fp {
+		return false, ""
+	}
+
+	idx := n.findByKeyLocked(key)
+	if idx >= 0 && !n.items[idx].Resolved {
+		if fingerprint(n.items[idx]) == fp {
+			return false, "" // identical, unresolved: total no-op
+		}
+		// Real change: update in place, keeping the id so an open UI's
+		// selection and any pending MarkRead still address the same row.
+		id := n.items[idx].ID
+		item.ID = id
+		item.Time = n.opt.Now()
+		item.Resolved = false
+		item.Unread = item.Severity != SeverityInfo
+		if item.Context == nil {
+			item.Context = []KV{}
+		}
+		if item.Actions == nil {
+			item.Actions = []Action{}
+		}
+		n.items[idx] = item
+		delete(n.suppressed, key) // the condition changed: it is news again
+		return true, id
+	}
+
+	// No item, or the previous one is resolved: this is a new occurrence.
+	delete(n.suppressed, key)
+	return true, n.insertLocked(item)
+}
+
+// Resolve clears a condition. The item is RETAINED and marked resolved
+// rather than deleted, so a user who was away still learns their push-to-talk
+// was dead for ten minutes -- while the badge stops counting it immediately.
+//
+// A no-op for an unknown or already-resolved key: no publish, no churn.
+func (n *Notifier) Resolve(key string) {
+	if key == "" {
+		return
+	}
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	idx := n.findByKeyLocked(key)
+	if idx < 0 || n.items[idx].Resolved {
+		n.mu.Unlock()
+		return
+	}
+	n.items[idx].Resolved = true
+	n.items[idx].Unread = false
+	// The condition genuinely cleared, so a later recurrence is news again.
+	delete(n.suppressed, key)
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// findByKeyLocked returns the index of the NEWEST item with this key, or -1.
+// Items are newest-first, so the first match is the newest. Caller holds mu.
+func (n *Notifier) findByKeyLocked(key string) int {
+	for i, it := range n.items {
+		if it.Key == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// fingerprint hashes everything the USER CAN SEE, and nothing else.
+//
+// Deliberately excludes ID, Time, Unread and Resolved: those are the
+// store's own bookkeeping, and folding them in would make every item its
+// own fingerprint and defeat dedupe entirely. Callers project their
+// subsystem's state down to these fields before raising -- see the audio
+// adapter, which drops the xrun counters for exactly this reason.
+func fingerprint(it Item) string {
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, p := range parts {
+			_, _ = io.WriteString(h, p)
+			_, _ = h.Write([]byte{0}) // separator, so "ab"+"c" != "a"+"bc"
+		}
+	}
+	write(it.Key, it.Category, string(it.Severity), it.Icon, it.Title, it.Body)
+	for _, kv := range it.Context {
+		write(kv.Key, kv.Value)
+	}
+	for _, a := range it.Actions {
+		write(a.Label, a.Icon, a.Kind, a.Target, strconv.FormatBool(a.Primary))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// MarkRead clears one item's unread flag. Addressed by ID, not key, because
+// the UI's row is what the user clicked.
+func (n *Notifier) MarkRead(id string) {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	changed := false
+	for i := range n.items {
+		if n.items[i].ID == id && n.items[i].Unread {
+			n.items[i].Unread = false
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		n.mu.Unlock()
+		return
+	}
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
 }
