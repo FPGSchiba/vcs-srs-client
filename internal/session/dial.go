@@ -2,12 +2,16 @@ package session
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
@@ -45,9 +49,48 @@ func keepaliveOption() grpc.DialOption {
 	})
 }
 
-// insecureDialer returns a Dialer for serverURL. Insecure transport is only
-// permitted for localhost/127.0.0.1; remote hosts fail closed until TLS lands.
-func insecureDialer(serverURL string) (Dialer, error) {
+// transportCredentials picks the transport for host, honouring caFile.
+//
+// Three deterministic branches, in this order:
+//
+//  1. caFile set    -> TLS trusting ONLY that pool, whatever the host. This
+//     is what a self-hosted server with no public DNS and no CA-signed
+//     certificate needs, and because it is not gated on the host it doubles
+//     as the local-TLS development and test path.
+//  2. host loopback -> insecure, unchanged from Phase 1.
+//  3. otherwise     -> TLS against the OS trust store.
+//
+// There is deliberately no plaintext-remote escape hatch: the Phase 1
+// fail-closed rule inverts rather than relaxes, so what used to be refused
+// outright is now required to be encrypted. There is equally no fallback to
+// plaintext when a handshake fails, because a fallback is a downgrade attack
+// with extra steps.
+//
+// A caFile that cannot be read, or that holds no certificate, is an ERROR
+// rather than a quiet fall-through to system roots. An explicit pin that
+// silently stops pinning is the precise failure this sub-phase exists to
+// prevent.
+func transportCredentials(host, caFile string) (credentials.TransportCredentials, error) {
+	if caFile != "" {
+		pemBytes, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read tls_ca_file %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("tls_ca_file %q contains no PEM certificate", caFile)
+		}
+		return credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}), nil
+	}
+	if isLocal(host) {
+		return insecure.NewCredentials(), nil
+	}
+	return credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}), nil
+}
+
+// dialerFor returns a Dialer for serverURL with credentials chosen by
+// transportCredentials. It replaces Phase 1's insecureDialer.
+func dialerFor(serverURL, caFile string) (Dialer, error) {
 	if serverURL == "" {
 		return nil, fmt.Errorf("server address is empty")
 	}
@@ -55,12 +98,13 @@ func insecureDialer(serverURL string) (Dialer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server address must be host:port: %w", err)
 	}
-	if !isLocal(host) {
-		return nil, fmt.Errorf("refusing insecure connection to non-local host %q (TLS not yet supported)", host)
+	creds, err := transportCredentials(host, caFile)
+	if err != nil {
+		return nil, err
 	}
 	return func(ctx context.Context) (*grpc.ClientConn, error) {
 		return grpc.DialContext(ctx, serverURL,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithTransportCredentials(creds),
 			keepaliveOption(),
 			grpc.WithBlock(),
 		)

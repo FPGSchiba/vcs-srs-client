@@ -227,7 +227,7 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 
 	dialer := s.dep.Dialer
 	if dialer == nil {
-		d, err := insecureDialer(serverURL)
+		d, err := dialerFor(serverURL, s.dep.TLSCAFile)
 		if err != nil {
 			return err
 		}
