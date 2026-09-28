@@ -315,6 +315,14 @@ func (n *Notifier) MarkRead(id string) {
 // recovered would silence the same microphone failing again -- no item, no
 // badge, no bell, no toast, no sound -- for the life of the process.
 //
+// "Resolved" here means the key's SETTLED state, not merely its committed
+// one. A coalescing window can be holding a Resolve that has not been
+// applied yet (audio's window is 10s), and cancelPendingLocked below
+// DESTROYS it, so reading it.Resolved alone would suppress a condition that
+// had in fact already cleared -- swallowing one entire later occurrence of
+// the fault, silently, on every windowed source. pendingResolveLocked is
+// consulted first for exactly that case; see pendingKind.
+//
 // An unkeyed Post needs none of this: nothing can re-raise it.
 func (n *Notifier) Dismiss(id string) {
 	n.emitMu.Lock()
@@ -334,8 +342,12 @@ func (n *Notifier) Dismiss(id string) {
 	}
 	it := n.items[idx]
 	if it.Key != "" {
+		// Read the pending intent BEFORE cancelling: cancelPendingLocked
+		// destroys it, and a deferred Resolve means this condition has
+		// already cleared however unresolved the committed item looks.
+		settledClear := n.pendingResolveLocked(it.Key)
 		n.cancelPendingLocked(it.Key)
-		if !it.Resolved {
+		if !it.Resolved && !settledClear {
 			n.suppressed[it.Key] = fingerprint(it)
 		}
 	}
@@ -376,10 +388,12 @@ func (n *Notifier) MarkAllRead() {
 // condition that still holds.
 //
 // "That still holds" is the whole rule, and a resolved item does not: it is
-// skipped, exactly as Dismiss skips it. Suppressing resolved items is what
-// made CLEAR ALL a permanent mute -- raiseLocked consults suppressed BEFORE
-// it looks at Resolved, so an identical recurrence of a condition that had
-// already cleared became a total no-op that nothing could ever lift.
+// skipped, exactly as Dismiss skips it -- including when its Resolve is only
+// PENDING in an open coalescing window, which cancelPendingLocked is about
+// to destroy. Suppressing resolved items is what made CLEAR ALL a permanent
+// mute -- raiseLocked consults suppressed BEFORE it looks at Resolved, so an
+// identical recurrence of a condition that had already cleared became a
+// total no-op that nothing could ever lift.
 func (n *Notifier) Clear() {
 	n.emitMu.Lock()
 	defer n.emitMu.Unlock()
@@ -393,8 +407,9 @@ func (n *Notifier) Clear() {
 		if it.Key == "" {
 			continue
 		}
+		settledClear := n.pendingResolveLocked(it.Key) // read before cancelling
 		n.cancelPendingLocked(it.Key)
-		if !it.Resolved {
+		if !it.Resolved && !settledClear {
 			n.suppressed[it.Key] = fingerprint(it)
 		}
 	}
@@ -412,7 +427,7 @@ func (n *Notifier) RaiseWindowed(key string, item Item, window time.Duration) {
 		n.Post(item)
 		return
 	}
-	n.coalesce(key, window, func() bool { return n.raiseReport(key, item) })
+	n.coalesce(key, window, pendingRaise, func() bool { return n.raiseReport(key, item) })
 }
 
 // ResolveWindowed is Resolve with a coalescing window.
@@ -420,5 +435,5 @@ func (n *Notifier) ResolveWindowed(key string, window time.Duration) {
 	if key == "" {
 		return
 	}
-	n.coalesce(key, window, func() bool { return n.resolveReport(key) })
+	n.coalesce(key, window, pendingResolve, func() bool { return n.resolveReport(key) })
 }

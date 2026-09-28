@@ -565,3 +565,104 @@ func TestClearStillSuppressesAConditionThatStillHolds(t *testing.T) {
 		t.Fatalf("Items = %d, want 0 -- a condition that STILL HOLDS stays suppressed after CLEAR ALL", got)
 	}
 }
+
+// TestDismissDoesNotSuppressAConditionWhoseResolveIsPending is the WINDOWED
+// analogue of TestDismissDoesNotSuppressAResolvedItem, and the two are not
+// redundant: the un-windowed test alone left a whole fault occurrence
+// silently swallowed for every source that actually has a window.
+//
+// Dismiss decides suppression from it.Resolved, but it calls
+// cancelPendingLocked FIRST -- which destroys any deferred change. When the
+// deferred change IS the Resolve, the committed item still reads
+// Resolved == false at the instant Dismiss inspects it, so Dismiss suppressed
+// a condition that had in fact already cleared, and the NEXT occurrence of
+// that fault produced no item, no badge, no bell, no toast and no sound.
+func TestDismissDoesNotSuppressAConditionWhoseResolveIsPending(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+	defer n.StopTimers()
+
+	// An hour stands in for WindowAudio's 10s: long enough that no timer
+	// fires during the test, so what is asserted is the coalescing state,
+	// not a race against real time.
+	const window = time.Hour
+
+	// The microphone fails: leading edge, published, window armed.
+	n.RaiseWindowed("audio.input", hotkeyItem("device disappeared"), window)
+	// It recovers inside the window, so the Resolve is DEFERRED.
+	n.ResolveWindowed("audio.input", window)
+
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	if items[0].Resolved {
+		t.Fatal("precondition: the Resolve was committed, not deferred -- this test no longer exercises the coalesced path")
+	}
+
+	// The user clicks X on the row that is still on screen.
+	n.Dismiss(items[0].ID)
+
+	// The same device dies again with the same error text. The condition had
+	// already cleared before the dismissal, so this is a NEW OCCURRENCE.
+	n.Raise("audio.input", hotkeyItem("device disappeared"))
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items after the recurrence = %d, want 1 -- dismissing an item whose Resolve was still pending muted the whole next fault occurrence", got)
+	}
+}
+
+// TestClearDoesNotSuppressAConditionWhoseResolveIsPending is the windowed
+// analogue of TestClearDoesNotSuppressAResolvedCondition; Clear has the
+// identical shape to Dismiss and the identical defect.
+func TestClearDoesNotSuppressAConditionWhoseResolveIsPending(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+	defer n.StopTimers()
+
+	const window = time.Hour
+
+	n.RaiseWindowed("audio.input", hotkeyItem("device disappeared"), window)
+	n.ResolveWindowed("audio.input", window)
+
+	if items := n.Snapshot().Items; len(items) != 1 || items[0].Resolved {
+		t.Fatalf("precondition: want exactly one unresolved item with a deferred Resolve, got %+v", items)
+	}
+
+	n.Clear()
+
+	n.Raise("audio.input", hotkeyItem("device disappeared"))
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items after the recurrence = %d, want 1 -- CLEAR ALL over an item whose Resolve was still pending muted the whole next fault occurrence", got)
+	}
+}
+
+// TestDismissStillSuppressesWhenARaiseIsPending is the control for the two
+// tests above: the narrower rule must not collapse into "a key with any
+// pending change is never suppressed". A deferred RAISE means the condition
+// still holds, so dismissing it must still mute the routine re-emission --
+// which is the entire reason suppression exists.
+func TestDismissStillSuppressesWhenARaiseIsPending(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+	defer n.StopTimers()
+
+	const window = time.Hour
+
+	n.RaiseWindowed("hotkeys.global", hotkeyItem("no backend"), window)
+	// A differing re-raise inside the window: deferred, and the condition is
+	// still very much unresolved.
+	n.RaiseWindowed("hotkeys.global", hotkeyItem("permission denied"), window)
+
+	items := n.Snapshot().Items
+	if len(items) != 1 || items[0].Body != "no backend" {
+		t.Fatalf("precondition: want the first raise still committed, got %+v", items)
+	}
+
+	n.Dismiss(items[0].ID)
+
+	// The level-triggered source re-emits what it always emits.
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items after the re-emission = %d, want 0 -- a condition that STILL HOLDS must stay suppressed after a dismissal", got)
+	}
+}

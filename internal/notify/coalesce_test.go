@@ -262,7 +262,7 @@ func TestWindowClosingOnANoOpDoesNotHoldItselfOpen(t *testing.T) {
 func TestDismissDuringTheLeadingEdgeDoesNotArmAnEmptyWindow(t *testing.T) {
 	n := New(Options{})
 
-	n.coalesce("audio.input", time.Hour, func() bool {
+	n.coalesce("audio.input", time.Hour, pendingRaise, func() bool {
 		n.Raise("audio.input", Item{Title: "Microphone unavailable", Severity: SeverityError})
 		var id string
 		for _, it := range n.Snapshot().Items {

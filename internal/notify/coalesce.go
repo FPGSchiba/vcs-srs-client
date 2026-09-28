@@ -24,6 +24,31 @@ const (
 	WindowAudio    = 10 * time.Second
 )
 
+// pendingKind names WHAT a deferred change will do when its window closes.
+//
+// It exists because a bare closure is opaque, and one caller -- the
+// dismissal path -- has to reason about the key's SETTLED state rather than
+// its committed one. Dismiss and Clear suppress a key only while its
+// condition STILL HOLDS (see store.go's Dismiss), and they decide that from
+// the committed item's Resolved flag; but they call cancelPendingLocked
+// first, destroying whatever the window was holding. When the thing
+// destroyed was the Resolve, the committed item still read
+// Resolved == false, so the dismissal suppressed a condition that had
+// already cleared and swallowed the whole NEXT occurrence of the fault.
+//
+// Recording the intent alongside the closure is what lets those two ask
+// "is a Resolve pending for this key?" under mu, with no lock widened and
+// nothing flushed -- see pendingResolveLocked. It also makes
+// cancelPendingLocked honest about what it is destroying.
+type pendingKind uint8
+
+const (
+	// pendingNone is an armed window with nothing accumulated in it.
+	pendingNone pendingKind = iota
+	pendingRaise
+	pendingResolve
+)
+
 // pendingChange is one key's coalescing state: the armed trailing timer and
 // the change it will apply when the window closes.
 type pendingChange struct {
@@ -48,7 +73,23 @@ type pendingChange struct {
 	gen uint64
 	// apply performs the deferred mutation and reports whether it actually
 	// published anything. nil means "nothing pending".
+	//
+	// kind describes what apply will do, and the two are ALWAYS written
+	// together: apply == nil iff kind == pendingNone. Keep it that way --
+	// pendingResolveLocked reads kind alone.
 	apply func() bool
+	kind  pendingKind
+}
+
+// pendingResolveLocked reports whether this key's open coalescing window is
+// holding a deferred Resolve -- i.e. whether the key's SETTLED state is
+// "cleared" even though the committed item still reads unresolved.
+//
+// Caller holds mu. See pendingKind for why this exists and store.go's
+// Dismiss for the invariant it serves.
+func (n *Notifier) pendingResolveLocked(key string) bool {
+	p, ok := n.pending[key]
+	return ok && p.kind == pendingResolve
 }
 
 // coalesce either runs fn now (no window open, or no window at all) or defers
@@ -71,8 +112,11 @@ type pendingChange struct {
 // would leave its final state never emitted, so a device settling into a
 // persistent error would show nothing at all.
 //
+// kind records what fn WILL do, so a dismissal can see the key's settled
+// state rather than only its committed one -- see pendingKind.
+//
 // Caller holds neither mu nor emitMu.
-func (n *Notifier) coalesce(key string, window time.Duration, fn func() bool) {
+func (n *Notifier) coalesce(key string, window time.Duration, kind pendingKind, fn func() bool) {
 	if window <= 0 {
 		fn()
 		return
@@ -84,7 +128,7 @@ func (n *Notifier) coalesce(key string, window time.Duration, fn func() bool) {
 		// Inside an open window: record this as the pending state, replacing
 		// any earlier one. Only the LAST change in a window survives, which
 		// is the whole point -- the settled state is what the user needs.
-		p.apply = fn
+		p.apply, p.kind = fn, kind
 		n.mu.Unlock()
 		return
 	}
@@ -181,7 +225,7 @@ func (n *Notifier) windowClosed(key string, gen uint64) {
 		return
 	}
 	apply := p.apply
-	p.apply = nil
+	p.apply, p.kind = nil, pendingNone
 	if apply == nil {
 		// Nothing accumulated: the flap has stopped. Retire the key.
 		n.retirePendingLocked(key)
@@ -298,6 +342,12 @@ func (n *Notifier) StopTimers() {
 // cancelPendingLocked drops a key's armed timer and pending change, so a
 // window opened before the user dismissed or cleared the item cannot fire
 // afterwards and resurrect it. Caller holds mu.
+//
+// It DESTROYS the pending change rather than flushing it, so a caller whose
+// own decision depends on that change must read it FIRST -- see
+// pendingResolveLocked and the two call sites in store.go. Flushing here is
+// not an option: apply is a closure over the exported Raise/Resolve, which
+// re-acquire emitMu, and both callers already hold emitMu and mu.
 //
 // The generation bump is unconditional, BEFORE the "is there anything to
 // cancel" check, because the case that needs it is precisely the one where
