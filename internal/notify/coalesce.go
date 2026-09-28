@@ -162,8 +162,20 @@ func (n *Notifier) coalesce(key string, window time.Duration, kind pendingKind, 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if _, raced := n.pending[key]; raced {
-		// Another goroutine opened the window while fn ran. Its timer is as
-		// good as ours would have been; a second one would double-fire.
+		// Another goroutine opened the window while fn ran, so one is
+		// already armed and its timer is as good as ours would have been.
+		//
+		// DEFENSIVE, not load-bearing, and an earlier revision of this
+		// comment overstated it: dropping the guard would NOT double-fire.
+		// Falling through reaches armLocked, which finds the existing entry,
+		// Stop()s its live timer and re-arms over the SAME generation -- so
+		// there would still be exactly one timer and exactly one
+		// windowClosed for the key. What it would actually cost is the
+		// RESTART: the window would then run a further full period from
+		// here rather than from the moment the racing goroutine opened it,
+		// deferring that key's settled state by up to one extra window (10s,
+		// for audio). Cheap to keep, and it preserves the leading edge's
+		// promise that a window is measured from the change that opened it.
 		return
 	}
 	if n.cancelGen != gen {

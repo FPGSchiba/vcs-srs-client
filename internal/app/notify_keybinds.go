@@ -131,12 +131,19 @@ func (a *App) notifyHotkeyState(dto HotkeyStateDTO) {
 }
 
 // swapFailedBindings records failed as the per-binding failure set this
-// adapter has now raised, and returns the sorted action ids that were in the
+// adapter has now raised, and returns the action ids that were in the
 // PREVIOUS set and are not in this one -- i.e. exactly the bindings whose
 // notification should now resolve.
 //
-// Sorted for the same reason the raise loop sorts: a deterministic emit
-// order makes the resulting list order stable across runs and testable.
+// The order is map-iteration order, deliberately UNSORTED, unlike the raise
+// loop above. That loop's sort is real: raising prepends, so the raise order
+// decides the list order the user sees. Resolving does not -- ResolveWindowed
+// marks an existing item in place and moves nothing -- so a sort here bought
+// no observable determinism at all. It used to be here carrying a copy of
+// the raise loop's rationale, which simply did not apply; removed in fix
+// wave 6 rather than re-documented, so there is one less line claiming a
+// property nothing depends on.
+//
 // notifMu is released before the caller touches the notifier, keeping this
 // lock off every path that publishes.
 func (a *App) swapFailedBindings(failed map[string]string) []string {
@@ -156,7 +163,6 @@ func (a *App) swapFailedBindings(failed map[string]string) []string {
 			gone = append(gone, id)
 		}
 	}
-	sort.Strings(gone)
 	return gone
 }
 

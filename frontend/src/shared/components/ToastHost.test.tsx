@@ -211,6 +211,38 @@ describe("ToastHost", () => {
     expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
   });
 
+  it("never toasts an already-resolved error the host is seeing for the first time", () => {
+    // The HYDRATION case, and the only thing the `!i.resolved` clause of the
+    // `fresh` filter defends. Its sibling above -- an item that resolves
+    // while its toast is up -- cannot reach it: by then the id is already in
+    // `seen`, so the signature check short-circuits and the retraction is
+    // done by `live` instead. Dropping `!i.resolved` therefore left every
+    // other test in this file green.
+    //
+    // Real scenario: the main window mounts, or re-hydrates through
+    // GetNotifications after a reload, while a microphone error that already
+    // FAILED AND RECOVERED is still in the backend's list. `seen` starts
+    // empty, so an unguarded filter treats the resolved error as fresh and
+    // pops a toast for a fault that has already cleared -- which is exactly
+    // the complaint the effect's own comment says it prevents. signature()
+    // deliberately excludes `resolved`, so this clause is the only defence.
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({
+        snap: { items: [item({ resolved: true, unread: false })], unread: 0 },
+      });
+    });
+
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+
+    // And it must stay absent: no timer was armed, so nothing can surface it
+    // on a later tick either.
+    act(() => {
+      vi.advanceTimersByTime(6500);
+    });
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+  });
+
   it("retracts a visible toast when its item leaves the list", () => {
     render(<ToastHost />);
     act(() => {

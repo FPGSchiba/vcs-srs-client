@@ -325,6 +325,62 @@ func TestRaiseInfoNeverSoundsAndNeverCountsUnread(t *testing.T) {
 	}
 }
 
+// TestRaiseInfoStaysReadWhenItUPDATESInPlace covers raiseLocked's OTHER
+// unread assignment -- the in-place UPDATE branch, not the insert.
+//
+// The two are byte-identical lines and it would be easy to assume one test
+// covers both. It does not: TestRaiseInfoNeverSoundsAndNeverCountsUnread and
+// TestPostInfoIsRaisedAlreadyRead only ever reach insertLocked, so mutating
+// the update branch's line to `item.Unread = true` left the whole suite
+// green. That is asymmetric coverage on the ROADMAP behaviour "informational
+// never reaches the badge or the bell", which insertLocked's comment calls
+// the one rule that makes it structural rather than cosmetic.
+//
+// No production path reaches it TODAY -- the sole info raise
+// (notifyJoystickState's "unsupported" case) has constant content, so its
+// second raise is an identity no-op and never gets here. It becomes live the
+// moment either of two things happens, and both are on the near roadmap:
+//
+//   - a warn -> info transition on the SHARED joystick.global key, which
+//     notifyJoystickState's switch already has the shape for; or
+//   - 7.3 / 7.4 adding an info condition whose body carries variable content
+//     (a client name, a frequency), so consecutive raises differ.
+//
+// Then a mutated line would silently put an info item in the badge count and
+// the bell list -- visible to the user, invisible to the suite.
+func TestRaiseInfoStaysReadWhenItUPDATESInPlace(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	const key = "joystick.global"
+	n.Raise(key, Item{Title: "Joystick input is unsupported on this platform", Severity: SeverityInfo})
+
+	// A DIFFERING fingerprint under the same key: findByKeyLocked hits an
+	// unresolved item, so this takes the update-in-place branch rather than
+	// inserting a second item.
+	now = now.Add(time.Second)
+	n.Raise(key, Item{
+		Title:    "Joystick input is unsupported on this platform",
+		Body:     "Joystick and gamepad bindings are available on Windows and Linux only.",
+		Severity: SeverityInfo,
+	})
+
+	snap := n.Snapshot()
+	if len(snap.Items) != 1 {
+		t.Fatalf("Items = %d, want 1 -- a differing fingerprint UPDATES, it does not stack", len(snap.Items))
+	}
+	if snap.Items[0].Body == "" {
+		t.Fatal("the in-place update did not land; this test is not reaching the branch it exists for")
+	}
+	if snap.Items[0].Unread {
+		t.Fatal("the updated info item is unread -- info is raised already-read on BOTH " +
+			"of raiseLocked's paths, or it reaches the badge and the bell")
+	}
+	if snap.Unread != 0 {
+		t.Fatalf("Unread = %d, want 0 -- an info item must never reach the badge", snap.Unread)
+	}
+}
+
 func TestConcurrentRaiseIsSafe(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	n := New(Options{
