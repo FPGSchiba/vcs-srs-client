@@ -326,16 +326,32 @@ func TestEachAudioKeyResolvesIndependently(t *testing.T) {
 	// The output recovers; the input does not.
 	a.notifyAudioState(AudioStateDTO{InputError: "mic gone"})
 
-	time.Sleep(120 * time.Millisecond)
+	// Waited on as an EVENT, not as a duration -- see waitForNotify in
+	// notify_keybinds_test.go. The WAIT carries half the assertion ("the
+	// output item did resolve once the trailing timer fired"); the checks
+	// below carry the other, load-bearing half: the input item, whose error
+	// never cleared, was NOT dragged along with it.
+	snap := waitForNotify(t, n, "the output item to resolve once the trailing timer fires",
+		func(s notify.Snapshot) bool {
+			for _, it := range s.Items {
+				if it.Key == "audio.output" && it.Resolved {
+					return true
+				}
+			}
+			return false
+		})
 
 	var input, output notify.Item
-	for _, it := range n.Snapshot().Items {
+	for _, it := range snap.Items {
 		switch it.Key {
 		case "audio.input":
 			input = it
 		case "audio.output":
 			output = it
 		}
+	}
+	if input.Key == "" {
+		t.Fatalf("no audio.input item in the snapshot at all; items = %+v", snap.Items)
 	}
 	if input.Resolved {
 		t.Fatal("the input item resolved while its error was still present")

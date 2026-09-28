@@ -18,6 +18,43 @@ func withNotifier(t *testing.T) (*App, *notify.Notifier) {
 	return a, n
 }
 
+// waitForNotify waits until the notifier's snapshot satisfies cond and
+// returns that snapshot.
+//
+// Every notification test in this package that has to wait for a COALESCING
+// WINDOW to close goes through here rather than through a time.Sleep sized
+// against the injected window. The trailing edge is delivered by a
+// time.AfterFunc goroutine (internal/notify/coalesce.go), so a sleep is a
+// bet that the runtime scheduled that goroutine inside the chosen margin.
+// The form this replaces slept 120 ms against a 30 ms window -- a 4x margin,
+// which is exactly the shape of a test that passes locally a thousand times
+// and fails on a loaded box, with no failure message that points at the
+// scheduler. Waiting on the STATE removes the bet: the timeout below is 1s,
+// roughly 30x the injected window, and is reached only when the state
+// genuinely never arrives.
+//
+// cond is also where the old form could PANIC rather than fail: it indexed
+// n.Snapshot().Items[0] unguarded, so a regression that left the list empty
+// crashed the whole test binary and took every other test's result with it.
+// Every cond passed here MUST check length before indexing; the timeout path
+// below is a clean t.Fatalf naming what was awaited and printing the
+// snapshot that never satisfied it.
+func waitForNotify(t *testing.T, n *notify.Notifier, what string, cond func(notify.Snapshot) bool) notify.Snapshot {
+	t.Helper()
+	const timeout = time.Second
+	deadline := time.Now().Add(timeout)
+	for {
+		s := n.Snapshot()
+		if cond(s) {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s; snapshot = %+v", timeout, what, s)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestGlobalHotkeyFailureRaisesOnceWithPermission(t *testing.T) {
 	a, n := withNotifier(t)
 
@@ -191,12 +228,9 @@ func TestJoystickErrorIsWarnAndResolves(t *testing.T) {
 	// internal/notify/coalesce.go), so it is deferred to the trailing timer
 	// rather than applied synchronously -- the same behaviour
 	// internal/notify/coalesce_test.go's TestFlapThatStopsStillEmitsItsSettledState
-	// exercises. withNotifier wires no OnChange channel to wait on, so this
-	// waits out the injected window instead of asserting synchronously.
-	time.Sleep(120 * time.Millisecond)
-	if !n.Snapshot().Items[0].Resolved {
-		t.Fatal("the joystick item did not resolve when the error cleared")
-	}
+	// exercises. Waited on as an EVENT, not as a duration: see waitForNotify.
+	waitForNotify(t, n, "the joystick item to resolve once the trailing timer fires",
+		func(s notify.Snapshot) bool { return len(s.Items) == 1 && s.Items[0].Resolved })
 }
 
 func TestNotifyWithNoNotifierDoesNotPanic(t *testing.T) {
