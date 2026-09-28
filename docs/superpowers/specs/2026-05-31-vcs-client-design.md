@@ -198,7 +198,7 @@ github.com/FPGSchiba/vcs-srs-client/
     auth/                       AuthService gRPC client
       auth.go                   InitAuth -> flow discovery -> start/continue -> UnitSelect
       guest.go                  GuestLogin path (name + password + unit_id)
-      session.go                token persistence (session.json)
+      session.go                token held in memory only (`lastToken`); corrected 2026-09-28 — no `session.json` was ever implemented, see §4.3 and R4
     control/                    SRSService gRPC client + SubscribeToUpdates stream
       client.go                 Sync/UpdateClientInfo/UpdateRadioInfo/Disconnect/GetServerSettings
       ping.go                   latency probe ticker
@@ -489,7 +489,9 @@ log/
 *.log
 
 # local-only configs that should never be committed
-session.json
+# session.json never materialized -- corrected 2026-09-28: no token file was ever
+# implemented (token is in-memory only, see §4.3 and R4), so there is nothing here
+# to ignore; entry kept out rather than silently dropped
 config.toml.local
 
 # IDE
