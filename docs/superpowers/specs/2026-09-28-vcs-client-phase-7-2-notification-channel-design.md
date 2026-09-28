@@ -279,8 +279,10 @@ Read/dismiss surface: `MarkRead(id)`, `MarkAllRead()`, `Dismiss(id)`,
 
 One small adapter per notification source, each turning a subsystem's DTO
 into an `Item`. **`internal/notify` is not touched when a source is added.**
-A reviewer should be able to grep it for "hotkey", "joystick" or "audio" and
-find nothing.
+A reviewer checks that on the IMPORT GRAPH (`go list`, see DoD 1), not with a
+text grep: the package deliberately names all three sources in its doc
+comments and in its three per-source window constants, so a grep answers a
+different question than the one being asked.
 
 Two sources tap a funnel inside `internal/app`, because each is already the
 **sole** caller of its emitter — verified: `emitHotkeyState`
@@ -774,8 +776,24 @@ designed-from-source values as such.
 1. `internal/notify` exists as a pure package with `Post` / `Raise` /
    `Resolve` / `MarkRead` / `MarkAllRead` / `Dismiss` / `Clear`, an injected
    clock and an injected `OnChange`, and no import of `internal/app`,
-   `internal/hotkeys`, `internal/joystick` or `internal/audio`. Grepping it
-   for "hotkey", "joystick" or "audio" returns nothing.
+   `internal/hotkeys`, `internal/joystick` or `internal/audio`. **The
+   invariant is on the import graph, not on vocabulary**, and it is checked
+   with
+
+   ```
+   go list -tags purego -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/notify/
+   ```
+
+   whose output must be standard library only — today exactly
+   `crypto/sha256 encoding/hex io strconv sync time`. **Not a text grep.**
+   Earlier drafts of this DoD said "grepping it for 'hotkey', 'joystick' or
+   'audio' returns nothing"; that was false when written and is false now.
+   The package doc names all three deliberately, precisely in order to
+   explain what the package does NOT know about them, and the three
+   per-source window constants `WindowHotkeys` / `WindowJoystick` /
+   `WindowAudio` name them too — a documented, deliberate exception (see
+   `notify.go`'s package doc and rulings R7 / R19). A text search cannot
+   answer an import question.
 2. Identity dedupe: rebinding nineteen actions with one unregisterable chord
    produces exactly **one** notification, proven by test.
 3. Flap suppression: a 50 Hz Raise/Resolve flap produces at most one emit per
