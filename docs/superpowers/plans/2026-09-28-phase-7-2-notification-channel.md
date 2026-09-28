@@ -339,12 +339,19 @@ Expected: PASS, three tests.
 
 - [ ] **Step 5: Verify the package has no forbidden imports**
 
+The invariant is about IMPORTS, so ask the compiler, not a text search. The
+package's doc comments deliberately name hotkeys, joysticks and audio while
+explaining that it knows nothing about them, so a grep over prose cannot
+answer this question.
+
 Run:
 ```bash
 cd /Users/schiba/Projects/vanguard/vcs-srs-client
-grep -rniE "hotkey|joystick|audio|internal/app" internal/notify/ ; echo "exit=$?"
+GOCACHE=$TMPDIR/vcs-gocache go list -tags purego -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/notify/
 ```
-Expected: no matches, `exit=1`. A match means the package has leaked knowledge of a source.
+Expected: exactly `sync time`. Any `internal/app`, `internal/hotkeys`,
+`internal/joystick` or `internal/audio` in that list means the package has
+leaked knowledge of a source.
 
 - [ ] **Step 6: Commit**
 
@@ -5587,10 +5594,14 @@ Every one must report 0. A non-zero exit is a blocker, not a note.
 
 ```bash
 cd /Users/schiba/Projects/vanguard/vcs-srs-client
-grep -rniE "hotkey|joystick|audio" internal/notify/*.go | grep -v "_test.go" | grep -v "^.*://"
+GOCACHE=$TMPDIR/vcs-gocache go list -tags purego -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/notify/
 grep -rniE "hotkey|joystick|audio" frontend/src/windows/notifications/ frontend/src/shared/store/notifications.ts
 ```
-Expected: matches only inside explanatory comments, never in an import or an identifier. Anything else means a source leaked into the generic layer.
+Expected: the Go package imports exactly `sync time` — the compiler answers
+the import question, not a text search, because the package's own doc
+comments name all three sources while explaining it knows nothing about
+them. For the frontend, matches only inside explanatory comments, never in
+an import or an identifier.
 
 - [ ] **Step 7: Commit**
 
