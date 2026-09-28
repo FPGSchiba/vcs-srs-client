@@ -242,10 +242,15 @@ func main() {
 	audioEvents := vcsevents.New(emitter)
 	if backend, err := audio.NewMalgoBackend(); err != nil {
 		appLog.Warn("audio backend unavailable; audio features are disabled", "err", err)
-		audioEvents.AudioState(app.AudioStateDTO{
+		noBackend := app.AudioStateDTO{
 			InputError:  err.Error(),
 			OutputError: err.Error(),
-		})
+		}
+		audioEvents.AudioState(noBackend)
+		// The notification channel's audio source, for the case with NO
+		// Manager at all. This is the most severe audio failure there is,
+		// and the OnState hook below can never see it.
+		gui.NotifyAudioState(noBackend)
 	} else {
 		am := audio.NewManager(backend, audio.ManagerOptions{
 			Log: appLog,
@@ -268,7 +273,9 @@ func main() {
 				// app.AudioStateDTOFrom): a hand-written mapping here is
 				// what silently dropped the device/substitution fields
 				// from the event path while State carried them.
-				audioEvents.AudioState(app.AudioStateDTOFrom(st))
+				dto := app.AudioStateDTOFrom(st)
+				audioEvents.AudioState(dto)
+				gui.NotifyAudioState(dto)
 			},
 			OnVU: func(v audio.VU) {
 				audioEvents.AudioVU(audioVUPayload{Input: v.Input, Output: v.Output})

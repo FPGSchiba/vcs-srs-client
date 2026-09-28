@@ -1,0 +1,161 @@
+package app
+
+import (
+	"testing"
+	"time"
+
+	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
+	"github.com/FPGSchiba/vcs-srs-client/internal/state"
+)
+
+func TestXrunCountersProduceNoNotification(t *testing.T) {
+	a, n := withNotifier(t)
+
+	// THE critical audio test. emitStateIfChanged compares the whole State
+	// struct, xrun counters included, and runs every 2s poll tick -- so a
+	// glitching engine emits ~1800 times an hour with nothing the user can
+	// see having changed. The adapter's projection is what makes including
+	// audio safe at all.
+	base := AudioStateDTO{Running: true, InputDevice: "mic-1", OutputDevice: "spk-1"}
+	for i := 0; i < 1800; i++ {
+		st := base
+		st.Overruns = uint64(i)
+		st.Underruns = uint64(i * 2)
+		a.NotifyAudioState(st)
+	}
+
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0 -- xrun counters must never produce a notification", got)
+	}
+}
+
+func TestRunningAndStartingAreNotFaults(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.NotifyAudioState(AudioStateDTO{Running: false, Starting: true})
+	a.NotifyAudioState(AudioStateDTO{Running: true, Starting: false})
+
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0 -- lifecycle is not a fault", got)
+	}
+}
+
+func TestInputErrorRaisesAnErrorNotification(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.NotifyAudioState(AudioStateDTO{InputError: "device not found"})
+
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	it := items[0]
+	if it.Key != "audio.input" {
+		t.Fatalf("Key = %q, want \"audio.input\"", it.Key)
+	}
+	if it.Severity != notify.SeverityError {
+		t.Fatalf("Severity = %q, want error -- a dead microphone in a voice-comms client is critical", it.Severity)
+	}
+	if it.Body != "device not found" {
+		t.Fatalf("Body = %q, want the backend's error text", it.Body)
+	}
+}
+
+func TestInputAndOutputAreIndependentKeys(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone", OutputSubstituted: true, OutputDevice: "spk-default"})
+
+	items := n.Snapshot().Items
+	if len(items) != 2 {
+		t.Fatalf("Items = %d, want 2 -- a failed input and a substituted output are separate items", len(items))
+	}
+	keys := map[string]bool{}
+	for _, it := range items {
+		keys[it.Key] = true
+	}
+	if !keys["audio.input"] || !keys["audio.output.substituted"] {
+		t.Fatalf("keys = %v, want audio.input and audio.output.substituted", keys)
+	}
+}
+
+func TestSubstitutionIsWarnNotError(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.NotifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "mic-default"})
+
+	it := n.Snapshot().Items[0]
+	if it.Severity != notify.SeverityWarn {
+		t.Fatalf("Severity = %q, want warn -- audio still works, just not on the chosen device", it.Severity)
+	}
+	if it.Key != "audio.input.substituted" {
+		t.Fatalf("Key = %q, want \"audio.input.substituted\"", it.Key)
+	}
+	if contextValue(it, "IN USE") != "mic-default" {
+		t.Fatalf("IN USE = %q, want \"mic-default\"", contextValue(it, "IN USE"))
+	}
+}
+
+func TestEachAudioKeyResolvesIndependently(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone", OutputError: "spk gone"})
+	// The output recovers; the input does not.
+	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone"})
+
+	// The second call's Resolve("audio.output") lands inside WindowAudio's
+	// still-open 10s coalescing window opened by the first call's Raise (see
+	// internal/notify/coalesce.go), so it is deferred to the trailing timer
+	// rather than applied synchronously -- the same behaviour
+	// notify_keybinds_test.go's TestJoystickErrorIsWarnAndResolves documents
+	// for WindowJoystick. withNotifier wires no OnChange channel to wait on,
+	// so this waits out the real window instead of asserting synchronously.
+	time.Sleep(notify.WindowAudio + 200*time.Millisecond)
+
+	var input, output notify.Item
+	for _, it := range n.Snapshot().Items {
+		switch it.Key {
+		case "audio.input":
+			input = it
+		case "audio.output":
+			output = it
+		}
+	}
+	if input.Resolved {
+		t.Fatal("the input item resolved while its error was still present")
+	}
+	if !output.Resolved {
+		t.Fatal("the output item did not resolve when its error cleared")
+	}
+}
+
+func TestNoBackendDTORaisesBothErrorKeys(t *testing.T) {
+	a, n := withNotifier(t)
+
+	// main.go:225's hand-pushed DTO when NewMalgoBackend fails: no Manager
+	// exists, so this is the ONLY signal that audio is dead entirely. An
+	// adapter hung only off the Manager's OnState would miss it.
+	a.NotifyAudioState(AudioStateDTO{
+		InputError:  "malgo: no backend",
+		OutputError: "malgo: no backend",
+	})
+
+	items := n.Snapshot().Items
+	if len(items) != 2 {
+		t.Fatalf("Items = %d, want 2 -- both directions genuinely are dead", len(items))
+	}
+	for _, it := range items {
+		if it.Severity != notify.SeverityError {
+			t.Fatalf("item %q severity = %q, want error", it.Key, it.Severity)
+		}
+	}
+}
+
+func TestAudioNotifyWithNoNotifierDoesNotPanic(t *testing.T) {
+	// state.New(), not a nil store: NewForTest's initVoice unconditionally
+	// calls store.OnRadiosChanged, which dereferences a nil *state.Store --
+	// see notify_keybinds_test.go's sibling TestNotifyWithNoNotifierDoesNotPanic.
+	// The point under test is "no notifier", not "no state store".
+	a := NewForTest(state.New(), nil, nil)
+	a.NotifyAudioState(AudioStateDTO{InputError: "e"})
+}
