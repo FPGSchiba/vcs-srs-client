@@ -55,25 +55,31 @@ func TestFlapThatStopsStillEmitsItsSettledState(t *testing.T) {
 	})
 	defer n.StopTimers()
 
-	// Use a short real window so the trailing timer fires inside the test.
+	// A short real window, so the trailing timer fires inside the test.
 	const window = 40 * time.Millisecond
 
+	// Leading edge: the condition is raised and published immediately.
 	n.RaiseWindowed("joystick.global", Item{Title: "Joystick unavailable", Severity: SeverityWarn}, window)
-	<-settled // the leading edge
+	<-settled
 
-	// Flap, then STOP with the condition true. The final Raise lands inside
-	// the window, so nothing emits it synchronously -- only the trailing
-	// timer can, and without one the error would never be shown.
+	// The flap then STOPS with the condition CLEARED. That final Resolve
+	// lands inside the open window, so nothing emits it synchronously --
+	// only the trailing timer can. Without one the UI would be left showing
+	// a failure that has already gone away, for the life of the process.
+	//
+	// Note the settled state must DIFFER from what the leading edge
+	// published, or there is genuinely nothing to emit: a flap that ends on
+	// the same content it started with leaves the UI already correct, and
+	// Raise's identity dedupe is right to stay silent.
 	n.ResolveWindowed("joystick.global", window)
-	n.RaiseWindowed("joystick.global", Item{Title: "Joystick unavailable", Severity: SeverityWarn}, window)
 
 	select {
 	case s := <-settled:
 		if len(s.Items) == 0 {
 			t.Fatal("settled snapshot is empty")
 		}
-		if s.Items[0].Resolved {
-			t.Fatal("settled state is Resolved; the flap stopped with the condition TRUE")
+		if !s.Items[0].Resolved {
+			t.Fatal("settled state is not Resolved; the flap stopped with the condition CLEARED")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the trailing timer never fired -- a flap that stops would leave its final state never emitted")

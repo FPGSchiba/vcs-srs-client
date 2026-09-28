@@ -89,32 +89,17 @@ func (n *Notifier) windowClosed(key string) {
 	n.mu.Unlock()
 
 	apply()
-	// apply() is the real Raise/Resolve, which only publishes when its own
-	// content actually changed. A flap that ends back at the SAME content it
-	// started with (error -> nil -> error, e.g.) is a legitimate settle, but
-	// Raise's identity dedupe (see raiseLocked) sees no change from the last
-	// committed state and stays silent -- exactly the "shows nothing at all"
-	// failure this window exists to prevent. forceEmit re-confirms the
-	// settled state unconditionally so the trailing edge is never silent,
-	// at the cost of one harmless duplicate broadcast when apply() already
-	// published (Snapshot is a full replace, so a repeat is a no-op for the
-	// receiver).
-	n.forceEmit()
-}
-
-// forceEmit publishes the current snapshot unconditionally, bypassing
-// Raise/Resolve's publish-only-on-change gate. Caller holds neither mu nor
-// emitMu. Never plays a sound -- only a genuinely new or changed item should
-// be audible, and apply() already handled that for a real change.
-func (n *Notifier) forceEmit() {
-	n.emitMu.Lock()
-	defer n.emitMu.Unlock()
-
-	n.mu.Lock()
-	snap := n.snapshotLocked()
-	n.mu.Unlock()
-
-	n.publish(snap)
+	// apply() is the real Raise/Resolve, which publishes only when its own
+	// content actually changed. A flap that settles back onto EXACTLY the
+	// content already committed (and thus already published) correctly
+	// publishes nothing here -- the UI already shows the right thing, and
+	// broadcasting an identical Snapshot would be the same bus noise
+	// EventAudioVU and the joystick manager are documented to suppress. The
+	// trailing timer's job is only to make sure a settle that DOES differ
+	// from the last published state -- clearing, changing, or newly
+	// occurring -- gets its own emit instead of being silently dropped by
+	// the coalescing window; it is not a guarantee that every window close
+	// broadcasts something.
 }
 
 // windowFor recalls the window a key was last coalesced with, so a
