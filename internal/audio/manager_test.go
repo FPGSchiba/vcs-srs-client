@@ -1724,16 +1724,54 @@ func TestDSPLoopPullsTheSourceOncePerTick(t *testing.T) {
 	}
 }
 
+// TestPlayNotificationOnStoppedManagerDrops is the only guard on spec 10 /
+// DoD 13's "PlayNotification on a stopped Manager drops rather than
+// lingering".
+//
+// Reaching that rule takes deliberate setup, and the earlier version of this
+// test did not do it: PlayNotification returns at its FIRST line when
+// !m.notif.Available(id), and the pack ships silent (notify_alert has no
+// sample), so the running/pool gate was never executed at all and the
+// assertion held on a Manager with an empty body. A sample is injected
+// straight into the map here instead -- same package, so the unexported
+// field is reachable -- because notify_alert.wav must NOT exist (spec 9: the
+// sound ships silent and the pack is not something to substitute).
 func TestPlayNotificationOnStoppedManagerDrops(t *testing.T) {
 	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+	m.notif.samples[NotifyAlert] = make([]float32, FrameSamples)
+	if !m.notif.Available(NotifyAlert) {
+		t.Fatal("the injected sample did not make NotifyAlert available; this test would be vacuous")
+	}
 
-	// Never started. A queued id surviving until some later, unrelated
-	// Start() drained it would play an alert for an event minutes past --
-	// the same reasoning PlayEffect's doc gives for dropping.
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Held across Stop(), which nils m.notifVoices: the queue has to stay
+	// observable after the generation it belonged to is gone.
+	m.mu.Lock()
+	pool := m.notifVoices
+	m.mu.Unlock()
+	if pool == nil {
+		t.Fatal("notifVoices is nil after Start -- nothing to observe")
+	}
+	m.Stop()
+
+	// Stopped. A queued id surviving until some later, unrelated Start()
+	// drained it would play an alert for an event minutes past -- the same
+	// reasoning PlayEffect's doc gives for dropping.
 	m.PlayNotification(NotifyAlert)
 
-	if m.notifVoices != nil {
-		t.Fatal("notifVoices is non-nil on a manager that was never started")
+	pool.mu.Lock()
+	pending := len(pool.pending)
+	pool.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending = %d after PlayNotification on a stopped Manager, want 0 -- the id lingered into the dead generation's pool", pending)
+	}
+	m.mu.Lock()
+	v := m.notifVoices
+	m.mu.Unlock()
+	if v != nil {
+		t.Fatal("notifVoices is non-nil after Stop -- the generation's pool must not outlive it")
 	}
 }
 
