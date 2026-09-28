@@ -349,7 +349,11 @@ Run:
 cd /Users/schiba/Projects/vanguard/vcs-srs-client
 GOCACHE=$TMPDIR/vcs-gocache go list -tags purego -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/notify/
 ```
-Expected: exactly `sync time`. Any `internal/app`, `internal/hotkeys`,
+Expected at THIS point in the sequence: exactly `sync time`. (The set grows
+as later tasks land: Task 2 adds `strconv`, Task 3 adds `crypto/sha256`,
+`encoding/hex` and `io` for the fingerprint hasher, so the final expected set
+is `crypto/sha256 encoding/hex io strconv sync time`.) Any `internal/app`,
+`internal/hotkeys`,
 `internal/joystick` or `internal/audio` in that list means the package has
 leaked knowledge of a source.
 
@@ -5602,7 +5606,9 @@ grep -rniE "hotkey|joystick|audio" frontend/src/windows/notifications/*.tsx --in
 # The invariant that actually matters: no branching on an item's origin.
 grep -rnE "item\.key\s*(===|\.startsWith|\.includes)|key\.startsWith" frontend/src/windows/notifications/
 ```
-Expected: the Go package imports exactly `sync time` — the compiler answers
+Expected: the Go package imports exactly `crypto/sha256 encoding/hex io
+strconv sync time` — all standard library, none of them a subsystem. The
+compiler answers
 the import question, not a text search, because the package's own doc
 comments name all three sources while explaining it knows nothing about
 them. For the frontend, BOTH greps return no matches: the first because the
