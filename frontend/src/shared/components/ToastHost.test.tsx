@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { StrictMode } from "react";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 
 import { ToastHost } from "./ToastHost";
 import { useNotifications, emptySnapshot, type NotifyItem } from "../store/notifications";
@@ -155,5 +155,120 @@ describe("ToastHost", () => {
     // the timer -- otherwise it would fire into an unmounted tree.
     expect(clearSpy).toHaveBeenCalledTimes(1);
     clearSpy.mockRestore();
+  });
+
+  it("re-toasts when an item changes content in place under the same id", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({
+        snap: { items: [item({ context: [{ key: "PERMISSION", value: "denied" }] })], unread: 1 },
+      });
+    });
+    expect(screen.getByText("no backend")).toBeInTheDocument();
+
+    act(() => {
+      // Exactly what Go's raiseLocked does on a DIFFERING fingerprint: same
+      // id, new content, re-marked unread -- and the sound fires. Spec 3.8:
+      // "it fires on exactly the same items the toast does. One rule, two
+      // surfaces." Gated on the id alone this was a sound with nothing new
+      // on screen. Spec 5.1's `denied -> granted-but-still-unregistered`
+      // transition is exactly this update.
+      useNotifications.setState({
+        snap: {
+          items: [
+            item({
+              body: "accessibility granted, still unregistered",
+              context: [{ key: "PERMISSION", value: "granted" }],
+            }),
+          ],
+          unread: 1,
+        },
+      });
+    });
+
+    expect(screen.getByText("accessibility granted, still unregistered")).toBeInTheDocument();
+    expect(screen.queryByText("no backend")).toBeNull();
+    // Replaced, not stacked: `key={t.id}` would otherwise be duplicated.
+    expect(screen.getAllByText("Global hotkeys unavailable")).toHaveLength(1);
+  });
+
+  it("retracts a visible toast when its item resolves", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+    expect(screen.getByText("Global hotkeys unavailable")).toBeInTheDocument();
+
+    act(() => {
+      // A microphone error that clears a second later. Left up, the toast
+      // would claim a fault that is already gone for another 5.5s.
+      vi.advanceTimersByTime(1000);
+      useNotifications.setState({
+        snap: { items: [item({ resolved: true, unread: false })], unread: 0 },
+      });
+    });
+
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+  });
+
+  it("retracts a visible toast when its item leaves the list", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+    expect(screen.getByText("Global hotkeys unavailable")).toBeInTheDocument();
+
+    act(() => {
+      // CLEAR ALL, or a Dismiss from the popout.
+      useNotifications.setState({ snap: emptySnapshot() });
+    });
+
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+  });
+
+  it("does not re-arm a dismiss timer for a hand-dismissed toast", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+
+    const setSpy = vi.spyOn(globalThis, "setTimeout");
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Dismiss Global hotkeys unavailable"));
+    });
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+
+    act(() => {
+      // The item is still present and unresolved backend-side -- the
+      // condition has not gone away just because the user closed the toast
+      // -- so every subsequent republish used to re-arm a phantom 6.5s
+      // timer, forever.
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+
+    expect(setSpy.mock.calls.filter((c) => c[1] === 6500)).toHaveLength(0);
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+    setSpy.mockRestore();
+  });
+
+  it("re-toasts a hand-dismissed item when its content changes", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+    act(() => {
+      fireEvent.click(screen.getByLabelText("Dismiss Global hotkeys unavailable"));
+    });
+    expect(screen.queryByText("Global hotkeys unavailable")).toBeNull();
+
+    act(() => {
+      // The control for the test above: suppressing the re-arm must not
+      // become suppressing the item. A dismissal answers the content the
+      // user saw; a content change is a new occurrence.
+      useNotifications.setState({ snap: { items: [item({ body: "device disappeared" })], unread: 1 } });
+    });
+
+    expect(screen.getByText("device disappeared")).toBeInTheDocument();
   });
 });
