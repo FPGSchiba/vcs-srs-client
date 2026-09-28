@@ -55,7 +55,7 @@ func TestNotificationSFXIDWithNoSettingsBackendIsSilent(t *testing.T) {
 
 func TestPlayNotificationSFXWithNoAudioManagerDoesNotPanic(t *testing.T) {
 	a := appWithSoundSetting(t, true)
-	a.PlayNotificationSFX("error")
+	a.playNotificationSFX("error")
 }
 
 // TestNotificationSFXIDIsRaceFreeAgainstASettingsWrite pins that the gate
@@ -63,7 +63,7 @@ func TestPlayNotificationSFXWithNoAudioManagerDoesNotPanic(t *testing.T) {
 //
 // Both halves are production paths: SetSettings repoints sb.cfg from the
 // Wails binding goroutine while the audio poll or joystick poll goroutine
-// fires a notification through OnSound -> PlayNotificationSFX. The bug this
+// fires a notification through OnSound -> playNotificationSFX. The bug this
 // caught was the nil check -- `if sb == nil || sb.cfg == nil` OUTSIDE the
 // lock, which -race reports as a write/read race on sb.cfg. Its sibling
 // configuredAudioDevices does the same nil check INSIDE the lock, which is

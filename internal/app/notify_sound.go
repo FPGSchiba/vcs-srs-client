@@ -45,7 +45,7 @@ func (a *App) notificationSFXID(severity string) string {
 	return audio.NotifyAlert
 }
 
-// PlayNotificationSFX plays the sound marking a notification, if its
+// playNotificationSFX plays the sound marking a notification, if its
 // severity earns one.
 //
 // It ships SILENT: notify_alert.wav does not exist, bringing the outstanding
@@ -54,11 +54,15 @@ func (a *App) notificationSFXID(severity string) string {
 // wiring is correct and testable today and goes audible the moment the
 // sample lands.
 //
-// Exported for main.go's notify.Options.OnSound hook. It cannot route
-// straight to the audio Manager there: the Manager does not exist yet when
-// the notifier is constructed, and the gate has to consult the settings
-// backend anyway.
-func (a *App) PlayNotificationSFX(severity string) {
+// UNEXPORTED, and reached from main.go's notify.Options.OnSound hook through
+// the package-level PlayNotificationSFX below. Every exported METHOD on App
+// is bound into the webview by application.NewService (main.go), and a
+// renderer able to fire the alert sound on demand is not something this
+// wiring needs -- the same rule setCaptureTimeout and setNotifyWindows
+// follow (ruling R13). OnSound cannot route straight to the audio Manager
+// either: the Manager does not exist yet when the notifier is constructed,
+// and the gate has to consult the settings backend anyway.
+func (a *App) playNotificationSFX(severity string) {
 	id := a.notificationSFXID(severity)
 	if id == "" {
 		return
@@ -69,3 +73,11 @@ func (a *App) PlayNotificationSFX(severity string) {
 	}
 	m.PlayNotification(id)
 }
+
+// PlayNotificationSFX plays the sound marking a notification. main.go hands
+// it to notify.Options.OnSound.
+//
+// Package-level rather than a method on *App for the reason NotifyAudioState
+// documents: application.NewService(gui) binds exported METHODS into the
+// webview, and package-level functions are invisible to it.
+func PlayNotificationSFX(a *App, severity string) { a.playNotificationSFX(severity) }

@@ -16,7 +16,7 @@ import (
 // only guard on DoD 9 and it could not see the bug DoD 9 exists to prevent.
 //
 // Nothing here carries a fault, so all four raiseOrResolve calls in
-// NotifyAudioState take the RESOLVE branch and no notify.Item is ever
+// notifyAudioState take the RESOLVE branch and no notify.Item is ever
 // constructed. The projection's CONTENTS therefore go unevaluated: folding
 // dto.Overruns straight into the item's Context -- exactly the mistake the
 // projection exists to prevent -- left this test passing.
@@ -36,7 +36,7 @@ func TestXrunCountersProduceNoNotification(t *testing.T) {
 		st := base
 		st.Overruns = uint64(i)
 		st.Underruns = uint64(i * 2)
-		a.NotifyAudioState(st)
+		a.notifyAudioState(st)
 	}
 
 	if got := len(n.Snapshot().Items); got != 0 {
@@ -115,7 +115,7 @@ func TestPersistentFaultWithMovingXrunsDoesNotChurn(t *testing.T) {
 		st := base
 		st.Overruns = uint64(i)
 		st.Underruns = uint64(i * 2)
-		a.NotifyAudioState(st)
+		a.notifyAudioState(st)
 		time.Sleep(10 * time.Millisecond) // outlast the window: next poll is a leading edge
 	}
 
@@ -146,7 +146,7 @@ func TestXrunMovementDoesNotResurrectADismissedFault(t *testing.T) {
 	a, n, counts := withCountingNotifier(t)
 
 	base := AudioStateDTO{Running: true, InputDevice: "mic-1", InputError: "device not found"}
-	a.NotifyAudioState(base)
+	a.notifyAudioState(base)
 	items := n.Snapshot().Items
 	if len(items) != 1 {
 		t.Fatalf("Items = %d, want 1", len(items))
@@ -162,7 +162,7 @@ func TestXrunMovementDoesNotResurrectADismissedFault(t *testing.T) {
 		st := base
 		st.Overruns = uint64(i)
 		st.Underruns = uint64(i * 2)
-		a.NotifyAudioState(st)
+		a.notifyAudioState(st)
 	}
 
 	snap := n.Snapshot()
@@ -180,8 +180,8 @@ func TestXrunMovementDoesNotResurrectADismissedFault(t *testing.T) {
 func TestRunningAndStartingAreNotFaults(t *testing.T) {
 	a, n := withNotifier(t)
 
-	a.NotifyAudioState(AudioStateDTO{Running: false, Starting: true})
-	a.NotifyAudioState(AudioStateDTO{Running: true, Starting: false})
+	a.notifyAudioState(AudioStateDTO{Running: false, Starting: true})
+	a.notifyAudioState(AudioStateDTO{Running: true, Starting: false})
 
 	if got := len(n.Snapshot().Items); got != 0 {
 		t.Fatalf("Items = %d, want 0 -- lifecycle is not a fault", got)
@@ -191,7 +191,7 @@ func TestRunningAndStartingAreNotFaults(t *testing.T) {
 func TestInputErrorRaisesAnErrorNotification(t *testing.T) {
 	a, n := withNotifier(t)
 
-	a.NotifyAudioState(AudioStateDTO{InputError: "device not found"})
+	a.notifyAudioState(AudioStateDTO{InputError: "device not found"})
 
 	items := n.Snapshot().Items
 	if len(items) != 1 {
@@ -212,7 +212,7 @@ func TestInputErrorRaisesAnErrorNotification(t *testing.T) {
 func TestInputAndOutputAreIndependentKeys(t *testing.T) {
 	a, n := withNotifier(t)
 
-	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone", OutputSubstituted: true, OutputDevice: "spk-default"})
+	a.notifyAudioState(AudioStateDTO{InputError: "mic gone", OutputSubstituted: true, OutputDevice: "spk-default"})
 
 	items := n.Snapshot().Items
 	if len(items) != 2 {
@@ -231,7 +231,7 @@ func TestSubstitutionIsWarnNotError(t *testing.T) {
 	a, n := withNotifier(t)
 	a.settings = &settingsBackend{cfg: &config.Config{Audio: config.Audio{InputDevice: "mic-a"}}}
 
-	a.NotifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "mic-default"})
+	a.notifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "mic-default"})
 
 	it := n.Snapshot().Items[0]
 	if it.Severity != notify.SeverityWarn {
@@ -271,7 +271,7 @@ func TestSubstitutionDismissalSurvivesAHotPlugReshuffle(t *testing.T) {
 	a, n := withNotifier(t)
 	a.settings = &settingsBackend{cfg: &config.Config{Audio: config.Audio{InputDevice: "mic-a"}}}
 
-	a.NotifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "os-default-1"})
+	a.notifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "os-default-1"})
 	items := n.Snapshot().Items
 	if len(items) != 1 {
 		t.Fatalf("Items = %d, want 1", len(items))
@@ -282,7 +282,7 @@ func TestSubstitutionDismissalSurvivesAHotPlugReshuffle(t *testing.T) {
 	}
 
 	// The OS default changes; the configured device is still missing.
-	a.NotifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "os-default-2"})
+	a.notifyAudioState(AudioStateDTO{InputSubstituted: true, InputDevice: "os-default-2"})
 
 	snap := n.Snapshot()
 	if len(snap.Items) != 0 {
@@ -299,7 +299,7 @@ func TestSubstitutionDismissalSurvivesAHotPlugReshuffle(t *testing.T) {
 func TestSubstitutionWithNoSettingsBackendDoesNotPanic(t *testing.T) {
 	a, n := withNotifier(t)
 
-	a.NotifyAudioState(AudioStateDTO{OutputSubstituted: true, OutputDevice: "spk-default"})
+	a.notifyAudioState(AudioStateDTO{OutputSubstituted: true, OutputDevice: "spk-default"})
 
 	it := n.Snapshot().Items[0]
 	if contextValue(it, "CONFIGURED") != "" {
@@ -322,9 +322,9 @@ func TestEachAudioKeyResolvesIndependently(t *testing.T) {
 	// setNotifyWindows.
 	a.setNotifyWindows(0, 30*time.Millisecond)
 
-	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone", OutputError: "spk gone"})
+	a.notifyAudioState(AudioStateDTO{InputError: "mic gone", OutputError: "spk gone"})
 	// The output recovers; the input does not.
-	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone"})
+	a.notifyAudioState(AudioStateDTO{InputError: "mic gone"})
 
 	time.Sleep(120 * time.Millisecond)
 
@@ -351,7 +351,7 @@ func TestNoBackendDTORaisesBothErrorKeys(t *testing.T) {
 	// main.go:225's hand-pushed DTO when NewMalgoBackend fails: no Manager
 	// exists, so this is the ONLY signal that audio is dead entirely. An
 	// adapter hung only off the Manager's OnState would miss it.
-	a.NotifyAudioState(AudioStateDTO{
+	a.notifyAudioState(AudioStateDTO{
 		InputError:  "malgo: no backend",
 		OutputError: "malgo: no backend",
 	})
@@ -388,5 +388,46 @@ func TestAudioNotifyWithNoNotifierDoesNotPanic(t *testing.T) {
 	// see notify_keybinds_test.go's sibling TestNotifyWithNoNotifierDoesNotPanic.
 	// The point under test is "no notifier", not "no state store".
 	a := NewForTest(state.New(), nil, nil)
-	a.NotifyAudioState(AudioStateDTO{InputError: "e"})
+	a.notifyAudioState(AudioStateDTO{InputError: "e"})
+}
+
+// TestAudioNotificationsUseTheAudioWindow pins that the adapter actually
+// COALESCES on a.audioWindow(), not merely that the accessor returns the
+// right constant.
+//
+// TestNotifyWindowDefaultsAreUnoverridden covers the accessor; nothing
+// covered the call site, so replacing `window := a.audioWindow()` in
+// NotifyAudioState with notify.WindowHotkeys -- i.e. deleting audio
+// coalescing outright -- left the whole suite green. Audio is the source the
+// 10s window exists for: audio:state fires every 2s for as long as the
+// engine is glitching, and a device flapping at the poll rate would
+// otherwise publish a Snapshot and re-sound the alert on every tick.
+//
+// A long injected window so the second poll is unambiguously INSIDE it; the
+// notifier's timers are stopped by withCountingNotifier's cleanup.
+func TestAudioNotificationsUseTheAudioWindow(t *testing.T) {
+	a, n, counts := withCountingNotifier(t)
+	a.setNotifyWindows(0, time.Hour)
+
+	// Leading edge: opens the window on audio.input and publishes at once.
+	a.notifyAudioState(AudioStateDTO{Running: true, InputError: "device not found"})
+	if changes, _ := counts.read(); changes != 1 {
+		t.Fatalf("OnChange fired %d times for the leading edge, want 1", changes)
+	}
+
+	// The very next poll carries a DIFFERENT error, so identity dedupe
+	// cannot be what holds it back -- only the coalescing window can.
+	a.notifyAudioState(AudioStateDTO{Running: true, InputError: "device is busy"})
+
+	changes, _ := counts.read()
+	if changes != 1 {
+		t.Fatalf("OnChange fired %d times, want 1 -- the second poll was published "+
+			"immediately, so notifyAudioState is not coalescing on a.audioWindow() at "+
+			"all and a flapping device republishes the whole Snapshot every 2s", changes)
+	}
+	items := n.Snapshot().Items
+	if len(items) != 1 || items[0].Body != "device not found" {
+		t.Fatalf("items = %+v, want the leading edge's body still committed -- the "+
+			"changed fault belongs to the open window, not to the list", items)
+	}
 }

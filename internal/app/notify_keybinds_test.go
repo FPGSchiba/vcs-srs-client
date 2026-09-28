@@ -270,3 +270,43 @@ func TestPerBindingResolveSurvivesClearAll(t *testing.T) {
 		t.Fatalf("Items = %d, want 1 -- CLEAR ALL permanently disabled this binding's warning", got)
 	}
 }
+
+// TestUnsupportedOutranksAnErrorOnTheJoystickState pins the PRECEDENCE of
+// notifyJoystickState's `case !dto.Supported:` over its `case dto.Error !=
+// "":` sibling -- the guard that keeps macOS's "unsupported" Informational
+// even when an error string is also present.
+//
+// Narrowing the first case to `!dto.Supported && dto.Error == ""` survived
+// the suite. In production the two are practically exclusive, because
+// GetJoystickState only fills Error when err != nil && jm.Supported(); but
+// the DTO is a plain struct that any future call site can populate, and the
+// rule it encodes -- "unsupported is informational, NEVER a failure", spec
+// 4.2 -- is the one trap this adapter documents at length. Info severity is
+// raised already-read, so it reaches neither badge, bell nor toast; a Warn
+// would reach the badge and the bell, telling a macOS user their joystick
+// is broken when the platform simply has no joystick support to offer.
+func TestUnsupportedOutranksAnErrorOnTheJoystickState(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.notifyJoystickState(JoystickStateDTO{Supported: false, Error: "enumerate: no such device"})
+
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items = %d, want 1", len(items))
+	}
+	it := items[0]
+	if it.Severity != notify.SeverityInfo {
+		t.Fatalf("Severity = %q, want info -- an unsupported PLATFORM is not a failure, "+
+			"whatever else the DTO carries; warn would light the badge and the bell on "+
+			"a machine where there is nothing for the user to fix", it.Severity)
+	}
+	if !strings.Contains(it.Title, "unsupported") {
+		t.Fatalf("Title = %q, want the unsupported-platform title, not the error one", it.Title)
+	}
+	if len(it.Actions) != 0 {
+		t.Fatalf("Actions = %v, want none -- there is nothing for the user to grant or open", it.Actions)
+	}
+	if snap := n.Snapshot(); snap.Unread != 0 {
+		t.Fatalf("Unread = %d, want 0 -- info is raised already-read", snap.Unread)
+	}
+}

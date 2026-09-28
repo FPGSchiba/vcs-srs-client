@@ -168,11 +168,13 @@ func main() {
 	// OnSound is routed through gui rather than straight to the audio
 	// Manager: the Manager does not exist yet at this point, and the gate
 	// also has to consult general.play_notification_sounds, which lives in
-	// the settings backend. See app.PlayNotificationSFX.
+	// the settings backend. Both hooks go through package-level functions in
+	// internal/app rather than methods on gui, because every exported method
+	// on the service is bound into the webview (see app.NotifyAudioState).
 	notifEvents := vcsevents.New(emitter)
 	notifier := notify.New(notify.Options{
 		OnChange: func(s notify.Snapshot) { notifEvents.Notifications(s) },
-		OnSound:  func(it notify.Item) { gui.PlayNotificationSFX(string(it.Severity)) },
+		OnSound:  func(it notify.Item) { app.PlayNotificationSFX(gui, string(it.Severity)) },
 	})
 	gui.SetNotifier(notifier)
 	// Cancels every armed trailing timer on shutdown.
@@ -264,7 +266,7 @@ func main() {
 		// The notification channel's audio source, for the case with NO
 		// Manager at all. This is the most severe audio failure there is,
 		// and the OnState hook below can never see it.
-		gui.NotifyAudioState(noBackend)
+		app.NotifyAudioState(gui, noBackend)
 	} else {
 		am := audio.NewManager(backend, audio.ManagerOptions{
 			Log: appLog,
@@ -289,7 +291,7 @@ func main() {
 				// from the event path while State carried them.
 				dto := app.AudioStateDTOFrom(st)
 				audioEvents.AudioState(dto)
-				gui.NotifyAudioState(dto)
+				app.NotifyAudioState(gui, dto)
 			},
 			OnVU: func(v audio.VU) {
 				audioEvents.AudioVU(audioVUPayload{Input: v.Input, Output: v.Output})

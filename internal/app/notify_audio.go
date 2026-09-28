@@ -12,7 +12,7 @@ const (
 	keyAudioOutputSubstituted = "audio.output.substituted"
 )
 
-// NotifyAudioState translates one AudioStateDTO into notifications.
+// notifyAudioState translates one AudioStateDTO into notifications.
 //
 // This function is a PROJECTION, and the projection is the whole reason
 // audio is safe to route here at all. AudioStateDTO has ten fields;
@@ -50,11 +50,15 @@ const (
 // not which stranger the OS substituted in this second. See spec 5.4 and
 // ruling R20.
 //
-// Exported because main.go calls it from BOTH audio emit sites: the
-// Manager's OnState callback, and the hand-pushed DTO for the case where
-// NewMalgoBackend failed and no Manager was ever constructed. An adapter
-// hung only off OnState would miss the most severe audio failure there is.
-func (a *App) NotifyAudioState(dto AudioStateDTO) {
+// UNEXPORTED, and reached from main.go through the package-level
+// NotifyAudioState below rather than directly. Every exported METHOD on App
+// is bound into the webview by application.NewService (main.go), and this
+// one is not the renderer's business: bound, it would let the renderer
+// fabricate an error-severity "Microphone unavailable" notification with
+// arbitrary body text -- and, worse, silently RESOLVE a genuine microphone
+// fault out of the user's list by passing a clean DTO. That is the same rule
+// setCaptureTimeout and setNotifyWindows already follow (ruling R13).
+func (a *App) notifyAudioState(dto AudioStateDTO) {
 	n := a.notif
 	if n == nil {
 		return
@@ -114,7 +118,7 @@ func (a *App) NotifyAudioState(dto AudioStateDTO) {
 // SETTINGS ask for -- deliberately not the ids in use, which is all
 // AudioStateDTO carries.
 //
-// This is the substitution notifications' identity (see NotifyAudioState):
+// This is the substitution notifications' identity (see notifyAudioState):
 // a configured id moves only when the user moves it, so the fingerprint
 // changes only when the fault genuinely becomes a different fault.
 //
@@ -162,3 +166,17 @@ func audioSettingsAction() notify.Action {
 		Target: "settings",
 	}
 }
+
+// NotifyAudioState drives the audio notification adapter. main.go calls it
+// from BOTH audio emit sites: the Manager's OnState callback, and the
+// hand-pushed DTO for the case where NewMalgoBackend failed and no Manager
+// was ever constructed. An adapter hung only off OnState would miss the most
+// severe audio failure there is.
+//
+// A package-level FUNCTION taking the App, rather than a method on it, is
+// the whole point: application.NewService(gui) binds every exported METHOD
+// of *App into the webview, and nothing package-level is bound at all. So
+// main.go keeps its call and the renderer gains nothing. See
+// notifyAudioState for what the renderer would otherwise be able to do, and
+// PlayNotificationSFX for its sibling.
+func NotifyAudioState(a *App, dto AudioStateDTO) { a.notifyAudioState(dto) }

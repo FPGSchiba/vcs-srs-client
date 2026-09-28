@@ -353,7 +353,9 @@ func TestNotificationChannelIsWired(t *testing.T) {
 
 // TestAudioNotificationAdapterIsWiredAtBothEmitSites guards DoD 9, which
 // rests on the audio adapter being reached from BOTH of main.go's audio emit
-// sites. App.NotifyAudioState is exported for no other reason.
+// sites. app.NotifyAudioState -- a package-level function, deliberately NOT
+// a method on *App, so it stays off the webview-bound service surface --
+// exists for no other reason.
 //
 // The two sites are not interchangeable and neither is redundant:
 //
@@ -369,7 +371,7 @@ func TestNotificationChannelIsWired(t *testing.T) {
 // source-text assertion.
 func TestAudioNotificationAdapterIsWiredAtBothEmitSites(t *testing.T) {
 	text := readMainGo(t)
-	const call = "gui.NotifyAudioState("
+	const call = "app.NotifyAudioState(gui, "
 	if got := strings.Count(text, call); got != 2 {
 		t.Fatalf("main.go contains %d %s calls, want exactly 2 -- one for the no-backend DTO and one inside the Manager's OnState callback", got, call)
 	}
@@ -386,11 +388,48 @@ func TestAudioNotificationAdapterIsWiredAtBothEmitSites(t *testing.T) {
 	noBackend := strings.Index(text, call)
 	onState := strings.Index(text[noBackend+len(call):], call) + noBackend + len(call)
 	if noBackend > mgrIdx {
-		t.Error("the first gui.NotifyAudioState call is not in the NewMalgoBackend failure branch -- " +
+		t.Error("the first app.NotifyAudioState(gui, ...) call is not in the NewMalgoBackend failure branch -- " +
 			"the no-Manager case, the most severe audio failure there is, would go unnotified")
 	}
 	if onState < onStateIdx {
-		t.Error("the second gui.NotifyAudioState call is not inside the Manager's OnState callback -- " +
+		t.Error("the second app.NotifyAudioState(gui, ...) call is not inside the Manager's OnState callback -- " +
 			"every audio fault after startup would go unnotified")
+	}
+}
+
+// TestNotificationAdaptersStayOffTheBoundServiceSurface pins the M-9 fix.
+//
+// main.go registers gui with application.NewService, so EVERY exported
+// method on *App is callable from the webview. The two notification adapters
+// main.go drives -- the audio projection and the notification sound -- were
+// exported only so main.go could reach them, which contradicted the branch's
+// own rule (ruling R13, and setCaptureTimeout / setNotifyWindows' doc
+// comments): "an exported method on the service is bound and reachable from
+// the webview, and <this> is not the frontend's business".
+//
+// Concretely, a bound NotifyAudioState lets the renderer fabricate an
+// error-severity "Microphone unavailable" notification with arbitrary body
+// text, or -- by passing a clean DTO -- silently RESOLVE a genuine
+// microphone fault out of the user's list. The renderer is first-party, so
+// the impact is low; the inconsistency was the finding.
+//
+// A source-text assertion for the reason all its siblings here are: the
+// binding surface is decided by main.go, and no test inside internal/app can
+// see whether a call site went back to the method form.
+func TestNotificationAdaptersStayOffTheBoundServiceSurface(t *testing.T) {
+	text := readMainGo(t)
+	for _, banned := range []string{
+		"gui.NotifyAudioState(",
+		"gui.PlayNotificationSFX(",
+	} {
+		if strings.Contains(text, banned) {
+			t.Errorf("main.go calls %s -- that method form is bound into the webview by "+
+				"application.NewService(gui). Use the package-level app.NotifyAudioState / "+
+				"app.PlayNotificationSFX seam instead", banned)
+		}
+	}
+	if !strings.Contains(text, "app.PlayNotificationSFX(gui, ") {
+		t.Error("main.go does not route notify.Options.OnSound through " +
+			"app.PlayNotificationSFX(gui, ...) -- the notification sound would never play")
 	}
 }
