@@ -140,8 +140,10 @@ type Notifier struct {
 	suppressed map[string]string
 	// pending holds coalescing state per key. See coalesce.go.
 	pending map[string]*pendingChange
-	// windows records the window each key was last coalesced with, so a
-	// re-armed trailing timer uses the same period.
+	// windows records the window each key's OPEN coalescing window was armed
+	// with, so a re-armed trailing timer uses the same period. Written and
+	// pruned in lockstep with pending -- see retirePendingLocked for why it
+	// is pruned rather than left to accumulate.
 	windows map[string]time.Duration
 }
 

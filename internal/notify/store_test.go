@@ -505,3 +505,63 @@ func TestClearOnAnEmptyListIsANoop(t *testing.T) {
 		t.Fatalf("OnChange fired %d times, want 0", changes)
 	}
 }
+
+func TestClearDoesNotSuppressAResolvedCondition(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	// A microphone glitched and recovered.
+	n.Raise("audio.input", hotkeyItem("device disappeared"))
+	n.Resolve("audio.input")
+
+	// The user tidies away the resolved history.
+	n.Clear()
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items after Clear = %d, want 0", got)
+	}
+
+	// The same device dies again with the same error string. Resolve has
+	// already ruled that a recurrence is a NEW OCCURRENCE (spec 4.1), so
+	// CLEAR ALL must not have muted it: suppressing a resolved item inverts
+	// that rule, and raiseLocked checks suppression BEFORE it looks at
+	// Resolved, so nothing could ever lift it again.
+	n.Raise("audio.input", hotkeyItem("device disappeared"))
+	items := n.Snapshot().Items
+	if len(items) != 1 {
+		t.Fatalf("Items after the recurrence = %d, want 1 -- CLEAR ALL permanently disabled this condition", len(items))
+	}
+	if items[0].Resolved {
+		t.Fatal("the recurrence came back already-resolved")
+	}
+}
+
+func TestDismissDoesNotSuppressAResolvedItem(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	n.Raise("audio.input", hotkeyItem("device disappeared"))
+	n.Resolve("audio.input")
+	id := n.Snapshot().Items[0].ID
+	n.Dismiss(id)
+
+	n.Raise("audio.input", hotkeyItem("device disappeared"))
+	if got := len(n.Snapshot().Items); got != 1 {
+		t.Fatalf("Items after the recurrence = %d, want 1 -- dismissing a RESOLVED item must not mute its next occurrence", got)
+	}
+}
+
+func TestClearStillSuppressesAConditionThatStillHolds(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+
+	// The control for the two tests above: the narrower rule must not have
+	// become no rule at all. An UNRESOLVED condition is still suppressed, or
+	// CLEAR ALL is undone by the next routine re-emission.
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+	n.Clear()
+	n.Raise("hotkeys.global", hotkeyItem("no backend"))
+
+	if got := len(n.Snapshot().Items); got != 0 {
+		t.Fatalf("Items = %d, want 0 -- a condition that STILL HOLDS stays suppressed after CLEAR ALL", got)
+	}
+}

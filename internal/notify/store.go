@@ -117,12 +117,26 @@ func (n *Notifier) playSound(it Item) {
 // timestamp, re-marks it unread and sounds. A key whose previous item was
 // resolved gets a fresh item: a recurrence is a new occurrence, not a
 // revival.
-func (n *Notifier) Raise(key string, item Item) {
+func (n *Notifier) Raise(key string, item Item) { _ = n.raiseReport(key, item) }
+
+// raiseReport is Raise, reporting whether it actually PUBLISHED anything.
+//
+// The bool exists for coalesce: a window must only be opened on a real edge.
+// Without it a source that re-emits a level far faster than its own window
+// -- NotifyAudioState calls raise-or-resolve for all four audio keys on
+// every audio:state emission, which on a healthy system is four no-op
+// Resolves every 2s -- would hold a 10s window permanently open on nothing,
+// and defer the first genuine device fault by a full window.
+//
+// Exported Raise ignores it: a caller that is not coalescing has no use for
+// it, and widening the public signature would make every call site carry a
+// value it discards.
+func (n *Notifier) raiseReport(key string, item Item) bool {
 	if key == "" {
 		// A keyless Raise is a Post; treating it as one is kinder than
 		// silently keying everything under "".
 		n.Post(item)
-		return
+		return true
 	}
 	n.emitMu.Lock()
 	defer n.emitMu.Unlock()
@@ -131,7 +145,7 @@ func (n *Notifier) Raise(key string, item Item) {
 	changed, id := n.raiseLocked(key, item)
 	if !changed {
 		n.mu.Unlock()
-		return
+		return false
 	}
 	snap := n.snapshotLocked()
 	sound, wantSound := n.soundForLocked(id)
@@ -141,6 +155,7 @@ func (n *Notifier) Raise(key string, item Item) {
 	if wantSound {
 		n.playSound(sound)
 	}
+	return true
 }
 
 // raiseLocked applies one Raise. Reports whether anything changed, and the
@@ -188,9 +203,14 @@ func (n *Notifier) raiseLocked(key string, item Item) (bool, string) {
 // was dead for ten minutes -- while the badge stops counting it immediately.
 //
 // A no-op for an unknown or already-resolved key: no publish, no churn.
-func (n *Notifier) Resolve(key string) {
+func (n *Notifier) Resolve(key string) { _ = n.resolveReport(key) }
+
+// resolveReport is Resolve, reporting whether it actually PUBLISHED
+// anything. See raiseReport for why the bool exists and why the exported
+// method drops it.
+func (n *Notifier) resolveReport(key string) bool {
 	if key == "" {
-		return
+		return false
 	}
 	n.emitMu.Lock()
 	defer n.emitMu.Unlock()
@@ -205,7 +225,7 @@ func (n *Notifier) Resolve(key string) {
 	idx := n.findByKeyLocked(key)
 	if idx < 0 || n.items[idx].Resolved {
 		n.mu.Unlock()
-		return
+		return false
 	}
 	n.items[idx].Resolved = true
 	n.items[idx].Unread = false
@@ -213,6 +233,7 @@ func (n *Notifier) Resolve(key string) {
 	n.mu.Unlock()
 
 	n.publish(snap)
+	return true
 }
 
 // findByKeyLocked returns the index of the NEWEST item with this key, or -1.
@@ -278,13 +299,21 @@ func (n *Notifier) MarkRead(id string) {
 
 // Dismiss removes one item.
 //
-// For a KEYED item it also records the key as suppressed AT THAT
-// FINGERPRINT. Without that, dismissing "Global hotkeys unavailable" while
-// hotkeys are still unavailable would put it straight back on the next
-// applyHotkeys() -- which is every trigger add, every trigger removal and
-// every capture end. Suppression is cleared by a Raise whose fingerprint
-// differs (the condition changed) or by a Resolve (it cleared), both of
-// which mean the condition is news again.
+// For a KEYED item that is still UNRESOLVED it also records the key as
+// suppressed AT THAT FINGERPRINT. Without that, dismissing "Global hotkeys
+// unavailable" while hotkeys are still unavailable would put it straight
+// back on the next applyHotkeys() -- which is every trigger add, every
+// trigger removal and every capture end. Suppression is cleared by a Raise
+// whose fingerprint differs (the condition changed) or by a Resolve (it
+// cleared), both of which mean the condition is news again.
+//
+// A RESOLVED item is deliberately dismissed WITHOUT suppression. Suppression
+// exists to stop a condition that STILL HOLDS from re-announcing itself; a
+// resolved item is history, and Resolve has already ruled (see its doc, and
+// spec 4.1) that a later recurrence is a NEW OCCURRENCE. Suppressing it here
+// would invert that: tidying away the record of a microphone that failed and
+// recovered would silence the same microphone failing again -- no item, no
+// badge, no bell, no toast, no sound -- for the life of the process.
 //
 // An unkeyed Post needs none of this: nothing can re-raise it.
 func (n *Notifier) Dismiss(id string) {
@@ -306,9 +335,9 @@ func (n *Notifier) Dismiss(id string) {
 	it := n.items[idx]
 	if it.Key != "" {
 		n.cancelPendingLocked(it.Key)
-	}
-	if it.Key != "" {
-		n.suppressed[it.Key] = fingerprint(it)
+		if !it.Resolved {
+			n.suppressed[it.Key] = fingerprint(it)
+		}
 	}
 	n.items = append(n.items[:idx], n.items[idx+1:]...)
 	snap := n.snapshotLocked()
@@ -341,9 +370,16 @@ func (n *Notifier) MarkAllRead() {
 	n.publish(snap)
 }
 
-// Clear removes every item, suppressing each keyed one at its current
-// fingerprint for the same reason Dismiss does: CLEAR ALL must not be undone
-// by the next routine re-emission of a condition that still holds.
+// Clear removes every item, suppressing each keyed one that is still
+// UNRESOLVED at its current fingerprint, for the same reason Dismiss does:
+// CLEAR ALL must not be undone by the next routine re-emission of a
+// condition that still holds.
+//
+// "That still holds" is the whole rule, and a resolved item does not: it is
+// skipped, exactly as Dismiss skips it. Suppressing resolved items is what
+// made CLEAR ALL a permanent mute -- raiseLocked consults suppressed BEFORE
+// it looks at Resolved, so an identical recurrence of a condition that had
+// already cleared became a total no-op that nothing could ever lift.
 func (n *Notifier) Clear() {
 	n.emitMu.Lock()
 	defer n.emitMu.Unlock()
@@ -354,11 +390,12 @@ func (n *Notifier) Clear() {
 		return
 	}
 	for _, it := range n.items {
-		if it.Key != "" {
-			n.suppressed[it.Key] = fingerprint(it)
+		if it.Key == "" {
+			continue
 		}
-		if it.Key != "" {
-			n.cancelPendingLocked(it.Key)
+		n.cancelPendingLocked(it.Key)
+		if !it.Resolved {
+			n.suppressed[it.Key] = fingerprint(it)
 		}
 	}
 	n.items = []Item{}
@@ -375,8 +412,7 @@ func (n *Notifier) RaiseWindowed(key string, item Item, window time.Duration) {
 		n.Post(item)
 		return
 	}
-	n.rememberWindow(key, window)
-	n.coalesce(key, window, func() { n.Raise(key, item) })
+	n.coalesce(key, window, func() bool { return n.raiseReport(key, item) })
 }
 
 // ResolveWindowed is Resolve with a coalescing window.
@@ -384,13 +420,5 @@ func (n *Notifier) ResolveWindowed(key string, window time.Duration) {
 	if key == "" {
 		return
 	}
-	n.rememberWindow(key, window)
-	n.coalesce(key, window, func() { n.Resolve(key) })
-}
-
-// rememberWindow records a key's window for windowFor.
-func (n *Notifier) rememberWindow(key string, window time.Duration) {
-	n.mu.Lock()
-	n.windows[key] = window
-	n.mu.Unlock()
+	n.coalesce(key, window, func() bool { return n.resolveReport(key) })
 }

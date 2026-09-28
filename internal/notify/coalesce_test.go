@@ -139,3 +139,105 @@ func TestStopTimersIsIdempotent(t *testing.T) {
 	n.StopTimers()
 	n.StopTimers() // must not panic on a second call
 }
+
+func TestNoOpLeadingEdgeOpensNoWindow(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	n := New(Options{Now: fixedClock(&now)})
+	defer n.StopTimers()
+
+	// The healthy-system shape: the audio adapter calls raise-or-resolve for
+	// every one of its four keys on EVERY audio:state emission, and on a
+	// healthy system every one of those is a no-op Resolve against a key
+	// that has never been raised.
+	for i := 0; i < 5; i++ {
+		n.ResolveWindowed("audio.input", 10*time.Second)
+	}
+
+	n.mu.Lock()
+	open := len(n.pending)
+	remembered := len(n.windows)
+	n.mu.Unlock()
+
+	if open != 0 {
+		t.Fatalf("pending windows = %d, want 0 -- a call that published nothing is not an edge and must not open a window", open)
+	}
+	if remembered != 0 {
+		t.Fatalf("remembered windows = %d, want 0 -- n.windows must not outlive the window it describes", remembered)
+	}
+}
+
+func TestGenuineFaultAfterNoOpCallsIsNotDeferred(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	emitted := make(chan Snapshot, 8)
+	n := New(Options{Now: fixedClock(&now), OnChange: func(s Snapshot) { emitted <- s }})
+	defer n.StopTimers()
+
+	// Scaled down from the real 10s audio window so the test is fast; the
+	// deferral this guards against is a FULL window either way.
+	const window = 100 * time.Millisecond
+
+	for i := 0; i < 5; i++ {
+		n.ResolveWindowed("audio.input", window)
+	}
+	select {
+	case s := <-emitted:
+		t.Fatalf("a no-op Resolve published a snapshot: %+v", s)
+	default:
+	}
+
+	// The microphone dies. This must reach the user NOW, not a window later:
+	// audio:state fires every 2s while the engine is glitching, which is the
+	// state a device is most likely to fail from, and audio.input is the most
+	// urgent thing this channel carries.
+	n.RaiseWindowed("audio.input", Item{
+		Title:    "Microphone unavailable",
+		Severity: SeverityError,
+	}, window)
+
+	select {
+	case s := <-emitted:
+		if len(s.Items) != 1 || s.Items[0].Title != "Microphone unavailable" {
+			t.Fatalf("published %+v, want the microphone failure", s.Items)
+		}
+	default:
+		t.Fatal("a genuine failure was DEFERRED by a full window: the preceding no-op calls held the coalescing window open on nothing")
+	}
+}
+
+func TestWindowClosingOnANoOpDoesNotHoldItselfOpen(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	emitted := make(chan Snapshot, 8)
+	n := New(Options{Now: fixedClock(&now), OnChange: func(s Snapshot) { emitted <- s }})
+	defer n.StopTimers()
+
+	const window = 40 * time.Millisecond
+
+	// A real edge, so the window legitimately opens, plus an IDENTICAL
+	// re-raise inside it -- the level-triggered shape: every source here
+	// re-emits its whole state far more often than that state changes.
+	n.RaiseWindowed("joystick.global", Item{Title: "Joystick unavailable", Severity: SeverityWarn}, window)
+	<-emitted
+	n.RaiseWindowed("joystick.global", Item{Title: "Joystick unavailable", Severity: SeverityWarn}, window)
+
+	// Let the window close. Its pending change is a no-op, so nothing is
+	// published -- and with nothing published there is no committed edge for
+	// a further window to protect.
+	time.Sleep(window + window/2)
+	select {
+	case s := <-emitted:
+		t.Fatalf("the no-op trailing apply published %+v", s)
+	default:
+	}
+
+	// The condition now genuinely changes. This is a leading edge and must
+	// be immediate; a window re-armed on the no-op above would defer it.
+	n.RaiseWindowed("joystick.global", Item{Title: "Joystick unavailable (device gone)", Severity: SeverityWarn}, window)
+	select {
+	case s := <-emitted:
+		if s.Items[0].Title != "Joystick unavailable (device gone)" {
+			t.Fatalf("published %q, want the changed title", s.Items[0].Title)
+		}
+	default:
+		t.Fatal("a genuine change was deferred: a window that closes on a no-op must retire rather than re-arm itself")
+	}
+}
