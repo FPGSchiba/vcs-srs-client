@@ -5595,13 +5595,21 @@ Every one must report 0. A non-zero exit is a blocker, not a note.
 ```bash
 cd /Users/schiba/Projects/vanguard/vcs-srs-client
 GOCACHE=$TMPDIR/vcs-gocache go list -tags purego -f '{{.ImportPath}}: {{join .Imports " "}}' ./internal/notify/
-grep -rniE "hotkey|joystick|audio" frontend/src/windows/notifications/ frontend/src/shared/store/notifications.ts
+# Production components only -- test files legitimately use real source
+# keys as FIXTURE data, and the store's doc comments legitimately
+# cross-reference AudioSettingsDTO. Neither is coupling.
+grep -rniE "hotkey|joystick|audio" frontend/src/windows/notifications/*.tsx --include="*.tsx" --exclude="*.test.tsx"
+# The invariant that actually matters: no branching on an item's origin.
+grep -rnE "item\.key\s*(===|\.startsWith|\.includes)|key\.startsWith" frontend/src/windows/notifications/
 ```
 Expected: the Go package imports exactly `sync time` — the compiler answers
 the import question, not a text search, because the package's own doc
 comments name all three sources while explaining it knows nothing about
-them. For the frontend, matches only inside explanatory comments, never in
-an import or an identifier.
+them. For the frontend, BOTH greps return no matches: the first because the
+production components never name a source, the second because nothing
+branches on an item's origin. Test files are deliberately excluded — a test
+needs a realistic item, so `"hotkeys.global"` as fixture data is correct,
+not coupling.
 
 - [ ] **Step 7: Commit**
 
