@@ -178,6 +178,9 @@ func (a *App) emitJoystickState() {
 		devices = append(devices, events.JoystickDevicePayload{ID: d.ID, Name: d.Name})
 	}
 	sb.em.JoystickState(dto.Supported, dto.Error, devices)
+	// The notification channel's joystick source -- same reasoning as
+	// emitHotkeyState's.
+	a.notifyJoystickState(dto)
 }
 
 // GetJoystickState reports the joystick subsystem's health for the UI.
@@ -995,6 +998,10 @@ func (a *App) emitHotkeyState() {
 	sb := a.settings
 	dto := hotkeyStateDTO(sb.hk.State(), a.permissionStatus())
 	sb.em.HotkeysState(dto.Registered, dto.Error, dto.Failed, dto.Permission)
+	// The notification channel's hotkey source. Hung off this funnel rather
+	// than off the event bus because this is the SOLE caller of
+	// HotkeysState, so nothing can emit the state without also notifying.
+	a.notifyHotkeyState(dto)
 }
 
 // Pressed implements hotkeys.Handler.
