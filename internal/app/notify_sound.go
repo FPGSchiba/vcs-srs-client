@@ -15,12 +15,25 @@ import (
 //
 // Gated on general.play_notification_sounds. Mirrors connectionSFXID, which
 // does the same job for control-link transitions.
+//
+// The nil check on sb.cfg is INSIDE sb.mu, which is not a style choice: cfg
+// is a POINTER that SetSettings and the keybind mutators repoint under
+// sb.mu, and this gate runs on whichever goroutine raised the notification
+// (the audio poll, the joystick poll, the hotkey callback). Reading it
+// outside the lock is a genuine data race -- -race reported it -- and the
+// nil case is the one place it is tempting to skip the lock for. Its
+// sibling configuredAudioDevices (notify_audio.go) has the correct shape;
+// so does connectionSFXID, fixed alongside this.
 func (a *App) notificationSFXID(severity string) string {
 	sb := a.settings
-	if sb == nil || sb.cfg == nil {
+	if sb == nil {
 		return ""
 	}
 	sb.mu.Lock()
+	if sb.cfg == nil {
+		sb.mu.Unlock()
+		return ""
+	}
 	enabled := sb.cfg.General.PlayNotificationSounds
 	sb.mu.Unlock()
 	if !enabled {

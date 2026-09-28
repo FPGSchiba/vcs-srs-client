@@ -57,3 +57,66 @@ func TestPlayNotificationSFXWithNoAudioManagerDoesNotPanic(t *testing.T) {
 	a := appWithSoundSetting(t, true)
 	a.PlayNotificationSFX("error")
 }
+
+// TestNotificationSFXIDIsRaceFreeAgainstASettingsWrite pins that the gate
+// reads sb.cfg ONLY under sb.mu.
+//
+// Both halves are production paths: SetSettings repoints sb.cfg from the
+// Wails binding goroutine while the audio poll or joystick poll goroutine
+// fires a notification through OnSound -> PlayNotificationSFX. The bug this
+// caught was the nil check -- `if sb == nil || sb.cfg == nil` OUTSIDE the
+// lock, which -race reports as a write/read race on sb.cfg. Its sibling
+// configuredAudioDevices does the same nil check INSIDE the lock, which is
+// the shape both gates now share (see also connectionSFXID).
+//
+// Benign on amd64 and arm64, where a pointer load cannot tear -- but CI runs
+// -race, and a race detector finding is a build failure whatever the memory
+// model does in practice.
+func TestNotificationSFXIDIsRaceFreeAgainstASettingsWrite(t *testing.T) {
+	a := appWithSoundSetting(t, true)
+	sb := a.settings
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			// Exactly what SetSettings does: build a new Config and repoint
+			// sb.cfg under sb.mu.
+			next := config.Config{}
+			next.General.PlayNotificationSounds = i%2 == 0
+			sb.mu.Lock()
+			sb.cfg = &next
+			sb.mu.Unlock()
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		a.notificationSFXID("error")
+	}
+	<-done
+}
+
+// TestConnectionSFXIDIsRaceFreeAgainstASettingsWrite is connectionSFXID's
+// copy of the test above. The two gates are the same shape by design and
+// carried the same out-of-lock nil check; leaving one fixed and its twin
+// racy is worse than the one-line diff.
+func TestConnectionSFXIDIsRaceFreeAgainstASettingsWrite(t *testing.T) {
+	a := NewForTest(state.New(), nil, nil)
+	a.settings = &settingsBackend{cfg: &config.Config{}}
+	sb := a.settings
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			next := config.Config{}
+			next.General.PlayConnectionSounds = i%2 == 0
+			sb.mu.Lock()
+			sb.cfg = &next
+			sb.mu.Unlock()
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		a.connectionSFXID("connected")
+	}
+	<-done
+}
