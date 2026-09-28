@@ -381,3 +381,69 @@ func TestWindowClosedLeavesASuccessorsWindowAlone(t *testing.T) {
 		})
 	}
 }
+
+// TestWindowClosedIgnoresAStrangersEntryOnTheWayIN closes the other half of
+// pendingChange.gen. TestWindowClosedLeavesASuccessorsWindowAlone reaches
+// only the check AFTER apply(), because it constructs the successor while
+// the victim is already inside apply(); deleting the way-IN check left the
+// whole suite green at -race -count=3, which for a guard whose commit
+// message advertises "both sides" is exactly the vacuity this branch has
+// produced six times already.
+//
+// The way-in path is reached when a timer FIRES for an entry that is then
+// retired and recreated before that timer manages to take mu -- a Dismiss
+// and a fresh change landing in the microseconds between AfterFunc's
+// callback starting and its first Lock. Without the stamp, windowClosed
+// finds *an* entry, takes the SUCCESSOR's pending change as its own and
+// runs it a full window early, and the successor is left armed with nothing
+// to apply.
+//
+// White-box for the same reason as its sibling: no public call sequence can
+// hold two mu acquisitions of one unexported function apart.
+func TestWindowClosedIgnoresAStrangersEntryOnTheWayIn(t *testing.T) {
+	const key = "k"
+	n := New(Options{})
+	defer n.StopTimers()
+
+	applied := make(chan struct{}, 1)
+
+	n.mu.Lock()
+	n.pendingGen++
+	stale := n.pendingGen // the entry this timer was armed for; since retired
+	n.pendingGen++
+	successorGen := n.pendingGen
+	n.pending[key] = &pendingChange{gen: successorGen, kind: pendingRaise, apply: func() bool {
+		applied <- struct{}{}
+		return true
+	}}
+	n.windows[key] = time.Hour
+	n.mu.Unlock()
+
+	// The retired entry's timer fires late and takes mu only now.
+	n.windowClosed(key, stale)
+
+	select {
+	case <-applied:
+		t.Fatal("windowClosed ran the SUCCESSOR's pending change -- a timer armed for a retired entry applied a change a full window early")
+	default:
+	}
+
+	n.mu.Lock()
+	got, ok := n.pending[key]
+	var gotGen uint64
+	var hasApply bool
+	if ok {
+		gotGen, hasApply = got.gen, got.apply != nil
+	}
+	n.mu.Unlock()
+
+	if !ok {
+		t.Fatal("the successor's entry was retired by a timer belonging to a previous entry")
+	}
+	if gotGen != successorGen {
+		t.Fatalf("pending[%q].gen = %d, want the successor's %d", key, gotGen, successorGen)
+	}
+	if !hasApply {
+		t.Fatal("the successor's pending change was consumed by a stranger's timer -- its window is now armed with nothing to apply")
+	}
+}
