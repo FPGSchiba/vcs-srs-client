@@ -1,10 +1,13 @@
 package session
 
 import (
+	"crypto/tls"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"google.golang.org/grpc/credentials"
 
@@ -88,6 +91,69 @@ func TestTransportCredentials_BadCAFile(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// tlsConfigOf reaches into the unexported *tls.Config field grpc-go's
+// credentials.NewTLS stores on its concrete (unexported) type, via
+// reflection plus unsafe.Pointer to step around the unexported-field read
+// guard.
+//
+// This exists because credentials.TransportCredentials has no public
+// accessor for the tls.Config it was built from: Info() reports a hardcoded
+// "SecurityVersion: 1.2" string rather than the actual configured value, and
+// Clone()/OverrideServerName() do not expose it either. A handshake-level
+// test cannot substitute: grpc-go's own credentials.NewTLS already defaults
+// MinVersion to tls.VersionTLS12 whenever it is left unset, so removing the
+// explicit MinVersion field from transportCredentials would not change
+// negotiated behaviour and no such test would notice the regression. This
+// reflection reach is fragile against a grpc-go internal rename (it is
+// pinned to the field name "config"), but it is the only way to assert what
+// this package's own code actually wrote into the struct.
+func tlsConfigOf(t *testing.T, creds credentials.TransportCredentials) *tls.Config {
+	t.Helper()
+	v := reflect.ValueOf(creds)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	f := v.FieldByName("config")
+	if !f.IsValid() {
+		t.Fatalf("credentials value of type %T has no field named %q; grpc-go internals may have changed", creds, "config")
+	}
+	f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem() //nolint:gosec // test-only reflection to assert a private field.
+	cfg, ok := f.Interface().(*tls.Config)
+	if !ok {
+		t.Fatalf("field %q is %T, want *tls.Config", "config", f.Interface())
+	}
+	return cfg
+}
+
+func TestTransportCredentials_MinVersionTLS12(t *testing.T) {
+	// Both TLS branches transportCredentials can take -- the pinned-CA
+	// branch and the remote-without-a-pin branch -- must carry
+	// MinVersion: tls.VersionTLS12. See tlsConfigOf for why this is checked
+	// by reflection rather than through the public interface or a handshake.
+	caPath := grpctest.NewTestCert(t, "localhost").WriteCAPEM(t, t.TempDir())
+
+	tests := []struct {
+		name   string
+		host   string
+		caFile string
+	}{
+		{"pinned CA branch", "localhost", caPath},
+		{"remote, no pin, branch", "srs.example.org", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			creds, err := transportCredentials(tc.host, tc.caFile)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			cfg := tlsConfigOf(t, creds)
+			if cfg.MinVersion != tls.VersionTLS12 {
+				t.Fatalf("MinVersion = %v, want tls.VersionTLS12", cfg.MinVersion)
 			}
 		})
 	}
