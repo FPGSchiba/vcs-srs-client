@@ -28,6 +28,24 @@ const (
 // the change it will apply when the window closes.
 type pendingChange struct {
 	timer *time.Timer
+	// gen identifies THIS entry, for the life of this entry only. It is what
+	// lets a fired timer tell "the entry I was armed for" from "a SUCCESSOR
+	// entry that reused my key".
+	//
+	// The successor is reachable: windowClosed releases mu to run apply(),
+	// and in that gap a Dismiss or Clear can retire the key
+	// (cancelPendingLocked) and a fresh coalesce can arm a brand-new entry
+	// under the same key. Without the stamp, windowClosed re-locks, finds an
+	// entry, and cannot tell it is not its own -- so it either arms over the
+	// successor's LIVE timer (orphaning a timer that then fires into a
+	// no-op) or retires it, closing a coalescing window it does not own a
+	// full period early. Neither loses or duplicates a notification -- a
+	// pending apply always eventually runs -- but both are wrong, and the
+	// presence of a pending entry, which is all windowClosed used to check,
+	// cannot distinguish the two cases.
+	//
+	// Guarded by Notifier.mu, like every other field here.
+	gen uint64
 	// apply performs the deferred mutation and reports whether it actually
 	// published anything. nil means "nothing pending".
 	apply func() bool
@@ -88,15 +106,28 @@ func (n *Notifier) coalesce(key string, window time.Duration, fn func() bool) {
 	}
 	if n.cancelGen != gen {
 		// A Dismiss, Clear or StopTimers landed in the gap between fn()
-		// publishing and this arm. cancelPendingLocked already ran and found
-		// nothing to cancel, because the window did not exist yet -- so
-		// arming now would leave a window OPEN carrying apply == nil. The
-		// timer retires harmlessly when it fires, but until then the key
-		// looks busy, and the next genuine change would be deferred to the
-		// trailing edge (up to 10s, for audio) instead of being the
-		// immediate leading edge this function's ordering exists to
-		// guarantee. Skipping the arm errs the safe way: the next change is
-		// a leading edge, which is the no-coalescing default.
+		// publishing and this arm. For THIS key, that means
+		// cancelPendingLocked ran and found nothing to cancel, because the
+		// window did not exist yet -- so arming now would leave a window
+		// OPEN carrying apply == nil. The timer retires harmlessly when it
+		// fires, but until then the key looks busy, and the next genuine
+		// change would be deferred to the trailing edge (up to 10s, for
+		// audio) instead of being the immediate leading edge this function's
+		// ordering exists to guarantee. Skipping the arm errs the safe way:
+		// the next change is a leading edge, which is the no-coalescing
+		// default.
+		//
+		// cancelGen is deliberately GLOBAL, not per key, so this is COARSER
+		// than the paragraph above describes: a Dismiss of item A that lands
+		// in the gap also skips the arm for an unrelated key B. That is
+		// accepted, not overlooked. The cost is bounded and self-healing --
+		// one human click can cost at most the one window that was mid-arm,
+		// and the very next change on that key opens a window normally --
+		// while a per-key counter would add a second map with exactly
+		// n.suppressed's "there is no moment at which pruning would be
+		// correct" problem, for a defect whose entire symptom is that one
+		// coalescing window did not open. Do not narrow this without a
+		// measured reason; err-safe and simple beats precise and unpruned.
 		return
 	}
 	n.armLocked(key, window)
@@ -104,24 +135,48 @@ func (n *Notifier) coalesce(key string, window time.Duration, fn func() bool) {
 
 // armLocked opens (or re-opens) key's window, recording the period so a
 // re-armed trailing timer reuses it. Caller holds mu.
+//
+// A NEW entry gets a fresh generation; re-arming an existing one keeps its
+// generation, because it is the same window continuing. The timer closes
+// over that generation so windowClosed can prove the entry it finds later is
+// still the one it was armed for -- see pendingChange.gen.
+//
+// The Stop() on re-arm makes this primitive safe on its own rather than
+// safe-by-caller. Today the only re-arm reaches here from windowClosed with
+// a timer that has already fired, so Stop is a no-op; but a future caller
+// arming over a live timer would otherwise leak it, and that is exactly the
+// defect the generation stamp exists to make impossible.
 func (n *Notifier) armLocked(key string, window time.Duration) {
 	p, ok := n.pending[key]
 	if !ok {
-		p = &pendingChange{}
+		n.pendingGen++
+		p = &pendingChange{gen: n.pendingGen}
 		n.pending[key] = p
+	} else if p.timer != nil {
+		p.timer.Stop()
 	}
 	n.windows[key] = window
-	p.timer = time.AfterFunc(window, func() { n.windowClosed(key) })
+	gen := p.gen
+	p.timer = time.AfterFunc(window, func() { n.windowClosed(key, gen) })
 }
 
 // windowClosed runs when a key's window expires. It applies whatever change
 // was pending and keeps the window open only while something is still
 // happening; otherwise the key goes idle so the next change is again a
 // leading edge.
-func (n *Notifier) windowClosed(key string) {
+//
+// gen is the generation of the entry this timer was armed for. Every lookup
+// below checks it, on both sides of the apply() call: a retired-and-recreated
+// key leaves an entry that is present but NOT ours, and acting on it would
+// steal a successor's pending change on the way in, or orphan its live timer
+// on the way out. See pendingChange.gen.
+func (n *Notifier) windowClosed(key string, gen uint64) {
 	n.mu.Lock()
 	p, ok := n.pending[key]
-	if !ok {
+	if !ok || p.gen != gen {
+		// Either the key was retired (Dismiss, Clear, StopTimers) or it was
+		// retired and re-armed by a later change. In both cases this timer
+		// has nothing left to do, and the successor owns its own timer.
 		n.mu.Unlock()
 		return
 	}
@@ -152,9 +207,13 @@ func (n *Notifier) windowClosed(key string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	p, ok = n.pending[key]
-	if !ok {
+	if !ok || p.gen != gen {
 		// Dismiss or Clear retired the key while apply() ran. Do not re-arm:
 		// a timer for a key the user has just cleared has nothing to defend.
+		// The generation half covers the same thing followed by a NEW change
+		// arming a fresh entry under this key: that successor has its own
+		// live timer and its own pending change, and neither arming over it
+		// nor retiring it would be ours to do.
 		return
 	}
 	if window <= 0 {
@@ -207,8 +266,23 @@ func (n *Notifier) windowFor(key string) time.Duration {
 // its apply() will still run, publishing one final Snapshot. Nothing here
 // can close that window -- the emit would have to be blocked rather than the
 // timer stopped, and blocking would mean holding mu across a publish, which
-// inverts this package's lock order (see Notifier.emitMu). Shutdown ordering
-// is what covers it: StopTimers runs before the event bus is torn down.
+// inverts this package's lock order (see Notifier.emitMu).
+//
+// What shutdown ordering actually gives, in main.go, is narrower than an
+// earlier version of this comment claimed. `defer notifier.StopTimers()` is
+// registered BEFORE `defer jm.Close()` and `defer am.Stop()`, and defers run
+// LIFO, so the joystick and audio poll goroutines are stopped FIRST and this
+// runs last: nothing can arm a new window while or after it cancels, which
+// is what makes "cancels every armed timer" a final statement rather than a
+// racy one. That registration order is load-bearing and is pinned by
+// TestNotifierStopTimersIsRegisteredBeforeTheSources in main_wiring_test.go.
+//
+// It does NOT run before the event bus is torn down: every one of those
+// defers runs only after wailsApp.Run() has returned. A timer already inside
+// the windowClosed/apply() gap when Run() returns still publishes, into a
+// Wails application that has stopped. Recorded rather than claimed away --
+// the gap is bounded by the two Stop/Close calls ahead of it and nothing in
+// this package can close it.
 func (n *Notifier) StopTimers() {
 	n.mu.Lock()
 	defer n.mu.Unlock()

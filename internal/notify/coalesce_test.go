@@ -290,3 +290,94 @@ func TestDismissDuringTheLeadingEdgeDoesNotArmAnEmptyWindow(t *testing.T) {
 		t.Fatalf("a window is open for a key dismissed during the leading edge (carrying no pending change: %v) -- the next genuine change would be deferred by a full period", empty)
 	}
 }
+
+// TestWindowClosedLeavesASuccessorsWindowAlone pins pendingChange.gen.
+//
+// windowClosed releases mu to run apply(). In that gap the user can Dismiss
+// or Clear the key -- cancelPendingLocked retires the entry -- and a new
+// change can arm a brand-new entry under the SAME key. Before the generation
+// stamp, windowClosed re-locked, found *an* entry, and assumed it was its
+// own:
+//
+//   - apply() published -> it re-armed, overwriting the successor's LIVE
+//     timer, orphaning it. The orphan fires into a no-op, and the successor's
+//     window now runs from the wrong instant.
+//   - apply() published nothing -> it retired the successor outright,
+//     closing a coalescing window it did not own, a full period early.
+//
+// Neither loses or duplicates a notification, which is why this is a Minor;
+// both are still the wrong entry being mutated by a timer that does not own
+// it, and "is there a pending entry" cannot tell the two apart.
+//
+// White-box by necessity: the gap is between two mu acquisitions inside one
+// unexported function, and no public call sequence can hold it open.
+func TestWindowClosedLeavesASuccessorsWindowAlone(t *testing.T) {
+	const key = "k"
+	for _, tc := range []struct {
+		name      string
+		published bool // what the victim's apply() reports
+	}{
+		{"apply published: must not arm over the successor's live timer", true},
+		{"apply published nothing: must not retire the successor", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := New(Options{})
+			defer n.StopTimers()
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+
+			n.mu.Lock()
+			n.pendingGen++
+			gen := n.pendingGen
+			n.pending[key] = &pendingChange{gen: gen, apply: func() bool {
+				close(entered)
+				<-release
+				return tc.published
+			}}
+			n.windows[key] = time.Hour
+			n.mu.Unlock()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				n.windowClosed(key, gen) // as its timer would
+			}()
+			<-entered // windowClosed has dropped mu and is inside apply()
+
+			// The user dismisses the item (retiring the key), and the source
+			// then reports a fresh change, which arms a NEW entry.
+			n.mu.Lock()
+			n.cancelPendingLocked(key)
+			n.armLocked(key, time.Hour)
+			successor := n.pending[key]
+			successorTimer := successor.timer
+			successorGen := successor.gen
+			n.mu.Unlock()
+			if successorGen == gen {
+				t.Fatal("the successor reused the victim's generation; the stamp is not unique per entry")
+			}
+
+			close(release)
+			<-done
+
+			n.mu.Lock()
+			got, ok := n.pending[key]
+			var gotTimer *time.Timer
+			if ok {
+				gotTimer = got.timer
+			}
+			n.mu.Unlock()
+
+			if !ok {
+				t.Fatal("the successor's pending entry was retired by a timer belonging to the previous entry -- its coalescing window closed a full period early")
+			}
+			if got != successor {
+				t.Fatal("the successor's pending entry was replaced by a timer belonging to the previous entry")
+			}
+			if gotTimer != successorTimer {
+				t.Fatal("the successor's LIVE timer was armed over by a timer belonging to the previous entry -- the orphan still fires, and the successor's window now runs from the wrong instant")
+			}
+		})
+	}
+}

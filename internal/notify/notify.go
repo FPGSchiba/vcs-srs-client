@@ -184,7 +184,18 @@ type Notifier struct {
 	// in that gap cannot leave a window armed for a key that has just been
 	// dismissed, cleared or shut down. Guarded by mu like everything below
 	// it. See coalesce.
+	//
+	// It is ONE counter for the whole Notifier, not one per key, so it is
+	// coarser than "a cancel for this key": a Dismiss of item A landing in
+	// that gap also skips the arm of an unrelated key B. Accepted
+	// deliberately -- see coalesce for the cost/benefit, which turns on
+	// n.suppressed's unprunability argument just above.
 	cancelGen uint64
+	// pendingGen stamps each pendingChange as it is created, so a fired
+	// trailing timer can tell its own entry from a successor that reused the
+	// key while it was running. Monotonic across all keys; only equality
+	// within one key is ever asked. See coalesce.go's pendingChange.
+	pendingGen uint64
 	// pending holds coalescing state per key. See coalesce.go.
 	pending map[string]*pendingChange
 	// windows records the window each key's OPEN coalescing window was armed
