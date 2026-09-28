@@ -222,12 +222,13 @@ func (a *App) GetSettings() SettingsDTO {
 	// audioManager's own doc: never call a Manager method while holding
 	// sb.mu, Manager has its own independent locking.
 	return SettingsDTO{
-		StartMinimized:       g.StartMinimized,
-		MinimizeToTray:       g.MinimizeToTray,
-		ShowTransmitterName:  g.ShowTransmitterName,
-		PlayConnectionSounds: g.PlayConnectionSounds,
-		RadioSwitchAsPTT:     g.RadioSwitchAsPTT,
-		Audio:                audioSettingsDTO(ac, m),
+		StartMinimized:         g.StartMinimized,
+		MinimizeToTray:         g.MinimizeToTray,
+		ShowTransmitterName:    g.ShowTransmitterName,
+		PlayConnectionSounds:   g.PlayConnectionSounds,
+		PlayNotificationSounds: g.PlayNotificationSounds,
+		RadioSwitchAsPTT:       g.RadioSwitchAsPTT,
+		Audio:                  audioSettingsDTO(ac, m),
 	}
 }
 
@@ -248,11 +249,12 @@ func (a *App) SetSettings(s SettingsDTO) error {
 	// but this path never touches Keybinds, so that sharing is harmless.
 	next := *sb.cfg
 	next.General = config.General{
-		StartMinimized:       s.StartMinimized,
-		MinimizeToTray:       s.MinimizeToTray,
-		ShowTransmitterName:  s.ShowTransmitterName,
-		PlayConnectionSounds: s.PlayConnectionSounds,
-		RadioSwitchAsPTT:     s.RadioSwitchAsPTT,
+		StartMinimized:         s.StartMinimized,
+		MinimizeToTray:         s.MinimizeToTray,
+		ShowTransmitterName:    s.ShowTransmitterName,
+		PlayConnectionSounds:   s.PlayConnectionSounds,
+		PlayNotificationSounds: s.PlayNotificationSounds,
+		RadioSwitchAsPTT:       s.RadioSwitchAsPTT,
 	}
 	next.Audio = configAudioFromDTO(s.Audio)
 	audioCfg := next.Audio

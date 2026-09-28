@@ -172,7 +172,7 @@ func main() {
 	notifEvents := vcsevents.New(emitter)
 	notifier := notify.New(notify.Options{
 		OnChange: func(s notify.Snapshot) { notifEvents.Notifications(s) },
-		OnSound:  func(it notify.Item) { _ = it }, // TASK 12: route to gui.PlayNotificationSFX
+		OnSound:  func(it notify.Item) { gui.PlayNotificationSFX(string(it.Severity)) },
 	})
 	gui.SetNotifier(notifier)
 	// Cancels any armed trailing timer so a coalesced emit cannot fire into
