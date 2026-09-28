@@ -12,6 +12,7 @@ import type {
   AudioEffectPresets,
 } from "../store/settings";
 import type { ConnectionState } from "../store/connection";
+import type { NotifySnapshot } from "../store/notifications";
 
 export interface RadioDTO {
   id: number;
@@ -108,4 +109,14 @@ export const api = {
   getConnectionState: (): Promise<ConnectionState> =>
     App.GetConnectionState() as Promise<ConnectionState>,
   reconnectVoice: (): Promise<void> => App.ReconnectVoice() as Promise<void>,
+  getNotifications: (): Promise<NotifySnapshot> =>
+    App.GetNotifications() as Promise<NotifySnapshot>,
+  markNotificationRead: (id: string): Promise<void> =>
+    App.MarkNotificationRead(id) as Promise<void>,
+  markAllNotificationsRead: (): Promise<void> =>
+    App.MarkAllNotificationsRead() as Promise<void>,
+  dismissNotification: (id: string): Promise<void> =>
+    App.DismissNotification(id) as Promise<void>,
+  clearNotifications: (): Promise<void> => App.ClearNotifications() as Promise<void>,
+  focusMainWindow: (): Promise<void> => App.FocusMainWindow() as Promise<void>,
 };

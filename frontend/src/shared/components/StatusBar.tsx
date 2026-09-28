@@ -1,6 +1,5 @@
-import type React from "react";
-
 import { Icon } from "./Icon";
+import { activatable } from "./activatable";
 import { useBuildInfo } from "../hooks/useBuildInfo";
 import {
   useConnection,
@@ -63,26 +62,6 @@ function Segment({
  *
  * classNames are byte-identical to the design so the ported CSS applies.
  */
-/** Makes a non-button element activate like one from the keyboard.
- *  The design prototype uses plain `div`/`span` with `onClick` and the
- *  ported CSS keys off those classNames, so the elements stay as they are
- *  and gain the semantics instead: focusable, announced as a button, and
- *  activated by Enter or Space like a real one. */
-function activatable(onActivate: () => void) {
-  return {
-    role: "button",
-    tabIndex: 0,
-    onClick: onActivate,
-    onKeyDown: (e: React.KeyboardEvent) => {
-      if (e.key === "Enter" || e.key === " ") {
-        // Space would otherwise scroll the page.
-        e.preventDefault();
-        onActivate();
-      }
-    },
-  };
-}
-
 export function StatusBar({ onNavigate }: StatusBarProps) {
   const conn = useConnection((s) => s.conn);
   const build = useBuildInfo();
