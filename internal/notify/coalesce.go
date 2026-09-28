@@ -93,20 +93,38 @@ func (n *Notifier) pendingResolveLocked(key string) bool {
 }
 
 // coalesce either runs fn now (no window open, or no window at all) or defers
-// it to a trailing timer, resetting any timer already armed for this key.
+// it to the trailing timer already armed for this key.
+//
+// This is a FIXED window, NOT a debounce, and the difference is the whole
+// point. A change landing inside an open window only overwrites p.apply and
+// p.kind; it deliberately does NOT reset the timer (armLocked is never
+// reached here, and neither is time.Timer.Reset). The timer therefore fires
+// one window after the edge that opened it, whatever the source does in
+// between, and windowClosed re-arms a FRESH window only if something was
+// actually applied or is still waiting.
+//
+// Resetting the timer per change -- a debounce -- would mean a source
+// flapping faster than its own window emitted NOTHING until the flap
+// stopped: the joystick's failing Poll() toggles the error edge at up to
+// ~50 Hz against a 2s window, so the user would be told nothing at all for
+// as long as the stick was broken. That is precisely the outcome the
+// trailing timer exists to prevent (see below), and DoD 3's "at most one
+// emit per window" is an upper bound with no matching lower one, so the
+// suite cannot catch it by counting. Pinned instead by
+// TestAFlapFasterThanItsWindowStillEmitsOnTheBoundary.
 //
 // A window is opened only on a REAL EDGE -- fn runs first, and a fn that
 // published nothing leaves the key idle. That ordering is load-bearing, not
-// incidental. The adapters are level-triggered: NotifyAudioState calls
+// incidental. The adapters are level-triggered: notifyAudioState calls
 // raise-or-resolve for all four audio keys on every audio:state emission, so
 // on a healthy system every call is a no-op Resolve. Arming the window
 // before learning that would open a speculative 10s window on nothing, and
-// -- because a pending change re-arms the timer -- a source emitting faster
-// than its own window would hold that window open indefinitely, deferring
-// the first genuine device fault by a full window. The audio poll is 2s and
-// the audio window is 10s, so that is a device failure the user is told
-// about up to ten seconds late, starting with the first ten seconds after
-// startup.
+// -- because windowClosed re-arms whenever something is still pending -- a
+// source emitting faster than its own window would keep that window open
+// period after period, deferring the first genuine device fault by a full
+// window. The audio poll is 2s and the audio window is 10s, so that is a
+// device failure the user is told about up to ten seconds late, starting
+// with the first ten seconds after startup.
 //
 // The trailing timer is NOT optional. Without it a flap that simply STOPS
 // would leave its final state never emitted, so a device settling into a

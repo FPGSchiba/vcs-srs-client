@@ -1,6 +1,8 @@
 package notify
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -445,5 +447,198 @@ func TestWindowClosedIgnoresAStrangersEntryOnTheWayIn(t *testing.T) {
 	}
 	if !hasApply {
 		t.Fatal("the successor's pending change was consumed by a stranger's timer -- its window is now armed with nothing to apply")
+	}
+}
+
+// TestAFlapFasterThanItsWindowStillEmitsOnTheBoundary pins the FIXED-window
+// semantics coalesce actually implements, against the debounce its own doc
+// comment used to claim ("resetting any timer already armed for this key").
+//
+// The two readings are indistinguishable to every other test here, which is
+// the finding: the reviewer made the CODE match the old comment -- one
+// p.timer.Reset(window) in the open-window branch -- and the whole suite
+// stayed green. DoD 3's "at most one emit per window" is an upper bound, and
+// nothing else stated a lower one, so a source flapping faster than its own
+// window emitting NOTHING AT ALL until it stopped went unnoticed.
+//
+// That is not a theoretical shape. A joystick with a failing Poll() toggles
+// the error edge at up to ~50 Hz against notify.WindowJoystick's 2s, and the
+// audio adapter re-asserts all four of its keys every 2s against a 10s
+// window. Under a debounce the user would be told nothing for as long as the
+// hardware stayed broken -- exactly the outcome the trailing timer exists to
+// prevent.
+func TestAFlapFasterThanItsWindowStillEmitsOnTheBoundary(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	changes := 0
+	n := New(Options{Now: fixedClock(&now), OnChange: func(Snapshot) {
+		mu.Lock()
+		changes++
+		mu.Unlock()
+	}})
+	defer n.StopTimers()
+
+	const window = 40 * time.Millisecond
+	const step = window / 8 // the source is EIGHT times faster than its window
+
+	// The leading edge opens the window and publishes immediately.
+	n.RaiseWindowed("joystick.global", Item{Title: "Joystick unavailable #0", Severity: SeverityWarn}, window)
+	mu.Lock()
+	leading := changes
+	mu.Unlock()
+	if leading != 1 {
+		t.Fatalf("leading edge published %d times, want 1", leading)
+	}
+
+	// Now flap continuously, with genuinely different content every time so
+	// identity dedupe can never be the reason nothing is published, for five
+	// whole windows. A fixed window emits on every boundary; a debounce emits
+	// on none of them, because every change pushes the timer out again.
+	deadline := time.Now().Add(5 * window)
+	for i := 1; time.Now().Before(deadline); i++ {
+		n.RaiseWindowed("joystick.global", Item{
+			Title:    "Joystick unavailable #" + strconv.Itoa(i),
+			Severity: SeverityWarn,
+		}, window)
+		time.Sleep(step)
+	}
+
+	mu.Lock()
+	got := changes
+	mu.Unlock()
+	if got <= leading {
+		t.Fatalf("OnChange fired %d times in all, i.e. nothing after the leading edge, "+
+			"over five windows of continuous flapping -- the window is behaving as a "+
+			"DEBOUNCE, so a source that flaps faster than its own window tells the user "+
+			"nothing for as long as the hardware stays broken", got)
+	}
+}
+
+// TestStopTimersDuringTheLeadingEdgeDoesNotArmAWindow is StopTimers' half of
+// the cancelGen guard. Dismiss's and Clear's half is already covered by
+// TestDismissDuringTheLeadingEdgeDoesNotArmAnEmptyWindow; deleting the
+// `n.cancelGen++` from StopTimers alone left the whole suite green.
+//
+// StopTimers is the one method whose stated purpose is that a pending emit
+// cannot fire into a torn-down event bus. A leading edge in flight when it
+// runs finds nothing to cancel -- the window does not exist yet -- and
+// without the bump goes on to arm one AFTER shutdown has cancelled
+// everything, falsifying exactly that headline claim.
+//
+// Forced by calling the unexported coalesce directly with an fn that shuts
+// the notifier down, which is the real interleaving with the timing hazard
+// removed -- the same technique its Dismiss sibling uses.
+func TestStopTimersDuringTheLeadingEdgeDoesNotArmAWindow(t *testing.T) {
+	n := New(Options{})
+
+	n.coalesce("audio.input", time.Hour, pendingRaise, func() bool {
+		n.Raise("audio.input", Item{Title: "Microphone unavailable", Severity: SeverityError})
+		n.StopTimers() // shutdown lands between the publish and the arm
+		return true
+	})
+
+	n.mu.Lock()
+	_, open := n.pending["audio.input"]
+	n.mu.Unlock()
+
+	if open {
+		n.StopTimers() // do not leave an hour-long timer behind
+		t.Fatal("a coalescing window was armed AFTER StopTimers ran -- shutdown's one " +
+			"promise is that no pending emit survives it, and this timer would fire " +
+			"into a torn-down event bus")
+	}
+}
+
+// TestRetiringAKeyDrainsBothMaps pins retirePendingLocked's
+// delete(n.windows, key), which a paragraph of doc justifies as 7.3/7.4 leak
+// prevention and which nothing failed on when removed.
+//
+// n.windows' lifetime is exactly n.pending's -- armLocked is its only writer
+// and writes it while creating the pending entry. Today's key set is small
+// and fixed, so an unpruned map merely looks untidy; Phase 7.3/7.4's
+// per-client and per-frequency keys would make it an unbounded map keyed on
+// a REMOTE party's identity. Every retirement path is covered, because the
+// leak only needs one of them to miss.
+func TestRetiringAKeyDrainsBothMaps(t *testing.T) {
+	const key = "joystick.global"
+	const window = 30 * time.Millisecond
+
+	item := func(n int) Item {
+		return Item{Title: "Joystick unavailable " + strconv.Itoa(n), Severity: SeverityWarn}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		retire func(t *testing.T, n *Notifier)
+	}{
+		{
+			name: "the trailing timer closes on a settled flap",
+			retire: func(t *testing.T, n *Notifier) {
+				t.Helper()
+				// Leading edge only: nothing accumulates, so the window closes
+				// on an empty pending change and retires the key.
+				n.RaiseWindowed(key, item(1), window)
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					n.mu.Lock()
+					done := len(n.pending) == 0
+					n.mu.Unlock()
+					if done || time.Now().After(deadline) {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+			},
+		},
+		{
+			name: "the user dismisses the item",
+			retire: func(t *testing.T, n *Notifier) {
+				t.Helper()
+				n.RaiseWindowed(key, item(1), time.Hour)
+				n.RaiseWindowed(key, item(2), time.Hour) // accumulate, so there is something to cancel
+				n.Dismiss(n.Snapshot().Items[0].ID)
+			},
+		},
+		{
+			name: "the user clears the list",
+			retire: func(t *testing.T, n *Notifier) {
+				t.Helper()
+				n.RaiseWindowed(key, item(1), time.Hour)
+				n.RaiseWindowed(key, item(2), time.Hour)
+				n.Clear()
+			},
+		},
+		{
+			name: "shutdown stops every timer",
+			retire: func(t *testing.T, n *Notifier) {
+				t.Helper()
+				n.RaiseWindowed(key, item(1), time.Hour)
+				n.RaiseWindowed(key, item(2), time.Hour)
+				n.StopTimers()
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+			n := New(Options{Now: fixedClock(&now)})
+			defer n.StopTimers()
+
+			tc.retire(t, n)
+
+			n.mu.Lock()
+			pending := len(n.pending)
+			remembered := len(n.windows)
+			n.mu.Unlock()
+
+			if pending != 0 {
+				t.Fatalf("pending = %d, want 0 -- the key was not retired at all", pending)
+			}
+			if remembered != 0 {
+				t.Fatalf("windows = %d with pending = 0 -- n.windows outlived the window it "+
+					"describes. The two are written and pruned in lockstep by design; 7.3/7.4 "+
+					"key this map on a remote party's identity, at which point an entry that "+
+					"is never deleted is an unbounded leak", remembered)
+			}
+		})
 	}
 }
