@@ -2804,13 +2804,13 @@ const (
 // NotifyAudioState translates one AudioStateDTO into notifications.
 //
 // This function is a PROJECTION, and the projection is the whole reason
-// audio is safe to route here at all. AudioStateDTO has nine fields;
+// audio is safe to route here at all. AudioStateDTO has ten fields;
 // exactly four are faults:
 //
 //	InputError, OutputError                 -- the fault itself
 //	InputSubstituted, OutputSubstituted     -- works, but not on the chosen device
 //
-// The other five are deliberately dropped:
+// The other six are deliberately dropped:
 //
 //	Overruns, Underruns  -- MONOTONIC COUNTERS. audio.Manager's
 //	                        emitStateIfChanged compares the whole State
@@ -2935,7 +2935,7 @@ git add internal/app/notify_audio.go internal/app/notify_audio_test.go main.go
 git commit -m "feat(app): route audio device faults into the notification channel
 
 The adapter is a projection, and the projection is what makes including
-audio safe. AudioStateDTO has nine fields; four are faults. Overruns and
+audio safe. AudioStateDTO has ten fields; four are faults. Overruns and
 Underruns are dropped because they are monotonic counters inside
 emitStateIfChanged's whole-struct comparison, so a glitching engine
 re-emits ~1800 times an hour with nothing visible having changed. Dropping

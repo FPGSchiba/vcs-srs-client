@@ -145,7 +145,7 @@ So the chattiness is real, but it is a 0.5 Hz ceiling rather than the
 unbounded churn the joystick's 100 Hz loop implies — and §4.1's fingerprint
 already neutralises it, because the fingerprint is computed over what the
 **user sees**, not over the payload. The audio adapter (§5.4) projects those
-nine fields down to the four that are faults and drops both counters, both
+ten fields down to the four that are faults and drops both counters, both
 device ids, `Running` and `Starting`. 1800 emissions per hour collapse to one
 notification, with no new machinery.
 
@@ -578,7 +578,7 @@ that broke" (`connhealth.go:28-35`).
 Not in the ROADMAP's 7.2 paragraph; added by the decision recorded in §1.7,
 honouring `events.go:56`.
 
-The adapter projects `audio.State`'s **nine** fields (`manager.go:63-70`)
+The adapter projects `audio.State`'s **ten** fields (`manager.go:63-70`)
 down to the **four** that are faults. This projection is the whole reason
 audio is safe to include:
 
