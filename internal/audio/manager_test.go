@@ -2,6 +2,7 @@ package audio
 
 import (
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1720,5 +1721,103 @@ func TestDSPLoopPullsTheSourceOncePerTick(t *testing.T) {
 
 	if got := src.calls.Load(); got != 1 {
 		t.Fatalf("ReadInto was called %d times on one catch-up tick, want exactly 1 -- received audio is paced by the tick, not by capture backlog", got)
+	}
+}
+
+func TestPlayNotificationOnStoppedManagerDrops(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+
+	// Never started. A queued id surviving until some later, unrelated
+	// Start() drained it would play an alert for an event minutes past --
+	// the same reasoning PlayEffect's doc gives for dropping.
+	m.PlayNotification(NotifyAlert)
+
+	if m.notifVoices != nil {
+		t.Fatal("notifVoices is non-nil on a manager that was never started")
+	}
+}
+
+func TestPlayNotificationUnavailableIDIsANoop(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// notify_alert has no sample, so this must not queue anything.
+	m.PlayNotification(NotifyAlert)
+	m.PlayNotification("no-such-slot")
+
+	m.mu.Lock()
+	pool := m.notifVoices
+	m.mu.Unlock()
+	if pool == nil {
+		t.Fatal("notifVoices is nil after Start")
+	}
+	pool.mu.Lock()
+	pending := len(pool.pending)
+	pool.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending = %d, want 0 -- an unavailable id must be filtered before it reaches the pool", pending)
+	}
+}
+
+func TestNotificationVoicePoolIsPerGeneration(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	m.mu.Lock()
+	first := m.notifVoices
+	m.mu.Unlock()
+	m.Stop()
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	m.mu.Lock()
+	second := m.notifVoices
+	m.mu.Unlock()
+	defer m.Stop()
+
+	if first == second {
+		t.Fatal("both generations share one notification voice pool; Stop's bounded joins can leave two dspLoops live, and -race has already caught that for sfxVoices")
+	}
+}
+
+func TestStopClearsTheNotificationVoicePool(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	m.Stop()
+
+	m.mu.Lock()
+	pool := m.notifVoices
+	m.mu.Unlock()
+	if pool != nil {
+		t.Fatal("notifVoices survived Stop; it must not hold a reference to a possibly-zombie generation")
+	}
+}
+
+func TestNotificationVoicePoolMixesIntoItsBuffer(t *testing.T) {
+	// The engine's contract, proven without a sample: a pool fed a known
+	// sample mixes it into the destination. This is what notifBuf gets.
+	n := NewNotifSFX(slog.Default())
+	pool := n.NewVoicePool()
+
+	lookup := func(id string) []float32 {
+		if id == NotifyAlert {
+			return []float32{0.5, 0.5, 0.5}
+		}
+		return nil
+	}
+	pool.play(NotifyAlert)
+	dst := make([]float32, FrameSamples)
+	pool.mixInto(dst, lookup)
+
+	if dst[0] != 0.5 {
+		t.Fatalf("dst[0] = %v, want 0.5 -- the pool must mix a present sample into the notification buffer", dst[0])
 	}
 }
