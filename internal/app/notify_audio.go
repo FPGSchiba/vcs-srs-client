@@ -48,12 +48,13 @@ func (a *App) NotifyAudioState(dto AudioStateDTO) {
 		return
 	}
 
+	window := a.audioWindow()
 	raiseOrResolve := func(key string, cond bool, item notify.Item) {
 		if cond {
-			n.RaiseWindowed(key, item, notify.WindowAudio)
+			n.RaiseWindowed(key, item, window)
 			return
 		}
-		n.ResolveWindowed(key, notify.WindowAudio)
+		n.ResolveWindowed(key, window)
 	}
 
 	raiseOrResolve(keyAudioInput, dto.InputError != "", notify.Item{

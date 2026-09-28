@@ -85,6 +85,18 @@ type App struct {
 	// settings.audio, settings.joy and health: nil in tests and in any
 	// build where wiring failed, so every use site must check.
 	notif *notify.Notifier
+
+	// notifWinJoystick/notifWinAudio override the per-source coalescing
+	// windows (notify.WindowJoystick / notify.WindowAudio). Zero means "use
+	// the package default", mirroring setHotkeyPermissionPoll's
+	// non-positive convention.
+	//
+	// They exist because a trailing-timer behaviour is otherwise only
+	// observable by sleeping for the real window -- ten seconds, for audio
+	// -- which is more wall clock than the whole rest of this package's
+	// suite. See setNotifyWindows.
+	notifWinJoystick time.Duration
+	notifWinAudio    time.Duration
 }
 
 // NewApp creates the App with its logger. Backend wiring happens in SetBackend.

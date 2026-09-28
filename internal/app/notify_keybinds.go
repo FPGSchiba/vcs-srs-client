@@ -2,6 +2,7 @@ package app
 
 import (
 	"sort"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
@@ -11,6 +12,42 @@ import (
 // table lives in the frontend (shared/components/notificationCategories.ts);
 // the backend only ever needs to name one.
 const notifyCategory = "system"
+
+// setNotifyWindows overrides the joystick and audio coalescing windows. For
+// tests only, and UNEXPORTED for the same reason setCaptureTimeout is: an
+// exported method on the service is bound and reachable from the webview,
+// and a coalescing window is not something the frontend has any business
+// setting. Non-positive values leave the corresponding default in place.
+//
+// There is deliberately no override for the hotkey window: notify.WindowHotkeys
+// is already 0 (immediate, no timer), so there is nothing to wait for and a
+// zero-means-default sentinel could not express it anyway.
+func (a *App) setNotifyWindows(joystick, audio time.Duration) {
+	if joystick > 0 {
+		a.notifWinJoystick = joystick
+	}
+	if audio > 0 {
+		a.notifWinAudio = audio
+	}
+}
+
+// joystickWindow returns the injected override when one is set, else
+// notify.WindowJoystick.
+func (a *App) joystickWindow() time.Duration {
+	if a.notifWinJoystick > 0 {
+		return a.notifWinJoystick
+	}
+	return notify.WindowJoystick
+}
+
+// audioWindow returns the injected override when one is set, else
+// notify.WindowAudio.
+func (a *App) audioWindow() time.Duration {
+	if a.notifWinAudio > 0 {
+		return a.notifWinAudio
+	}
+	return notify.WindowAudio
+}
 
 // notifyHotkeyState translates one HotkeyStateDTO into notifications.
 //
@@ -111,6 +148,7 @@ func (a *App) notifyJoystickState(dto JoystickStateDTO) {
 		return
 	}
 
+	window := a.joystickWindow()
 	switch {
 	case !dto.Supported:
 		n.RaiseWindowed(keyJoystickGlobal, notify.Item{
@@ -119,7 +157,7 @@ func (a *App) notifyJoystickState(dto JoystickStateDTO) {
 			Icon:     "knob",
 			Title:    "Joystick input is unsupported on this platform",
 			Body:     "Joystick and gamepad bindings are available on Windows and Linux only.",
-		}, notify.WindowJoystick)
+		}, window)
 	case dto.Error != "":
 		n.RaiseWindowed(keyJoystickGlobal, notify.Item{
 			Category: notifyCategory,
@@ -133,9 +171,9 @@ func (a *App) notifyJoystickState(dto JoystickStateDTO) {
 				Kind:   "navigate",
 				Target: "settings",
 			}},
-		}, notify.WindowJoystick)
+		}, window)
 	default:
-		n.ResolveWindowed(keyJoystickGlobal, notify.WindowJoystick)
+		n.ResolveWindowed(keyJoystickGlobal, window)
 	}
 }
 

@@ -175,6 +175,11 @@ func TestJoystickUnsupportedIsInfoAndNeverAnError(t *testing.T) {
 func TestJoystickErrorIsWarnAndResolves(t *testing.T) {
 	a, n := withNotifier(t)
 
+	// A short injected window, not the real 2s notify.WindowJoystick: see
+	// setNotifyWindows. What is under test is that the item resolves once
+	// the trailing timer fires, not how long the window is.
+	a.setNotifyWindows(30*time.Millisecond, 0)
+
 	a.notifyJoystickState(JoystickStateDTO{Supported: true, Error: "permission denied on /dev/input", Devices: []JoystickDeviceDTO{}})
 	items := n.Snapshot().Items
 	if len(items) != 1 || items[0].Severity != notify.SeverityWarn {
@@ -182,13 +187,13 @@ func TestJoystickErrorIsWarnAndResolves(t *testing.T) {
 	}
 
 	a.notifyJoystickState(JoystickStateDTO{Supported: true, Error: "", Devices: []JoystickDeviceDTO{}})
-	// The Resolve lands inside WindowJoystick's still-open 2s coalescing
-	// window (see internal/notify/coalesce.go), so it is deferred to the
-	// trailing timer rather than applied synchronously -- the same behaviour
+	// The Resolve lands inside the still-open coalescing window (see
+	// internal/notify/coalesce.go), so it is deferred to the trailing timer
+	// rather than applied synchronously -- the same behaviour
 	// internal/notify/coalesce_test.go's TestFlapThatStopsStillEmitsItsSettledState
 	// exercises. withNotifier wires no OnChange channel to wait on, so this
-	// waits out the real window instead of asserting synchronously.
-	time.Sleep(notify.WindowJoystick + 200*time.Millisecond)
+	// waits out the injected window instead of asserting synchronously.
+	time.Sleep(120 * time.Millisecond)
 	if !n.Snapshot().Items[0].Resolved {
 		t.Fatal("the joystick item did not resolve when the error cleared")
 	}

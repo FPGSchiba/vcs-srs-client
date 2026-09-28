@@ -99,18 +99,20 @@ func TestSubstitutionIsWarnNotError(t *testing.T) {
 func TestEachAudioKeyResolvesIndependently(t *testing.T) {
 	a, n := withNotifier(t)
 
+	// A short injected window, not the real 10s notify.WindowAudio: the
+	// second call's Resolve("audio.output") lands inside the still-open
+	// coalescing window opened by the first call's Raise (see
+	// internal/notify/coalesce.go), so it is deferred to the trailing timer
+	// rather than applied synchronously. What is under test here is that the
+	// four keys resolve INDEPENDENTLY, not how long the window is -- see
+	// setNotifyWindows.
+	a.setNotifyWindows(0, 30*time.Millisecond)
+
 	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone", OutputError: "spk gone"})
 	// The output recovers; the input does not.
 	a.NotifyAudioState(AudioStateDTO{InputError: "mic gone"})
 
-	// The second call's Resolve("audio.output") lands inside WindowAudio's
-	// still-open 10s coalescing window opened by the first call's Raise (see
-	// internal/notify/coalesce.go), so it is deferred to the trailing timer
-	// rather than applied synchronously -- the same behaviour
-	// notify_keybinds_test.go's TestJoystickErrorIsWarnAndResolves documents
-	// for WindowJoystick. withNotifier wires no OnChange channel to wait on,
-	// so this waits out the real window instead of asserting synchronously.
-	time.Sleep(notify.WindowAudio + 200*time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
 
 	var input, output notify.Item
 	for _, it := range n.Snapshot().Items {
@@ -148,6 +150,21 @@ func TestNoBackendDTORaisesBothErrorKeys(t *testing.T) {
 		if it.Severity != notify.SeverityError {
 			t.Fatalf("item %q severity = %q, want error", it.Key, it.Severity)
 		}
+	}
+}
+
+func TestNotifyWindowDefaultsAreUnoverridden(t *testing.T) {
+	a := NewForTest(state.New(), nil, nil)
+
+	// No setNotifyWindows call: the seam must not leak into production
+	// defaults. Without this test, someone could later default
+	// notifWinJoystick/notifWinAudio to a test-friendly value and nothing
+	// would notice.
+	if got := a.joystickWindow(); got != notify.WindowJoystick {
+		t.Fatalf("joystickWindow() = %v, want notify.WindowJoystick (%v)", got, notify.WindowJoystick)
+	}
+	if got := a.audioWindow(); got != notify.WindowAudio {
+		t.Fatalf("audioWindow() = %v, want notify.WindowAudio (%v)", got, notify.WindowAudio)
 	}
 }
 
