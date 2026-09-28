@@ -298,7 +298,6 @@ describe("Keybinds section", () => {
     // getHotkeyState ever rejected.
     useSettings.setState({ settings: null, keybinds: rows, hotkeys: initialHotkeyState() });
     render(<Keybinds />);
-    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
   });
 
   // ---- Per-row suppression while registration is fully down --------------
@@ -351,7 +350,6 @@ describe("Keybinds section", () => {
     });
     render(<Keybinds />);
 
-    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
     const failedRow = screen.getByText("Mute toggle").closest("[data-row]") as HTMLElement;
     expect(within(failedRow).getByText(/no OS key mapping for Numpad7/i)).toBeInTheDocument();
     // And only that row.
@@ -491,7 +489,6 @@ describe("Keybinds section", () => {
       },
     });
     render(<Keybinds />);
-    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
     expect(screen.getByText(/no OS key mapping for Numpad7/i)).toBeInTheDocument();
   });
 

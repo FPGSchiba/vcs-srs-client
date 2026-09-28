@@ -15,13 +15,13 @@ const (
 // NotifyAudioState translates one AudioStateDTO into notifications.
 //
 // This function is a PROJECTION, and the projection is the whole reason
-// audio is safe to route here at all. AudioStateDTO has nine fields;
+// audio is safe to route here at all. AudioStateDTO has ten fields;
 // exactly four are faults:
 //
 //	InputError, OutputError                 -- the fault itself
 //	InputSubstituted, OutputSubstituted     -- works, but not on the chosen device
 //
-// The other five are deliberately dropped:
+// The other six are deliberately dropped:
 //
 //	Overruns, Underruns  -- MONOTONIC COUNTERS. audio.Manager's
 //	                        emitStateIfChanged compares the whole State

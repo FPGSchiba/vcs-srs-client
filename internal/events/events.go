@@ -49,8 +49,12 @@ const (
 	// second to every open window is pure bus noise.
 	EventAudioVU = "audio:vu"
 	// EventAudioState is the audio subsystem's health, the sibling of
-	// EventHotkeysState and EventJoystickState. Phase 7's notification
-	// channel absorbs all three uniformly, so the shape stays parallel.
+	// EventHotkeysState and EventJoystickState. Phase 7.2's notification
+	// channel absorbs all three uniformly -- see internal/app's
+	// notify_keybinds.go and notify_audio.go -- so the shape stays
+	// parallel. The audio adapter is called from main.go rather than from
+	// internal/app, because audio has TWO emit sites and only one is a
+	// Manager callback: a failed NewMalgoBackend has no Manager at all.
 	EventAudioState = "audio:state"
 	// EventAudioMicMuted reports the push-to-mute / mute-toggle state.
 	EventAudioMicMuted = "audio:mic_muted"

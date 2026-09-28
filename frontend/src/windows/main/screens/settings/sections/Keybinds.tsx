@@ -106,11 +106,12 @@ function groupPerRadio(rows: Keybind[]): RadioGroup[] {
  *    appears in `hotkeys.failed` shows that reason inline -- but ONLY while
  *    `hotkeys.registered` is true. `registered === false` means nothing
  *    registered at all, which implies `failed` names every bound action, so
- *    the per-row text would just reprint the banner once per row.
+ *    the per-row text would just repeat the global-failure notification's
+ *    message once per row.
  *
  * 4. The global-failure and joystick-error announcements that used to live
- *    here as an inline banner are notifications now (see Go's
- *    App.notifyHotkeyState / notifyJoystickState) -- the right home for
+ *    here as an inline banner now route through the notification channel
+ *    (see Go's App.notifyHotkeyState / notifyJoystickState) -- the right home for
  *    something the user must learn about without having Settings open. What
  *    stays is `PermissionCard`, the remediation the user can only act on
  *    here, keyed on `hotkeys.permission === "denied"` rather than on
@@ -313,14 +314,15 @@ export function Keybinds() {
   );
 
   const renderChip = (kb: Keybind) => {
-    // Suppressed while the banner is up. `registered === false` means NOTHING
-    // registered (see hotkeys.Manager.Registered), which implies `failed`
-    // names every bound action -- so rendering per-row reasons there repeats
-    // the banner's single message on every single row. A PARTIAL failure
+    // Suppressed while the global-failure notification already covers it.
+    // `registered === false` means NOTHING registered (see
+    // hotkeys.Manager.Registered), which implies `failed` names every bound
+    // action -- so rendering per-row reasons there repeats the
+    // notification's single message on every single row. A PARTIAL failure
     // (one unregisterable Numpad7 among nineteen working binds) keeps
     // `registered === true`, and those rows still get their own reason,
     // which is the only case where the per-row text says something the
-    // banner does not.
+    // notification does not.
     const failedReason = hotkeys.registered ? hotkeys.failed[kb.action_id] : undefined;
     const isCapturing = capturingId === kb.action_id;
     return (
