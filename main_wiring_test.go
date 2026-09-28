@@ -298,3 +298,47 @@ func TestNotificationChannelIsWired(t *testing.T) {
 		}
 	}
 }
+
+// TestAudioNotificationAdapterIsWiredAtBothEmitSites guards DoD 9, which
+// rests on the audio adapter being reached from BOTH of main.go's audio emit
+// sites. App.NotifyAudioState is exported for no other reason.
+//
+// The two sites are not interchangeable and neither is redundant:
+//
+//   - the NewMalgoBackend failure branch, where NO Manager exists at all.
+//     This is the most severe audio failure there is and an adapter hung
+//     only off OnState can never see it.
+//   - the Manager's OnState callback, which carries every later fault: a
+//     device that will not open, a substitution, a recovery.
+//
+// Deleting either call leaves every unit test in internal/app and
+// internal/notify green -- the exact failure mode TestJoystickBackendIsWired
+// and TestAudioBackendIsWired exist to catch -- so, like them, this is a
+// source-text assertion.
+func TestAudioNotificationAdapterIsWiredAtBothEmitSites(t *testing.T) {
+	text := readMainGo(t)
+	const call = "gui.NotifyAudioState("
+	if got := strings.Count(text, call); got != 2 {
+		t.Fatalf("main.go contains %d %s calls, want exactly 2 -- one for the no-backend DTO and one inside the Manager's OnState callback", got, call)
+	}
+
+	mgrIdx := strings.Index(text, "audio.NewManager(")
+	if mgrIdx < 0 {
+		t.Fatal("main.go no longer calls audio.NewManager(; update this test deliberately, not reflexively")
+	}
+	onStateIdx := strings.Index(text, "OnState: func(st audio.State)")
+	if onStateIdx < 0 {
+		t.Fatal("main.go no longer registers OnState: func(st audio.State); update this test deliberately, not reflexively")
+	}
+
+	noBackend := strings.Index(text, call)
+	onState := strings.Index(text[noBackend+len(call):], call) + noBackend + len(call)
+	if noBackend > mgrIdx {
+		t.Error("the first gui.NotifyAudioState call is not in the NewMalgoBackend failure branch -- " +
+			"the no-Manager case, the most severe audio failure there is, would go unnotified")
+	}
+	if onState < onStateIdx {
+		t.Error("the second gui.NotifyAudioState call is not inside the Manager's OnState callback -- " +
+			"every audio fault after startup would go unnotified")
+	}
+}
