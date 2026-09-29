@@ -241,6 +241,45 @@ needs to skip opening a window entirely.
 
 ---
 
+## 12. CI observation — one unreproduced `internal/app` test failure (ruling R26)
+
+**This is not a manual step for a human at a machine; it is a thing to watch
+for in CI.** It is recorded here because the working notes that hold the
+evidence are git-ignored and will not survive this phase.
+
+During whole-branch review 6, `go test -tags purego -race -count=10
+./internal/app` failed **once** in roughly 180 executions. The output was
+piped through `tail`, which discarded the `--- FAIL:` line, so **the failing
+test was never identified** — and it may not have been an assertion failure
+at all.
+
+It has not reproduced since, across four independent agents:
+
+| Campaign | Executions | Failures |
+|---|---|---|
+| Review 6 | ~180 | **1** (identity lost) |
+| Fix wave 6, pre-fix | 320 | 0 |
+| Fix wave 6, post-fix | 50 | 0 |
+| Review 7 | 110 | 0 |
+| Fix wave 7 + review 8 | ~40 | 0 |
+| **Total** | **~700** | **1** |
+
+The prime suspect — two wall-clock `time.Sleep` waits in this phase's own
+tests, sized at only 4x an injected 30 ms coalescing window — was removed in
+fix wave 6 and replaced with `waitForNotify`, a bounded state poll with a 1 s
+deadline that prints the snapshot on timeout. That change also turned the
+failure mode from a **panic** (`index out of range [0] with length 0`) into a
+clean, diagnosable failure. So the class is closed even though the specific
+sighting never was.
+
+**What to do:** if CI reddens on `internal/app`, capture the full
+`--- FAIL:` line before anything else — that single line is the one piece of
+evidence nobody has managed to obtain, and it would settle this immediately.
+Do not assume it is this phase's code: the suspect tests were rewritten, and
+`internal/app` also carries Phase 3's keybind and permission suites, which
+contain their own timing-sensitive waits.
+
+
 ## Summary table (fill in after running all items)
 
 | # | Item | Result (PASS/FAIL/BLOCKED/UNVERIFIABLE) | Deviation from expected | Tester | Date |
@@ -256,3 +295,4 @@ needs to skip opening a window entirely.
 | 9 | Geometry persistence |  |  |  |  |
 | 10 | Dismissal / re-raise suppression |  |  |  |  |
 | 11 | Audio window leading-edge deferral |  |  |  |  |
+| 12 | CI: unreproduced internal/app flake | WATCH IN CI — capture `--- FAIL:` if it reddens |  |  |  |
