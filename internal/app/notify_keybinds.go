@@ -90,8 +90,13 @@ func (a *App) notifyHotkeyState(dto HotkeyStateDTO) {
 		}, notify.WindowHotkeys)
 	}
 
-	// Per-binding rows. Sorted so the raise order is deterministic, which
-	// makes the resulting list order stable across runs and testable.
+	// Per-binding rows. `failed` is a map, so its range order is randomised
+	// per pass; each raise PREPENDS, so the raise order fixes the resulting
+	// list order (reversed). Sorting is therefore what keeps the popout's
+	// rows from shuffling between otherwise identical emits. Pinned by
+	// TestPerBindingFailuresRaiseInSortedOrder -- unlike the resolve loop
+	// below, where fix wave 6 dropped the analogous sort because Resolve
+	// touches items in place and buys no ordering at all.
 	failed := dto.Failed
 	if !dto.Registered {
 		failed = nil // suppressed; the global item covers it

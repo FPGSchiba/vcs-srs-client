@@ -309,6 +309,13 @@ func fingerprint(it Item) string {
 
 // MarkRead clears one item's unread flag. Addressed by ID, not key, because
 // the UI's row is what the user clicked.
+//
+// A no-op, with no publish, for an unknown id or an item that is ALREADY
+// read -- the same rule MarkAllRead follows. This is a live path, not a
+// theoretical one: the popout calls MarkNotificationRead on every row
+// expansion, including re-expanding a row the user already read, and without
+// the precheck each of those would broadcast a redundant full Snapshot to
+// every open window.
 func (n *Notifier) MarkRead(id string) {
 	n.emitMu.Lock()
 	defer n.emitMu.Unlock()

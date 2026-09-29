@@ -326,7 +326,7 @@ func TestEachAudioKeyResolvesIndependently(t *testing.T) {
 	// The output recovers; the input does not.
 	a.notifyAudioState(AudioStateDTO{InputError: "mic gone"})
 
-	// Waited on as an EVENT, not as a duration -- see waitForNotify in
+	// Waited on as a STATE, not as a duration -- see waitForNotify in
 	// notify_keybinds_test.go. The WAIT carries half the assertion ("the
 	// output item did resolve once the trailing timer fired"); the checks
 	// below carry the other, load-bearing half: the input item, whose error

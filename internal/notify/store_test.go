@@ -517,6 +517,29 @@ func TestMarkAllReadClearsEveryUnread(t *testing.T) {
 	}
 }
 
+func TestMarkReadOnAnAlreadyReadItemIsANoop(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	changes := 0
+	n := New(Options{Now: fixedClock(&now), OnChange: func(Snapshot) { changes++ }})
+
+	id := n.Post(Item{Title: "i", Severity: SeverityWarn}) // raised unread
+	n.MarkRead(id)
+	changes = 0
+
+	// The popout re-expands the same row. Same rule as MarkAllRead: nothing
+	// changed, so nothing is broadcast.
+	n.MarkRead(id)
+	if changes != 0 {
+		t.Fatalf("OnChange fired %d times re-marking a read item, want 0", changes)
+	}
+
+	// And an id that is not in the list at all.
+	n.MarkRead("no-such-id")
+	if changes != 0 {
+		t.Fatalf("OnChange fired %d times for an unknown id, want 0", changes)
+	}
+}
+
 func TestMarkAllReadWithNothingUnreadIsANoop(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	changes := 0

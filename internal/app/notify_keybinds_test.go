@@ -150,6 +150,50 @@ func TestPerBindingFailuresOnlyWhileRegistered(t *testing.T) {
 	}
 }
 
+// TestPerBindingFailuresRaiseInSortedOrder pins the sort in the per-binding
+// raise loop. `Failed` is a MAP, so its range order is randomised by the
+// runtime on every pass; each raise PREPENDS (notify.insertLocked), so the
+// raise order is exactly the reverse of the resulting list order. Without the
+// sort the popout's rows would shuffle between otherwise identical emits, and
+// with five failing bindings that is a 1-in-120 chance of looking stable.
+func TestPerBindingFailuresRaiseInSortedOrder(t *testing.T) {
+	a, n := withNotifier(t)
+
+	a.notifyHotkeyState(HotkeyStateDTO{
+		Registered: true,
+		Permission: "granted",
+		Failed: map[string]string{
+			"channel.fleet": "a",
+			"channel.ship":  "b",
+			"global.ptt":    "c",
+			"status.afk":    "d",
+			"status.combat": "e",
+		},
+	})
+
+	// Ascending by action id on the way in, so newest-first on the way out.
+	want := []string{
+		"hotkeys.binding.status.combat",
+		"hotkeys.binding.status.afk",
+		"hotkeys.binding.global.ptt",
+		"hotkeys.binding.channel.ship",
+		"hotkeys.binding.channel.fleet",
+	}
+	items := n.Snapshot().Items
+	if len(items) != len(want) {
+		t.Fatalf("Items = %d, want %d: %+v", len(items), len(want), items)
+	}
+	for i, k := range want {
+		if items[i].Key != k {
+			got := make([]string, len(items))
+			for j, it := range items {
+				got[j] = it.Key
+			}
+			t.Fatalf("item %d Key = %q, want %q; full order = %v", i, items[i].Key, k, got)
+		}
+	}
+}
+
 func TestPerBindingFailureResolvesWhenItLeavesFailed(t *testing.T) {
 	a, n := withNotifier(t)
 
@@ -228,7 +272,7 @@ func TestJoystickErrorIsWarnAndResolves(t *testing.T) {
 	// internal/notify/coalesce.go), so it is deferred to the trailing timer
 	// rather than applied synchronously -- the same behaviour
 	// internal/notify/coalesce_test.go's TestFlapThatStopsStillEmitsItsSettledState
-	// exercises. Waited on as an EVENT, not as a duration: see waitForNotify.
+	// exercises. Waited on as a STATE, not as a duration: see waitForNotify.
 	waitForNotify(t, n, "the joystick item to resolve once the trailing timer fires",
 		func(s notify.Snapshot) bool { return len(s.Items) == 1 && s.Items[0].Resolved })
 }
