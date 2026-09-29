@@ -722,6 +722,23 @@ unread dot, expandable body, ordered context table, action buttons. There is
 **no branch anywhere on what produced the item**. A reviewer should be able
 to grep the `windows/notifications/` directory for "hotkey" and find nothing.
 
+**Per-item dismiss has no UI in 7.2, and that is deliberate.** The popout's
+header offers MARK ALL READ and CLEAR ALL only; `NotifRow` carries no
+dismiss control, matching this section's table and the design prototype
+(`misc.jsx:292-402`). The consequence, recorded here so a future reader does
+not have to rediscover it: `notify.Notifier.Dismiss` and the entire
+**per-item suppression apparatus** built around it — the `n.suppressed`
+writes in `Dismiss`, the `Dismiss` call site inside
+`pendingKind`/`pendingResolveLocked`, and the ~8 dedicated tests including
+the pending-`Resolve` subtlety — are **unreachable from the running
+application**. Today only `Clear()` can write a suppression entry. The Go
+binding (`App.DismissNotification`) is kept as **deliberate groundwork** for
+7.3/7.4's popouts, which are expected to want a per-row dismiss; the
+frontend wrapper that merely forwarded to it was deleted in review, since a
+never-called TypeScript function is dead code rather than an API. Adding a
+dismiss control is a **product decision**, not a gap to be closed by a
+reviewer.
+
 ### 6.2 Reaching a user who never opens the popout
 
 Replacing an always-visible inline banner with a popout would otherwise be a
@@ -830,6 +847,7 @@ designed-from-source values as such.
 | Server-pushed notifications | PROTO_GAPS #8. No proto change in this phase. |
 | Radio profiles, transmission history | 7.3 |
 | Ship Mode, Fleet C2, Messages popouts | 7.4 — they *consume* this channel |
+| A per-item dismiss control in the popout | §6.1. The prototype has none, so 7.2 ships none. `Notifier.Dismiss` and its suppression machinery therefore have no caller in the running app — groundwork for 7.3/7.4, not a defect. Adding the control is a product decision for the user. |
 
 ---
 

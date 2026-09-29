@@ -254,6 +254,15 @@ they had always been planned:**
   is unit-tested end to end and becomes audible the day the sample lands,
   with no further code change.
 
+**Known gap, recorded not closed:** the popout offers MARK ALL READ and
+CLEAR ALL only — there is **no per-item dismiss control**, matching the
+design prototype and the spec's §6.1 table. So `notify.Notifier.Dismiss`
+and the whole per-item suppression apparatus around it are unreachable from
+the running application; today only `Clear()` can write a suppression entry.
+The Go binding is deliberate groundwork for 7.3/7.4's popouts. Whether to
+add the control is a **product decision**, not an outstanding bug. See the
+design spec's §6.1 and §8.
+
 **Verification status:** automated suite green (`go build`/`go vet`/`go test
 -race ./...` with `-tags purego`, frontend `vitest`/`tsc --noEmit`/build);
 **not field-verified.** This is the **seventh** manual checklist to sit
