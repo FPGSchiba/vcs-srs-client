@@ -9,11 +9,13 @@ import type { Settings } from "../../../../../shared/store/settings";
  * General renders the General-section toggles from the design prototype's
  * SettingsGeneral, plus "Play notification sounds" -- Phase 7.2's addition,
  * placed next to "Play connection sounds" because the two gate the same kind
- * of thing (an SFX the user may not want) through the same shape of setting. Go is the single source of truth: every
- * toggle calls `api.setSettings` with the full struct and never updates the
- * store itself — the row only re-renders once the backend's
- * `settings:changed` event lands and SettingsScreen's subscription writes
- * the new struct into the store. There is no local mirror state here.
+ * of thing (an SFX the user may not want) through the same shape of setting.
+ *
+ * Go is the single source of truth: every toggle calls `api.setSettings`
+ * with the full struct and never updates the store itself — the row only
+ * re-renders once the backend's `settings:changed` event lands and
+ * SettingsScreen's subscription writes the new struct into the store. There
+ * is no local mirror state here.
  */
 export function General() {
   const settings = useSettings((s) => s.settings);

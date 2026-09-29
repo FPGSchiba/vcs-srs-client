@@ -302,6 +302,14 @@ describe("ToastHost", () => {
     });
 
     expect(screen.getByText("device disappeared")).toBeInTheDocument();
+    // The re-toast must also get a DWELL, not just an appearance. The
+    // retirement recorded by the hand-dismissal has to be lifted, or the
+    // repair clause skips the item, no dismiss timer is armed, and the toast
+    // sits on screen forever covering the UI.
+    act(() => {
+      vi.advanceTimersByTime(6500);
+    });
+    expect(screen.queryByText("device disappeared")).toBeNull();
   });
   it("does not re-arm a dismiss timer for a NATURALLY EXPIRED toast", () => {
     render(<ToastHost />);
@@ -350,6 +358,48 @@ describe("ToastHost", () => {
     });
 
     expect(screen.getByText("device disappeared")).toBeInTheDocument();
+    // As in the hand-dismiss pair: the re-toast must get its full dwell.
+    // Without lifting the natural expiry's retirement, no dismiss timer is
+    // armed and the toast never leaves the screen.
+    act(() => {
+      vi.advanceTimersByTime(6500);
+    });
+    expect(screen.queryByText("device disappeared")).toBeNull();
+  });
+
+  it("does not orphan a live dismiss timer when an unrelated snapshot arrives", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+      // An unrelated republish. The repair clause below `fresh` sees the item
+      // as still-toasted and would, without the double-schedule guard,
+      // OVERWRITE the map entry with a second timer -- leaving the first one
+      // live but unreachable, so no later clearTimer can cancel it.
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+      // t=2000: the content changes, so this is a NEW occurrence and gets a
+      // full 6500ms dwell of its own, i.e. it is due at t=8500. `clearTimer`
+      // can only reach whatever the map holds; an orphan from t=1000 would
+      // still be counting down to t=6500.
+      useNotifications.setState({ snap: { items: [item({ body: "device disappeared" })], unread: 1 } });
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(5000); // t=7000: past the orphan, short of the dwell
+    });
+    expect(screen.getByText("device disappeared")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1500); // t=8500: the re-toast's own dwell
+    });
+    expect(screen.queryByText("device disappeared")).toBeNull();
   });
 
   it("forgets the bookkeeping for items that leave the list", () => {

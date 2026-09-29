@@ -115,8 +115,6 @@ export const api = {
     App.MarkNotificationRead(id) as Promise<void>,
   markAllNotificationsRead: (): Promise<void> =>
     App.MarkAllNotificationsRead() as Promise<void>,
-  dismissNotification: (id: string): Promise<void> =>
-    App.DismissNotification(id) as Promise<void>,
   clearNotifications: (): Promise<void> => App.ClearNotifications() as Promise<void>,
   focusMainWindow: (): Promise<void> => App.FocusMainWindow() as Promise<void>,
 };
