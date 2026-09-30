@@ -133,6 +133,9 @@ func (a *App) captureProfile(name, desc string) *profile.Document {
 // local persist must not be masked by a successful server round trip this
 // client itself cannot then act on.
 //
+// It mutates d (d.Reconcile normalises it in place), so callers should not
+// rely on d being unchanged afterwards.
+//
 // A nil settings backend is a no-op returning nil, the discipline every
 // other settings-writing method in this package follows so tests that build
 // an App with no backend keep working.
@@ -144,25 +147,31 @@ func (a *App) applyProfile(d *profile.Document, path string) error {
 	d.Reconcile()
 	radios := profileRadiosToConfig(d.Radios)
 
-	sb.writeMu.Lock()
-	defer sb.writeMu.Unlock()
+	// writeMu is scoped to the snapshot -> mutate -> persist -> restore
+	// sequence ONLY, via this closure. The store update, window resize and
+	// server push below run with no lock held: the push is an unbounded RPC,
+	// and holding writeMu across it would stall every settings write (and
+	// RefreshKeybinds, which takes writeMu) behind a server that never answers.
+	selected, window, saveErr := func() (uint32, config.CommsLayout, error) {
+		sb.writeMu.Lock()
+		defer sb.writeMu.Unlock()
 
-	sb.mu.Lock()
-	next := *sb.cfg
-	next.Radios = radios
-	next.SelectedRadioID = selectionFor(radios, next.SelectedRadioID)
-	next.CommsLayout = profileLayoutToConfig(d.Layout)
-	next.ActiveProfile = path
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
-	if saveErr == nil {
-		sb.cfg = &next
-	}
-	selected := next.SelectedRadioID
-	window := next.CommsLayout
-	sb.mu.Unlock()
+		sb.mu.Lock()
+		defer sb.mu.Unlock()
+		next := *sb.cfg
+		next.Radios = radios
+		next.SelectedRadioID = selectionFor(radios, next.SelectedRadioID)
+		next.CommsLayout = profileLayoutToConfig(d.Layout)
+		next.ActiveProfile = path
+		var err error
+		if sb.cfgPath != "" {
+			err = config.Save(sb.cfgPath, &next)
+		}
+		if err == nil {
+			sb.cfg = &next
+		}
+		return next.SelectedRadioID, next.CommsLayout, err
+	}()
 
 	if saveErr != nil {
 		return fmt.Errorf("apply profile: %w", saveErr)

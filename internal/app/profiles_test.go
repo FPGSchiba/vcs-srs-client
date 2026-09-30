@@ -244,3 +244,38 @@ func TestProfileDirtyWhenActiveFileVanished(t *testing.T) {
 		t.Fatal("a profile whose file is gone reads as dirty: the live state is genuinely unsaved")
 	}
 }
+
+func TestApplyProfileSaveFailureLeavesStateUntouched(t *testing.T) {
+	// A cfgPath that is a directory makes config.Save fail.
+	cfgPath := t.TempDir()
+	cfg := config.Default()
+	cfg.Radios = []config.Radio{{ID: 9, Name: "old", FrequencyKHz: 121500, Enabled: true}}
+	cfg.CommsLayout = config.CommsLayout{WindowW: 500, WindowH: 700}
+	cfg.ActiveProfile = "old-path"
+	a := newTestAppWithConfig(t, cfg, cfgPath)
+	fc := &fakeControlSession{}
+	a.sess = fc
+
+	d := &profile.Document{
+		SchemaVersion: profile.SchemaVersion,
+		Name:          "New",
+		Radios:        []profile.Radio{{ID: 1, Name: "n", FrequencyKHz: 118500, Enabled: true}},
+		Layout:        profile.Layout{Window: profile.WindowSize{W: 600, H: 800}},
+	}
+	if err := a.applyProfile(d, "new-path"); err == nil {
+		t.Fatal("applyProfile must return an error when config.Save fails")
+	}
+	sb := a.settings
+	sb.mu.Lock()
+	got := *sb.cfg
+	sb.mu.Unlock()
+	if len(got.Radios) != 1 || got.Radios[0].ID != 9 || got.CommsLayout.WindowW != 500 {
+		t.Fatalf("live state changed despite failed save: radios=%+v layout=%+v", got.Radios, got.CommsLayout)
+	}
+	if got.ActiveProfile != "old-path" {
+		t.Fatalf("ActiveProfile = %q, want unchanged", got.ActiveProfile)
+	}
+	if n := fc.updateCount(); n != 0 {
+		t.Fatalf("server push happened %d time(s) after a failed save", n)
+	}
+}
