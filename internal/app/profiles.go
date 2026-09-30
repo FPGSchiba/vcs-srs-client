@@ -2,11 +2,17 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
 	"github.com/FPGSchiba/vcs-srs-client/internal/profile"
+	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 )
 
 // selectionFor re-validates a stored radio selection against a radio set.
@@ -92,6 +98,9 @@ func configLayoutToProfile(l config.CommsLayout) profile.Layout {
 
 // profilesDir resolves where profiles live for this session.
 func (a *App) profilesDir() (string, error) {
+	if a.profilesDirOverride != "" {
+		return a.profilesDirOverride, nil
+	}
 	sb := a.settings
 	if sb == nil {
 		return "", fmt.Errorf("profiles: no settings backend")
@@ -248,4 +257,470 @@ func layoutEqual(a, b profile.Layout) bool {
 		}
 	}
 	return true
+}
+
+// setProfilesDirForTest overrides the resolved profiles directory. Test
+// seam only: production resolves through config.ProfilesDirPath, which
+// touches the real AppDataDir. Mirrors setCaptureTimeout's role.
+func (a *App) setProfilesDirForTest(dir string) { a.profilesDirOverride = dir }
+
+// ListProfiles returns the profile directory listing.
+//
+// Always non-nil: the frontend types it as an array, and a nil slice
+// marshals to null. A directory that cannot be listed notifies once and
+// returns empty, so the screen renders an empty table rather than a blank
+// page.
+func (a *App) ListProfiles() []ProfileSummaryDTO {
+	out := []ProfileSummaryDTO{}
+	dir, err := a.profilesDir()
+	if err != nil {
+		a.notifyProfileError("Profiles directory unavailable", err)
+		return out
+	}
+	sums, err := profile.List(dir)
+	if err != nil {
+		a.notifyProfileError("Cannot read the profiles directory", err)
+		return out
+	}
+	for _, s := range sums {
+		blocks := make([]ProfileBlockDTO, 0, len(s.Blocks))
+		for _, b := range s.Blocks {
+			blocks = append(blocks, ProfileBlockDTO{RadioID: b.RadioID, W: b.W, H: b.H})
+		}
+		modified := ""
+		if !s.ModifiedAt.IsZero() {
+			modified = s.ModifiedAt.Local().Format("2006-01-02 15:04")
+		}
+		out = append(out, ProfileSummaryDTO{
+			Path: s.Path, Name: s.Name, Description: s.Description, Author: s.Author,
+			Modified: modified, RadioCount: s.RadioCount,
+			Window: ProfileWindowDTO{W: s.Window.W, H: s.Window.H},
+			Blocks: blocks,
+		})
+	}
+	return out
+}
+
+// GetProfileState returns the active profile, its dirty state and the
+// resolved directory.
+func (a *App) GetProfileState() ProfileStateDTO {
+	sb := a.settings
+	if sb == nil {
+		return ProfileStateDTO{}
+	}
+	sb.mu.Lock()
+	path := sb.cfg.ActiveProfile
+	sb.mu.Unlock()
+
+	st := ProfileStateDTO{ActivePath: path, Dirty: a.profileDirty()}
+	if dir, err := a.profilesDir(); err == nil {
+		st.Dir = dir
+	}
+	if path != "" {
+		if d, err := profile.Read(path); err == nil {
+			st.ActiveName = d.Name
+		}
+	}
+	return st
+}
+
+// LoadProfile applies a profile from disk.
+func (a *App) LoadProfile(path string) error {
+	d, err := profile.Read(path)
+	if err != nil {
+		a.notifyProfileError("Could not load profile", err)
+		return err
+	}
+	if err := a.applyProfile(d, path); err != nil {
+		a.notifyProfileError("Could not apply profile", err)
+		return err
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// SaveProfile overwrites the active profile with the live state, keeping
+// its name, description, author and created_at.
+func (a *App) SaveProfile() error {
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+	sb.mu.Lock()
+	path := sb.cfg.ActiveProfile
+	sb.mu.Unlock()
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("no active profile to save; use Save Current As New")
+	}
+	prev, err := profile.Read(path)
+	if err != nil {
+		a.notifyProfileError("Could not read the active profile", err)
+		return err
+	}
+	d := a.captureProfile(prev.Name, prev.Description)
+	d.Author = prev.Author
+	d.CreatedAt = prev.CreatedAt
+	d.ModifiedAt = time.Now().UTC()
+	if err := profile.Write(path, d); err != nil {
+		a.notifyProfileError("Could not save profile", err)
+		return err
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// SaveProfileAs writes the live state to a NEW profile and activates it.
+//
+// The filename stem comes from profile.Slug, disambiguated with a numeric
+// suffix when it collides: two differently-named profiles that slug
+// identically ("Fleet Op" and "Fleet  Op") must not silently overwrite each
+// other.
+func (a *App) SaveProfileAs(name, desc string) error {
+	dir, err := a.profilesDir()
+	if err != nil {
+		a.notifyProfileError("Profiles directory unavailable", err)
+		return err
+	}
+	path := uniqueProfilePath(dir, profile.Slug(name))
+	now := time.Now().UTC()
+	d := a.captureProfile(name, desc)
+	d.CreatedAt, d.ModifiedAt = now, now
+	if err := profile.Write(path, d); err != nil {
+		a.notifyProfileError("Could not save profile", err)
+		return err
+	}
+	if err := a.applyProfile(d, path); err != nil {
+		a.notifyProfileError("Could not activate the saved profile", err)
+		return err
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// uniqueProfilePath returns dir/stem.vcs.json, or dir/stem-2.vcs.json and
+// so on when that name is taken.
+func uniqueProfilePath(dir, stem string) string {
+	p := filepath.Join(dir, stem+profile.Ext)
+	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+		return p
+	}
+	for i := 2; i < 1000; i++ {
+		c := filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, profile.Ext))
+		if _, err := os.Stat(c); errors.Is(err, os.ErrNotExist) {
+			return c
+		}
+	}
+	return p
+}
+
+// RenameProfile edits a profile's display name and description in place.
+//
+// The FILENAME is deliberately left alone: renaming a display name must not
+// break a path someone else has a copy of, or that active_profile points
+// at.
+func (a *App) RenameProfile(path, name, desc string) error {
+	d, err := profile.Read(path)
+	if err != nil {
+		a.notifyProfileError("Could not read profile", err)
+		return err
+	}
+	d.Name, d.Description = name, desc
+	d.ModifiedAt = time.Now().UTC()
+	if err := profile.Write(path, d); err != nil {
+		a.notifyProfileError("Could not rename profile", err)
+		return err
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// DeleteProfile removes a profile file.
+//
+// If it was the active one, active_profile is cleared and LIVE CONFIG IS
+// LEFT UNTOUCHED -- deleting a saved copy must not wipe the radios you are
+// currently using.
+func (a *App) DeleteProfile(path string) error {
+	if err := profile.Delete(path); err != nil {
+		a.notifyProfileError("Could not delete profile", err)
+		return err
+	}
+	sb := a.settings
+	if sb != nil {
+		sb.writeMu.Lock()
+		sb.mu.Lock()
+		if sb.cfg.ActiveProfile == path {
+			next := *sb.cfg
+			next.ActiveProfile = ""
+			if sb.cfgPath != "" {
+				if err := config.Save(sb.cfgPath, &next); err == nil {
+					sb.cfg = &next
+				} else {
+					a.notifyProfileError("Could not clear the active profile", err)
+				}
+			} else {
+				sb.cfg = &next
+			}
+		}
+		sb.mu.Unlock()
+		sb.writeMu.Unlock()
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// RevertProfile re-reads the active profile and re-applies it, discarding
+// unsaved changes.
+func (a *App) RevertProfile() error {
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+	sb.mu.Lock()
+	path := sb.cfg.ActiveProfile
+	sb.mu.Unlock()
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("no active profile to revert to")
+	}
+	return a.LoadProfile(path)
+}
+
+// ResetLayout restores the built-in default layout.
+//
+// LAYOUT ONLY. It does not touch radios or the selected radio: a control
+// that silently wiped your tuned frequencies while claiming to reset a
+// layout would be a trap. It is the only escape when no profile is loaded.
+func (a *App) ResetLayout() error {
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+
+	sb.mu.Lock()
+	next := *sb.cfg
+	blocks := make([]config.LayoutBlock, 0, len(next.Radios))
+	for _, r := range next.Radios {
+		blocks = append(blocks, config.LayoutBlock{
+			RadioID: r.ID, W: profile.DefaultBlockW, H: profile.DefaultBlockH,
+		})
+	}
+	next.CommsLayout = config.CommsLayout{
+		WindowW: profile.DefaultWindowW,
+		WindowH: profile.DefaultWindowH,
+		Blocks:  blocks,
+	}
+	var saveErr error
+	if sb.cfgPath != "" {
+		saveErr = config.Save(sb.cfgPath, &next)
+	}
+	if saveErr == nil {
+		sb.cfg = &next
+	}
+	sb.mu.Unlock()
+	if saveErr != nil {
+		return fmt.Errorf("reset layout: %w", saveErr)
+	}
+	if a.windows != nil {
+		g := a.windows.Geometry("comms")
+		a.windows.SetGeometry("comms", windowstate.Geometry{
+			X: g.X, Y: g.Y, W: profile.DefaultWindowW, H: profile.DefaultWindowH,
+		})
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// ImportProfile copies a profile from anywhere on disk into profiles_dir.
+//
+// A CANCELLED dialog is a normal outcome, not an error: it returns nil and
+// notifies nothing.
+func (a *App) ImportProfile() error {
+	if a.wailsApp == nil {
+		return nil
+	}
+	src, err := a.wailsApp.Dialog.OpenFile().
+		SetTitle("Import radio profile").
+		AddFilter("VCS radio profile", "*"+profile.Ext).
+		PromptForSingleSelection()
+	if err != nil || strings.TrimSpace(src) == "" {
+		return nil // cancelled
+	}
+	d, err := profile.Read(src)
+	if err != nil {
+		a.notifyProfileError("Could not import profile", err)
+		return err
+	}
+	dir, err := a.profilesDir()
+	if err != nil {
+		a.notifyProfileError("Profiles directory unavailable", err)
+		return err
+	}
+	if err := profile.Write(uniqueProfilePath(dir, profile.Slug(d.Name)), d); err != nil {
+		a.notifyProfileError("Could not import profile", err)
+		return err
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// ExportProfile writes a copy of one profile to a user-chosen path. It does
+// not change the active profile.
+func (a *App) ExportProfile(path string) error {
+	if a.wailsApp == nil {
+		return nil
+	}
+	d, err := profile.Read(path)
+	if err != nil {
+		a.notifyProfileError("Could not read profile", err)
+		return err
+	}
+	dst, err := a.wailsApp.Dialog.SaveFile().
+		SetMessage("Export radio profile").
+		SetFilename(profile.Slug(d.Name) + profile.Ext).
+		PromptForSingleSelection()
+	if err != nil || strings.TrimSpace(dst) == "" {
+		return nil // cancelled
+	}
+	if err := profile.Write(dst, d); err != nil {
+		a.notifyProfileError("Could not export profile", err)
+		return err
+	}
+	return nil
+}
+
+// BrowseProfilesDir asks for a new profiles directory and persists it.
+func (a *App) BrowseProfilesDir() error {
+	if a.wailsApp == nil {
+		return nil
+	}
+	dir, err := a.wailsApp.Dialog.OpenFile().
+		SetTitle("Choose a profiles folder").
+		CanChooseDirectories(true).
+		CanChooseFiles(false).
+		PromptForSingleSelection()
+	if err != nil || strings.TrimSpace(dir) == "" {
+		return nil // cancelled
+	}
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+	sb.writeMu.Lock()
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.ProfilesDir = dir
+	var saveErr error
+	if sb.cfgPath != "" {
+		saveErr = config.Save(sb.cfgPath, &next)
+	}
+	if saveErr == nil {
+		sb.cfg = &next
+	}
+	sb.mu.Unlock()
+	sb.writeMu.Unlock()
+	if saveErr != nil {
+		a.notifyProfileError("Could not save the profiles folder", saveErr)
+		return saveErr
+	}
+	a.emitProfileState()
+	return nil
+}
+
+// OpenProfilesDir reveals the profiles folder in the OS file manager.
+func (a *App) OpenProfilesDir() error {
+	dir, err := a.profilesDir()
+	if err != nil {
+		a.notifyProfileError("Profiles directory unavailable", err)
+		return err
+	}
+	return openInFileManager(dir)
+}
+
+// SeedBuiltinProfiles writes the shipped default profiles into
+// profiles_dir and records their hashes. Called once at startup.
+//
+// Best-effort: a failure notifies and does not block startup, because one
+// unwritable default must not cost the user the others or the session.
+func (a *App) SeedBuiltinProfiles() {
+	dir, err := a.profilesDir()
+	if err != nil {
+		a.notifyProfileError("Could not seed default profiles", err)
+		return
+	}
+	sb := a.settings
+	if sb == nil {
+		return
+	}
+	sb.mu.Lock()
+	recorded := make(map[string]string, len(sb.cfg.BuiltinProfiles))
+	for k, v := range sb.cfg.BuiltinProfiles {
+		recorded[k] = v
+	}
+	sb.mu.Unlock()
+
+	results, seedErr := profile.Seed(dir, recorded)
+	if seedErr != nil {
+		a.notifyProfileError("Could not seed a default profile", seedErr)
+	}
+
+	updated := make(map[string]string, len(results))
+	for k, v := range recorded {
+		updated[k] = v
+	}
+	changed := false
+	for _, r := range results {
+		if r.Hash == "" {
+			continue
+		}
+		if updated[r.ID] != r.Hash {
+			updated[r.ID] = r.Hash
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+
+	sb.writeMu.Lock()
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.BuiltinProfiles = updated
+	if sb.cfgPath != "" {
+		if err := config.Save(sb.cfgPath, &next); err == nil {
+			sb.cfg = &next
+		}
+	} else {
+		sb.cfg = &next
+	}
+	sb.mu.Unlock()
+	sb.writeMu.Unlock()
+}
+
+// emitProfileState broadcasts the active-profile snapshot to every window.
+// The Comms popout renders the dirty dot and the REVERT/RESET controls, and
+// it is a separate webview with its own JS heap, so this cannot live in the
+// main window's Zustand store.
+func (a *App) emitProfileState() {
+	sb := a.settings
+	if sb == nil || sb.em == nil {
+		return
+	}
+	sb.em.ProfileState(a.GetProfileState())
+}
+
+// notifyProfileError raises one error notification for a profile failure.
+// Keyed on the title so a repeated failure of the same kind collapses
+// through notify's fingerprint rather than stacking.
+func (a *App) notifyProfileError(title string, err error) {
+	if a.notif == nil || err == nil {
+		return
+	}
+	a.notif.Raise("profile:"+title, notify.Item{
+		Category: "Profiles",
+		Severity: notify.SeverityError,
+		Icon:     "layout",
+		Title:    title,
+		Body:     err.Error(),
+	})
 }

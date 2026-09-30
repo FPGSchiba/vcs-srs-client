@@ -111,6 +111,13 @@ const (
 	// the Notifications window -- the same reason connection:state and
 	// window:state are Go-owned.
 	EventNotifications = "notifications:changed"
+	// EventProfileState carries the active profile path, its name, the computed
+	// dirty flag and the resolved profiles directory.
+	//
+	// Broadcast to EVERY window: the Comms popout renders the dirty dot and the
+	// REVERT/RESET controls and is a separate webview with its own JS heap, the
+	// same reason connection:state and notifications:changed are Go-owned.
+	EventProfileState = "profile:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -403,3 +410,7 @@ func (t *Tagged) ConnectionHealth(payload any) {
 // shape is notify.Snapshot, and naming it here would make this package
 // depend on one of its own consumers' collaborators for no benefit.
 func (t *Tagged) Notifications(payload any) { t.em.Emit(EventNotifications, payload) }
+
+// ProfileState emits EventProfileState. The payload is typed as any for the
+// same reason Notifications' is: the concrete shape is app.ProfileStateDTO.
+func (t *Tagged) ProfileState(payload any) { t.em.Emit(EventProfileState, payload) }

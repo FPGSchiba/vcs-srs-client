@@ -227,6 +227,10 @@ func main() {
 	hk := hotkeys.New(hotkeys.NewOSRegistrar(), gui)
 	gui.SetSettingsBackend(cfg, cfgPath, kb, hk, emitter)
 
+	// Seed the shipped default radio profiles. Best-effort: a failure notifies
+	// (the notifier is already wired above) and never blocks startup.
+	gui.SeedBuiltinProfiles()
+
 	// Joystick/gamepad input. A failure here is never fatal: the client is a
 	// voice-comms app first, and keyboard binds must keep working on a
 	// machine with no joystick, no permission to read one, or no backend at

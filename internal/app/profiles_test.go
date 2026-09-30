@@ -3,9 +3,12 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
+	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
 	"github.com/FPGSchiba/vcs-srs-client/internal/profile"
 )
 
@@ -277,5 +280,317 @@ func TestApplyProfileSaveFailureLeavesStateUntouched(t *testing.T) {
 	}
 	if n := fc.updateCount(); n != 0 {
 		t.Fatalf("server push happened %d time(s) after a failed save", n)
+	}
+}
+
+// newProfileTestApp builds an App over a real on-disk config, so tests can
+// read back what a binding persisted.
+func newProfileTestApp(t *testing.T) (*App, string) {
+	t.Helper()
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	return newTestAppWithConfig(t, config.Default(), cfgPath), cfgPath
+}
+
+func TestSaveProfileAsWritesAndActivates(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+
+	sb := a.settings
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.Radios = []config.Radio{{ID: 1, Name: "Fleet", FrequencyKHz: 118500, Enabled: true}}
+	sb.cfg = &next
+	sb.mu.Unlock()
+
+	if err := a.SaveProfileAs("Fleet Op — Stanton", "notes"); err != nil {
+		t.Fatalf("SaveProfileAs: %v", err)
+	}
+	want := filepath.Join(dir, "fleet-op-stanton"+profile.Ext)
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("expected %s: %v", want, err)
+	}
+	if st := a.GetProfileState(); st.ActivePath != want || st.ActiveName != "Fleet Op — Stanton" || st.Dirty {
+		t.Fatalf("state = %+v", st)
+	}
+}
+
+func TestSaveProfileAsDisambiguatesCollidingSlug(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+	if err := a.SaveProfileAs("Fleet Op", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SaveProfileAs("Fleet  Op", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := profile.List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("two profiles whose names slug identically must not overwrite each other, got %d: %+v", len(got), got)
+	}
+}
+
+func TestDeleteActiveProfileLeavesLiveConfigIntact(t *testing.T) {
+	a, cfgPath := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+
+	sb := a.settings
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.Radios = []config.Radio{{ID: 1, Name: "Fleet", FrequencyKHz: 118500, Enabled: true}}
+	sb.cfg = &next
+	sb.mu.Unlock()
+	if err := a.SaveProfileAs("X", ""); err != nil {
+		t.Fatal(err)
+	}
+	active := a.GetProfileState().ActivePath
+
+	if err := a.DeleteProfile(active); err != nil {
+		t.Fatalf("DeleteProfile: %v", err)
+	}
+	back, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Radios) != 1 {
+		t.Fatal("deleting a saved copy must not wipe the radios you are currently using")
+	}
+	if back.ActiveProfile != "" {
+		t.Fatalf("ActiveProfile = %q, want cleared", back.ActiveProfile)
+	}
+}
+
+func TestResetLayoutLeavesRadiosAlone(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	sb := a.settings
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.Radios = []config.Radio{{ID: 1, Name: "Fleet", FrequencyKHz: 118500, Enabled: true}}
+	next.SelectedRadioID = 1
+	next.CommsLayout = config.CommsLayout{WindowW: 999, WindowH: 999,
+		Blocks: []config.LayoutBlock{{RadioID: 1, W: 999, H: 999}}}
+	sb.cfg = &next
+	sb.mu.Unlock()
+
+	if err := a.ResetLayout(); err != nil {
+		t.Fatalf("ResetLayout: %v", err)
+	}
+	sb.mu.Lock()
+	got := *sb.cfg
+	sb.mu.Unlock()
+	if len(got.Radios) != 1 || got.SelectedRadioID != 1 {
+		t.Fatal("RESET is layout-only: a control that wiped tuned frequencies while claiming to reset a layout is a trap")
+	}
+	if got.CommsLayout.WindowW != profile.DefaultWindowW {
+		t.Fatalf("window = %+v, want the built-in default", got.CommsLayout)
+	}
+	if got.CommsLayout.Blocks[0].W != profile.DefaultBlockW {
+		t.Fatalf("blocks = %+v, want default sizes", got.CommsLayout.Blocks)
+	}
+}
+
+func TestRevertRestoresTheSavedProfile(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+	sb := a.settings
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.Radios = []config.Radio{{ID: 1, Name: "Fleet", FrequencyKHz: 118500, Enabled: true}}
+	sb.cfg = &next
+	sb.mu.Unlock()
+	if err := a.SaveProfileAs("X", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	sb.mu.Lock()
+	n2 := *sb.cfg
+	n2.CommsLayout.Blocks = []config.LayoutBlock{{RadioID: 1, W: 999, H: 999}}
+	sb.cfg = &n2
+	sb.mu.Unlock()
+	if !a.profileDirty() {
+		t.Fatal("precondition: should be dirty")
+	}
+
+	if err := a.RevertProfile(); err != nil {
+		t.Fatalf("RevertProfile: %v", err)
+	}
+	if a.profileDirty() {
+		t.Fatal("REVERT must leave the profile clean")
+	}
+}
+
+func TestRevertWithNoActiveProfileIsAnError(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	if err := a.RevertProfile(); err == nil {
+		t.Fatal("REVERT with nothing active has nothing to revert to")
+	}
+}
+
+func TestLoadProfileNotifiesOnMalformedFile(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	n := notify.New(notify.Options{})
+	a.setNotifier(n)
+	p := filepath.Join(t.TempDir(), "bad"+profile.Ext)
+	if err := os.WriteFile(p, []byte("{nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoadProfile(p); err == nil {
+		t.Fatal("want an error")
+	}
+	items := n.Snapshot().Items
+	if len(items) == 0 {
+		t.Fatal("a malformed profile must raise a notification naming the file")
+	}
+	if !strings.Contains(items[0].Body, "bad") {
+		t.Fatalf("notification must name the file: %+v", items[0])
+	}
+}
+
+func TestSeedBuiltinProfilesRecordsHashes(t *testing.T) {
+	a, cfgPath := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+
+	a.SeedBuiltinProfiles()
+
+	back, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.BuiltinProfiles) == 0 {
+		t.Fatal("seeding must record the hash of every builtin it wrote")
+	}
+	got, err := profile.List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no builtin written")
+	}
+}
+
+func TestSeedBuiltinProfilesIsIdempotent(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+	a.SeedBuiltinProfiles()
+	first, err := profile.List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SeedBuiltinProfiles()
+	second, err := profile.List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != len(second) {
+		t.Fatalf("second seed changed the directory: %d -> %d", len(first), len(second))
+	}
+}
+
+func TestRenameProfileLeavesFilenameAlone(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+	if err := a.SaveProfileAs("Old Name", "d"); err != nil {
+		t.Fatal(err)
+	}
+	path := a.GetProfileState().ActivePath
+	if err := a.RenameProfile(path, "New Name", "new desc"); err != nil {
+		t.Fatal(err)
+	}
+	d, err := profile.Read(path)
+	if err != nil {
+		t.Fatalf("the file must still be at its old path: %v", err)
+	}
+	if d.Name != "New Name" || d.Description != "new desc" {
+		t.Fatalf("doc = %+v", d)
+	}
+	if got := a.GetProfileState(); got.ActivePath != path || got.ActiveName != "New Name" {
+		t.Fatalf("state = %+v", got)
+	}
+}
+
+// An empty SeedResult.Hash means "not ours, nothing to record" and must never
+// clear an existing record.
+func TestSeedBuiltinProfilesKeepsRecordForUserDeletedBuiltin(t *testing.T) {
+	a, cfgPath := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+	a.SeedBuiltinProfiles()
+	before, err := config.Load(cfgPath)
+	if err != nil || len(before.BuiltinProfiles) == 0 {
+		t.Fatalf("precondition: %v %+v", err, before)
+	}
+	sums, _ := profile.List(dir)
+	for _, s := range sums {
+		if err := os.Remove(s.Path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.SeedBuiltinProfiles()
+	after, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.BuiltinProfiles) != len(before.BuiltinProfiles) {
+		t.Fatalf("records cleared: %+v -> %+v", before.BuiltinProfiles, after.BuiltinProfiles)
+	}
+	if left, _ := profile.List(dir); len(left) != 0 {
+		t.Fatalf("a user-deleted builtin must stay deleted, got %d", len(left))
+	}
+}
+
+func TestSeedBuiltinProfilesToleratesNilRecordMap(t *testing.T) {
+	cfg := config.Default()
+	cfg.BuiltinProfiles = nil
+	a := newTestAppWithConfig(t, cfg, filepath.Join(t.TempDir(), "config.toml"))
+	a.setProfilesDirForTest(t.TempDir())
+	a.SeedBuiltinProfiles() // must not panic on a nil map
+}
+
+func TestProfileDialogBindingsWithoutWailsAppAreNoOps(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	if err := a.ImportProfile(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ExportProfile("whatever"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.BrowseProfilesDir(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListProfilesIsNeverNil(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	a.setProfilesDirForTest(t.TempDir())
+	if got := a.ListProfiles(); got == nil {
+		t.Fatal("nil marshals to null; the frontend types this as an array")
+	}
+}
+
+func TestProfileBindingsEmitProfileState(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	a.setProfilesDirForTest(t.TempDir())
+	rec := &recordingEmitter{}
+	a.settings.em = events.New(rec)
+	if err := a.SaveProfileAs("X", ""); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, n := range rec.names() {
+		if n == events.EventProfileState {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %s emitted: %v", events.EventProfileState, rec.names())
 	}
 }

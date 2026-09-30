@@ -87,6 +87,10 @@ type App struct {
 	// build where wiring failed, so every use site must check.
 	notif *notify.Notifier
 
+	// profilesDirOverride is set only by tests; empty in every shipped
+	// build. See setProfilesDirForTest.
+	profilesDirOverride string
+
 	// notifWinJoystick/notifWinAudio override the per-source coalescing
 	// windows (notify.WindowJoystick / notify.WindowAudio). Zero means "use
 	// the package default", mirroring setHotkeyPermissionPoll's
