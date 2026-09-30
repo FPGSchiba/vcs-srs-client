@@ -416,3 +416,48 @@ type HotkeyPermissionResultDTO struct {
 	// the window-focus re-check, both of which emit hotkeys:state.
 	Permission string `json:"permission"`
 }
+
+// ProfileWindowDTO / ProfileBlockDTO / ProfileSummaryDTO are the
+// binding-facing profile shapes.
+//
+// Modified is a pre-formatted string, not a time: the Profiles table renders
+// it verbatim in a monospace column, and formatting it here keeps one
+// rendering of "when" rather than one per window.
+type ProfileWindowDTO struct {
+	W int `json:"w"`
+	H int `json:"h"`
+}
+
+type ProfileBlockDTO struct {
+	RadioID uint32 `json:"radio_id"`
+	W       int    `json:"w"`
+	H       int    `json:"h"`
+}
+
+type ProfileSummaryDTO struct {
+	Path        string            `json:"path"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Author      string            `json:"author"`
+	Modified    string            `json:"modified"`
+	RadioCount  int               `json:"radio_count"`
+	Window      ProfileWindowDTO  `json:"window"`
+	Blocks      []ProfileBlockDTO `json:"blocks"`
+}
+
+// ProfileStateDTO is what the dirty dot, the REVERT/RESET controls and the
+// Profiles screen's directory field all read.
+//
+// Dirty is COMPUTED on every call, never stored -- see App.profileDirty.
+type ProfileStateDTO struct {
+	ActivePath string `json:"active_path"`
+	ActiveName string `json:"active_name"`
+	Dirty      bool   `json:"dirty"`
+	Dir        string `json:"dir"`
+}
+
+// LayoutDTO is the Comms arrangement as the frontend sends it back.
+type LayoutDTO struct {
+	Window ProfileWindowDTO  `json:"window"`
+	Blocks []ProfileBlockDTO `json:"blocks"`
+}
