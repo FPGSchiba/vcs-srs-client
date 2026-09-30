@@ -1,13 +1,27 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api/client";
-import type { RadioInfoDTO } from "../../shared/api/client";
+import type { Layout, LayoutBlock, ProfileState, RadioInfoDTO } from "../../shared/api/client";
 import { on, EV } from "../../shared/api/events";
 import type { HotkeyEventPayload } from "../../shared/api/events";
 import { useRadios } from "../../shared/store/radios";
 import { useSession } from "../../shared/store/session";
+import { useProfile } from "../../shared/store/profile";
+import {
+  DEFAULT_BLOCK_H,
+  DEFAULT_BLOCK_W,
+  GRID_GAP,
+  GRID_PAD,
+} from "../../shared/layout";
 import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { Icon } from "../../shared/components/Icon";
-import { RadioCard } from "./RadioCard";
+import { RadioBlock } from "./RadioBlock";
+
+/**
+ * Renderer-side debounce for setCommsLayout. It writes no file (the bytes land
+ * at shutdown); this only avoids an IPC call per pointer-move frame.
+ */
+const LAYOUT_DEBOUNCE_MS = 300;
+const DEFAULT_WINDOW = { w: 540, h: 720 };
 
 interface RadioUpdatePayload {
   guid: string;
@@ -47,6 +61,75 @@ export function CommsApp() {
   // required closing and reopening it (spec DoD 10).
   useSettingsSync();
 
+  const profile = useProfile((s) => s.state);
+
+  // The stored layout: block order and sizes, plus the window size carried
+  // through unchanged. Kept as the FULL stored list (including blocks for
+  // radios not currently present) so saving never discards them.
+  const [layout, setLayout] = useState<Layout>({ window: DEFAULT_WINDOW, blocks: [] });
+  const layoutRef = useRef(layout);
+  // The debounced save: `pending` is the layout waiting to be sent.
+  const pending = useRef<Layout | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const flush = useCallback(() => {
+    clearTimeout(timer.current);
+    timer.current = undefined;
+    const l = pending.current;
+    pending.current = null;
+    if (l) void api.setCommsLayout(l);
+  }, []);
+
+  const commit = useCallback(
+    (next: Layout) => {
+      layoutRef.current = next;
+      setLayout(next);
+      pending.current = next;
+      clearTimeout(timer.current);
+      timer.current = setTimeout(flush, LAYOUT_DEBOUNCE_MS);
+    },
+    [flush],
+  );
+
+  // Hydrates from the backend. An edit that has not been sent yet is newer
+  // than anything the backend can tell us, so it wins.
+  const hydrateLayout = useCallback(() => {
+    api
+      .getCommsLayout()
+      .then((l) => {
+        if (pending.current) return;
+        const next = { window: l.window ?? DEFAULT_WINDOW, blocks: l.blocks ?? [] };
+        layoutRef.current = next;
+        setLayout(next);
+      })
+      .catch(() => {
+        /* not wired yet -- keep defaults */
+      });
+  }, []);
+
+  // A window closed mid-drag must not lose its last edit. flush is idempotent
+  // (it clears what it sends), so StrictMode's simulated unmount is harmless.
+  useEffect(() => flush, [flush]);
+
+  // profile:state fires for this window's own SetCommsLayout too, and for
+  // revert / reset / profile load from anywhere. Re-reading on every event is
+  // what makes the latter visible here; hydrateLayout's pending guard is what
+  // keeps the former from fighting a drag.
+  useEffect(() => {
+    hydrateLayout();
+    api
+      .getProfileState()
+      .then((s) => useProfile.getState().setState(s))
+      .catch(() => {
+        /* not wired yet -- ignore */
+      });
+    const off = on<ProfileState>(EV.profileState, (s) => {
+      useProfile.getState().setState(s);
+      hydrateLayout();
+    });
+    return () => off();
+  }, [hydrateLayout]);
+
   useEffect(() => {
     api
       .getClientState()
@@ -81,6 +164,41 @@ export function CommsApp() {
 
   const entry = selfGuid ? radios[selfGuid] : undefined;
 
+  // Display order: stored blocks that have a radio, in stored order, then any
+  // radio without a block at the default size.
+  const shown: LayoutBlock[] = [];
+  if (entry) {
+    const present = new Set(entry.radios.map((r) => r.id));
+    for (const b of layout.blocks) {
+      if (present.has(b.radio_id) && !shown.some((x) => x.radio_id === b.radio_id)) shown.push(b);
+    }
+    for (const r of entry.radios) {
+      if (!shown.some((x) => x.radio_id === r.id)) {
+        shown.push({ radio_id: r.id, w: DEFAULT_BLOCK_W, h: DEFAULT_BLOCK_H });
+      }
+    }
+  }
+
+  // The layout to persist for a new `shown`: blocks for radios that are not
+  // present right now ride along at the end.
+  function withShown(next: LayoutBlock[]): Layout {
+    const ids = new Set(next.map((b) => b.radio_id));
+    const absent = layoutRef.current.blocks.filter((b) => !ids.has(b.radio_id));
+    return { window: layoutRef.current.window, blocks: [...next, ...absent] };
+  }
+
+  function resize(radioId: number, w: number, h: number) {
+    commit(withShown(shown.map((b) => (b.radio_id === radioId ? { ...b, w, h } : b))));
+  }
+
+  function reorder(from: number, to: number) {
+    if (from < 0 || from >= shown.length || to < 0 || to >= shown.length) return;
+    const next = shown.slice();
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    commit(withShown(next));
+  }
+
   return (
     <div
       className="popout"
@@ -98,7 +216,35 @@ export function CommsApp() {
       <div className="popout-chrome">
         <Icon name="broadcast" size={14} />
         <span className="ttl">Communications</span>
+        {profile.active_name && (
+          <span className="cap mono" style={{ color: "var(--tx-3)" }}>
+            {profile.active_name}
+          </span>
+        )}
+        {profile.dirty && (
+          <span title="Unsaved layout changes" style={{ color: "var(--ac-primary)" }}>
+            ●
+          </span>
+        )}
         <div className="ctrl">
+          {profile.dirty && profile.active_path && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              title="Discard changes and reload the active profile"
+              onClick={() => void api.revertProfile()}
+            >
+              REVERT
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn-sm"
+            title="Restore the default layout"
+            onClick={() => void api.resetLayout()}
+          >
+            RESET
+          </button>
           <button
             type="button"
             className="close"
@@ -120,10 +266,37 @@ export function CommsApp() {
             No radios — connect first
           </div>
         ) : (
-          <div className="col gap-4" role="listbox" aria-label="Radios" style={{ padding: 12 }}>
-            {entry.radios.map((r) => (
-              <RadioCard key={r.id} radio={r} allRadios={entry.radios} muted={entry.muted} />
-            ))}
+          // Geometry here is the contract `place()` in shared/layout.ts
+          // reproduces for the Profiles preview: wrap, GRID_PAD padding,
+          // GRID_GAP gap, rows start at the top, blocks never shrink.
+          <div
+            role="listbox"
+            aria-label="Radios"
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignContent: "flex-start",
+              alignItems: "flex-start",
+              padding: GRID_PAD,
+              gap: GRID_GAP,
+            }}
+          >
+            {shown.map((b, i) => {
+              const r = entry.radios.find((x) => x.id === b.radio_id)!;
+              return (
+                <RadioBlock
+                  key={r.id}
+                  radio={r}
+                  allRadios={entry.radios}
+                  muted={entry.muted}
+                  width={b.w}
+                  height={b.h}
+                  index={i}
+                  onResize={resize}
+                  onReorder={reorder}
+                />
+              );
+            })}
           </div>
         )}
       </div>

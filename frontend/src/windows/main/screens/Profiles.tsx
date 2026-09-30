@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { api } from "../../../shared/api/client";
+import { place } from "../../../shared/layout";
 import type {
   LayoutBlock,
   LayoutWindow,
@@ -15,42 +16,6 @@ import { Field } from "../../../shared/components/Field";
 const VIEW_W = 42;
 const VIEW_H = 28;
 const MARGIN = 1;
-// The Comms list wrapper's padding and inter-block gap, in window pixels.
-const PAD = 12;
-const GAP = 8;
-
-interface Placed {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/**
- * Flows blocks left to right inside the window's content width, wrapping to a
- * new line when the next block would overflow. This rule is local to the
- * preview: there is no Comms grid yet, so it must be reconciled with (or
- * reused by) the real grid when that lands. Pure so the geometry is testable
- * without rendering.
- */
-function place(blocks: LayoutBlock[], win: LayoutWindow): { rects: Placed[]; w: number; h: number } {
-  const inner = Math.max(win.w - 2 * PAD, ...blocks.map((b) => b.w), 1);
-  const rects: Placed[] = [];
-  let x = 0;
-  let y = 0;
-  let rowH = 0;
-  for (const b of blocks) {
-    if (x > 0 && x + b.w > inner) {
-      x = 0;
-      y += rowH + GAP;
-      rowH = 0;
-    }
-    rects.push({ x, y, w: b.w, h: b.h });
-    x += b.w + GAP;
-    rowH = Math.max(rowH, b.h);
-  }
-  return { rects, w: inner, h: y + rowH };
-}
 
 /**
  * LayoutPreview draws a schematic of the STORED block sizes, scaled
