@@ -19,6 +19,7 @@ import { Welcome } from "./screens/Welcome";
 import { Home } from "./screens/Home";
 import { Players } from "./screens/Players";
 import { History } from "./screens/History";
+import { Profiles } from "./screens/Profiles";
 import { Placeholder } from "./screens/Placeholder";
 import { SettingsScreen } from "./screens/settings/SettingsScreen";
 
@@ -119,6 +120,7 @@ export function MainApp() {
     view === "home" ? <Home /> :
     view === "players" ? <Players /> :
     view === "history" ? <History /> :
+    view === "profiles" ? <Profiles /> :
     view === "settings" ? <SettingsScreen /> :
     <Placeholder />;
 
