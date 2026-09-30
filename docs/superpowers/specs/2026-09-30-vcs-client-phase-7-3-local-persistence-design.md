@@ -124,6 +124,10 @@ re-opening the question.
 | D6 | A **capped ring of 2000 entries**, persisted to `AppDataDir()/history.json`, flushed atomically on a ~5 s debounce and on shutdown. | In-memory only (contradicts the ROADMAP row; no after-action review); 24-hour time window (file size varies with how busy ops were; entries vanish by clock). |
 | D7 | Profiles default to `AppDataDir()/profiles`, overridable by a new `profiles_dir` config key, with BROWSE and OPEN. | Default under `Documents/Vanguard/Profiles` (a second storage root, resolved per-OS, separate from everything else the client persists); fixed and non-configurable (drops "user-chosen dir" from the ROADMAP row). |
 | D8 | **`config.toml` owns the live state; a profile is a snapshot of it.** | Layout in its own file beside `windows.json` (a profile load would have to write two files with no shared lock — a crash between them leaves radios from profile B with layout from profile A); the active profile file *is* the live state (deletes D4's dirty/REVERT design outright, and every frequency tune rewrites a user-visible file). |
+| D9 | **`selected_radio_id` is NOT stored in a profile.** It stays in `config.toml` as session continuity; LOAD re-validates it against the incoming radio set. | Storing it (it is compared by the dirty check, so every `radio.<n>.select` hotkey press mid-ops would light the dirty dot — noise on the control hit most often). |
+| D10 | **Builtin profiles are embedded and seeded on startup**, with a recorded content hash deciding whether a shipped update may replace the file on disk. A builtin the user deleted stays deleted. | Always restoring a missing builtin (a profile the user removes reappears every launch, with no way to stop it short of editing `config.toml`). |
+| D11 | **The Comms layout is updated in memory on every drag and written to disk at shutdown**, not on a debounce. | A ~500 ms debounced `config.Save` during a drag (disk I/O on a pointer-move path, to protect state that is trivially re-created by dragging again). |
+| D12 | **The RX idle threshold is `voice.Options.HistoryIdleMS` *and* a `[voice] history_idle_ms` config key**, 0 meaning the 500 ms default. | A bare named constant (retuning it on real hardware would need a rebuild per value tried, defeating the point of naming it). |
 
 ---
 
@@ -134,9 +138,12 @@ callback in `internal/voice`. The shape follows `internal/notify`: the store
 is Go-owned and the frontend is a view over it.
 
 ```
-internal/profile/      .vcs.json document: types, codec, dir listing,
-                       atomic write, validation.
-                       Imports: stdlib only.
+internal/profile/          .vcs.json document: types, codec, dir listing,
+                           atomic write, validation, and the builtin
+                           seeding/hash logic (§5.2).
+                           Imports: stdlib only.
+internal/profile/builtin/  the shipped default profiles, go:embed'd — same
+                           mechanism as internal/audio/sfx.go:12.
 
 internal/history/      fixed-capacity ring, JSON codec, debounced atomic
                        flush. Takes fully-resolved entries.
@@ -191,7 +198,6 @@ Files are named `<slug>.vcs.json`.
     { "id": 2, "name": "Gunners Net", "frequency_khz": 122750,
       "enabled": true, "is_intercom": false }
   ],
-  "selected_radio_id": 1,
   "layout": {
     "window": { "w": 540, "h": 720 },
     "blocks": [
@@ -231,6 +237,27 @@ and unaffected; this is a second, integer-only entry point beside it.
 - **`schema_version` newer than this build is refused**, with a notification
   naming the file and the version. It is never partially applied.
 
+### 4.3 Why `selected_radio_id` is not in the profile
+
+It is runtime-adjacent state, not setup. It *is* persisted — `config.toml`
+holds it and `internal/app/app.go:194` restores it into `state.Store` at
+startup, because without it `global.ptt` (the primary PTT) resolves to
+nothing on every fresh launch until a radio card is clicked. But that is
+session continuity, not something a shareable profile should carry.
+
+The decisive argument is the dirty check. Dirty is computed by comparing
+live config against the profile file (§5.1), so a stored `selected_radio_id`
+would mean **every `radio.<n>.select` hotkey press lights the dirty dot** —
+on the control a user hits most often, mid-operation.
+
+Dropping it opens one hole that must be closed explicitly: LOAD replaces the
+radio set wholesale, and `App.resolveTXTarget` (`voice.go:424-454`) returns
+`nil` when no radio matches the selected id — a **silently dead PTT**, green
+light and all. So LOAD re-validates the selection: if the current
+`SelectedRadioID` is not present and enabled in the incoming set, the first
+enabled radio is selected instead, or 0 if the profile has none. A runtime
+rule, no stored field, no dirty noise.
+
 ---
 
 ## 5. Live state, and what a profile is
@@ -242,6 +269,12 @@ and `SelectedRadioID`; this phase adds:
 active_profile = "C:\\Users\\janne\\AppData\\Roaming\\VCS\\profiles\\fleet-op.vcs.json"
 profiles_dir   = ""   # empty = AppDataDir()/profiles
 
+# sha256 of the content this build last WROTE for each builtin profile.
+# See §5.2 -- this is what distinguishes "untouched, safe to update" from
+# "the user edited it, never overwrite".
+[builtin_profiles]
+  standard-fleet = "9f2c…"
+
 [comms_layout]
   window_w = 540
   window_h = 720
@@ -251,12 +284,17 @@ profiles_dir   = ""   # empty = AppDataDir()/profiles
     h = 180
 ```
 
-A profile file is a serialization of exactly `Radios` + `SelectedRadioID` +
-`[comms_layout]` plus metadata. Nothing else.
+A profile file is a serialization of exactly `Radios` + `[comms_layout]`
+plus metadata. Not `SelectedRadioID` — see §4.3.
+
+**`[comms_layout]` is written to disk at shutdown, not while dragging** —
+see §6.
 
 ### 5.1 Operations
 
-**LOAD** — read → validate → write radios, selected id and layout into
+**LOAD** — read → validate → **re-validate the radio selection** (§4.3: if
+`SelectedRadioID` is not present and enabled in the incoming set, take the
+first enabled radio, else 0) → write radios, selection and layout into
 config in **one** `config.Save` under `settingsBackend.writeMu` →
 `Registry.SetBounds("comms", …)` → push radios to the server through the
 existing `pushPersistedRadios` path → set `active_profile`.
@@ -310,6 +348,44 @@ the OS file manager.
 
 A cancelled dialog is a normal outcome, not an error.
 
+### 5.2 Builtin profiles and their migration
+
+The app ships a small set of default profiles embedded with `go:embed` —
+the same mechanism `internal/audio/sfx.go:12` already uses for the SFX
+assets — under `internal/profile/builtin/`. They are seeded into
+`profiles_dir` at startup and updated when a newer build ships a changed
+version, **without ever overwriting a file the user has edited**.
+
+The discriminator is a content hash. `config.toml`'s `[builtin_profiles]`
+records, per builtin id, the sha256 of the content **this client last
+wrote** for it. On startup, for each embedded builtin:
+
+| Recorded hash | File on disk | Action |
+|---|---|---|
+| none | missing | **WRITE** — first run |
+| none | present | leave — a user file already owns that name; never clobber it |
+| present | missing | leave — the user deleted it deliberately |
+| present | hash matches record | **REPLACE** if the shipped content differs; update the record |
+| present | hash differs from record | leave — the user edited it, and it is theirs now |
+
+Two properties worth stating because they are the point of the scheme:
+
+- **A user edit is permanent.** Once the on-disk hash diverges from the
+  record, that file is never touched again by any future build. There is no
+  version in which a shipped update silently reverts someone's tuning.
+- **A deletion is permanent.** A recorded hash proves the file was written
+  at least once, so its absence is a decision, not a fresh install. A
+  builtin the user removes does not reappear every launch.
+
+Seeding runs once at startup, before the Profiles screen can be opened. It
+is best-effort: a failure to write one builtin notifies (§9) and does not
+block startup or the other builtins.
+
+Builtins are ordinary `.vcs.json` files once written. They can be loaded,
+edited, renamed, exported and deleted exactly like any other profile —
+nothing in the Profiles UI treats them as special, and nothing marks them
+read-only.
+
 ---
 
 ## 6. Layout model and editor
@@ -324,8 +400,24 @@ The Comms popout body becomes a `flex-wrap` container; each radio is a
   overlaps. This is the entire reason the flow grid was chosen over a
   free-form canvas: there is no clamping rule, no collision rule and no
   shrink policy to get wrong, because none of those states is reachable.
-- **Persistence** — `[comms_layout]` written on a ~500 ms debounce, so a
-  drag is not 60 config writes per second.
+- **Persistence** — a drag updates `settingsBackend.cfg` **in memory only**.
+  `config.Save` runs at shutdown, from `App.ServiceShutdown` (`app.go:254`),
+  whose own comment records that it covers every quit path: tray Quit,
+  Cmd+Q, and closing the window with minimize-to-tray off.
+
+  No debounce, and **no disk I/O on a pointer-move path at all**. A crash
+  loses at most the drags since the last write, and re-creating them is one
+  more drag — not worth a `config.Save` per 500 ms.
+
+  In practice the window is narrower still: `config.Save` serializes the
+  **whole** `*config.Config`, and `persistRadios` (`voice.go:1047`),
+  `persistSelectedRadio` (`voice.go:1160`) and the three settings writers
+  (`settings.go:263,375,1127`) all call it on ordinary user actions. The
+  layout free-rides on every one of them, so it reaches disk any time the
+  user tunes a radio or changes a setting, long before quit.
+
+  Dirty (§5.1) compares the **in-memory** config, so it is correct the
+  instant a block is dragged, regardless of when the bytes land.
 
 The editor lives in the Comms window only. The Profiles screen's
 `LayoutPreview` SVG renders a schematic from the stored block sizes, so the
@@ -355,6 +447,16 @@ the handles, not afterwards:
 // OnRX reports one completed received transmission.
 OnRX func(RXEvent)
 
+// HistoryIdleMS is how long a stream may go without an accepted packet
+// before the transmission is considered over, for the history log ONLY.
+// 0 means 500. It does NOT affect rxIdleTimeout, which governs when the
+// decoder and jitter buffer are released.
+//
+// This is a deliberate tuning seam, not a constant: the default is a
+// guess (§11) that has never been checked against a real talker, and a
+// field test must be able to move it without a rebuild.
+HistoryIdleMS int
+
 type RXEvent struct {
     Sender uuid.UUID
     Freq   KHz
@@ -362,6 +464,11 @@ type RXEvent struct {
     End    time.Time
 }
 ```
+
+It is fed from a new `[voice] history_idle_ms` key, alongside the
+`jitter_buffer_ms` and `max_buffer_ms` knobs `config.Voice` already carries,
+with the same "0 means the documented default" convention every other field
+in `voice.Options` uses.
 
 `rxStream` gains `started time.Time` and `ended bool`. The existing
 `rxService` sweep on the decode goroutine gains one branch:
@@ -463,6 +570,14 @@ atomically (write-temp + rename) on a ~5 s debounce and on shutdown. Up to
 ~5 s of the newest rows are lost on a hard kill; that is the accepted cost
 of not rewriting a ~240 KB file several times a second.
 
+**The history flush stays debounced while the layout write does not (D11),
+and the difference is deliberate.** A layout is a small, deliberate
+arrangement the user can re-create with one drag, so deferring it to
+shutdown costs nothing. A log accumulates continuously and cannot be
+re-created at all — writing it only at shutdown would mean a crash loses the
+entire session's record, which is precisely the case an after-action log
+exists for. Different data, different failure cost, different policy.
+
 ---
 
 ## 8. Events, bindings, frontend
@@ -537,6 +652,8 @@ sources.
 | `schema_version` newer than this build | Error notification naming file and version. Refused outright. |
 | `profiles_dir` cannot be created or listed | Error notification naming the path; the screen renders an empty directory rather than a blank page. |
 | `config.Save` fails during LOAD | Error notification; live config unchanged, `active_profile` unchanged, nothing pushed to the server. |
+| A builtin profile cannot be seeded (§5.2) | Warning notification naming the builtin. Best-effort: startup continues and the other builtins are still seeded. |
+| `config.Save` fails at shutdown | Logged at Warn. The quit is not blocked and no notification is raised — there is no window left to show it in. |
 | History flush fails | `Raise`d **once** on a stable key and `Resolve`d on the next success — never one notification per 5 s tick. |
 | Native dialog cancelled | Normal outcome. No notification, no error. |
 | RX event channel overflow | Counted, logged at Warn. Log rows are dropped; audio is not. |
@@ -568,9 +685,22 @@ package needs `dangerouslyDisableSandbox` — the sandbox blocks `bind(2)` and
 its tests fail with "listen udp: operation not permitted".
 
 **`internal/app`**: LOAD applies atomically and pushes to the server last;
-dirty computation; DELETE of the active profile leaves live config intact;
-the normalized GUID index resolves a sender whose store key is
-non-canonical; a global-channel row renders no channel name.
+dirty computation, including that a radio-select does **not** dirty a
+profile (§4.3) while a block resize does; LOAD re-validates the selection
+and falls back to the first enabled radio when the stored one is absent;
+DELETE of the active profile leaves live config intact; the normalized GUID
+index resolves a sender whose store key is non-canonical; a global-channel
+row renders no channel name.
+
+**Builtin seeding** gets a test per row of §5.2's table — all five, since
+the whole value of the scheme is in the rows that decline to write. The
+user-edited and user-deleted rows get an explicit assertion that the file is
+byte-identical afterwards / still absent, because a regression there
+destroys user data silently.
+
+**Layout write timing**: a drag mutates in-memory config and writes **no**
+file; `ServiceShutdown` flushes it; an unrelated `config.Save` in between
+carries the layout to disk as a side effect (§6).
 
 **Frontend**: `vitest` for both screens; StrictMode tests plus real-unmount
 controls for the drag handlers.
@@ -591,8 +721,9 @@ unrun manual checklist in `docs/superpowers/plans/`, joining Phases 3, 3.5,
   below a natural speech pause. Nobody has ever received voice from a real
   peer on this client, so the true jitter distribution is unknown. Too low
   and one sentence splits into several rows; too high and two exchanges
-  merge into one. It is a named constant so a field test can move it without
-  touching logic.
+  merge into one. It is exposed twice over so it can actually be measured:
+  `voice.Options.HistoryIdleMS` for tests, and `[voice] history_idle_ms` so
+  a field tester can sweep values without a rebuild (D12).
 - **Native file dialogs are untestable in CI** and have never been run on
   any OS from this codebase. BROWSE, IMPORT, EXPORT and OPEN are all
   unverified, on all three platforms.
@@ -622,17 +753,25 @@ unrun manual checklist in `docs/superpowers/plans/`, joining Phases 3, 3.5,
 3. REVERT and RESET behave as §5.1 specifies, including with no profile
    active.
 4. Radio blocks in the Comms window can be resized and reordered; the layout
-   survives a client restart and round-trips through a profile file.
+   survives a client restart and round-trips through a profile file, with no
+   file written during a drag.
 5. Loading a profile re-pushes radios to the server and the frequencies it
-   advertises are bit-identical to what the server compares against.
-6. The Transmission Log shows RX and own-TX rows with sender, channel,
+   advertises are bit-identical to what the server compares against; the
+   radio selection is re-validated so the PTT is never left pointing at a
+   radio the new profile does not have.
+6. Builtin profiles are seeded on first run, updated when a newer build
+   ships a changed version, and left alone once the user has edited or
+   deleted them — each of §5.2's five cases covered by a test.
+7. The Transmission Log shows RX and own-TX rows with sender, channel,
    frequency and duration, filtered by channel, time and search, and exports
    to CSV.
-7. The log survives a client restart and is capped at 2000 entries.
-8. Every failure in §9's table raises the notification it describes.
-9. `go build` / `go vet` / `go test -race ./...` green with `-tags purego`;
-   frontend `vitest`, `npx tsc --noEmit` and build green.
-10. A manual verification checklist is written to
+8. The log survives a client restart and is capped at 2000 entries.
+9. The RX idle threshold can be retuned from `config.toml` without a
+   rebuild, and the manual checklist says how to measure it.
+10. Every failure in §9's table raises the notification it describes.
+11. `go build` / `go vet` / `go test -race ./...` green with `-tags purego`;
+    frontend `vitest`, `npx tsc --noEmit` and build green.
+12. A manual verification checklist is written to
     `docs/superpowers/plans/` covering everything in §11.
 
 ---
