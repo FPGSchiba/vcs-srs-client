@@ -67,14 +67,12 @@ describe("the settings gear", () => {
     expect(gear()).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("has a visible resting border and a brighter glyph", () => {
+  it("carries the radio-gear class and reflects open state in data-open", () => {
     show("vertical");
-    expect(gear().style.border).toContain("var(--bd-2)");
-    expect(gear().style.background).toContain("var(--bg-2)");
-    expect(gear().style.color).toBe("var(--tx-1)");
-    expect(gear().style.width).toBe("16px");
-    expect(gear().style.height).toBe("16px");
-    expect(gear().style.boxSizing).toBe("border-box");
+    expect(gear()).toHaveClass("radio-gear");
+    expect(gear()).toHaveAttribute("data-open", "false");
+    open();
+    expect(gear()).toHaveAttribute("data-open", "true");
   });
 
   it("no longer puts the toggles on the card", () => {

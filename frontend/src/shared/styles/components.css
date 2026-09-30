@@ -1483,7 +1483,23 @@ button.lcd-digit[data-cursor="true"] {
   margin-left: 0.4em;
 }
 
-/* Per-radio settings gear: resting look is inline (RadioSettings.tsx); these
-   states must beat inline styles, hence !important. */
-.radio-gear:hover { border-color: var(--bd-3) !important; background: var(--bg-3) !important; color: var(--tx-0) !important; }
-.radio-gear:focus-visible { outline: none; border-color: var(--ac-primary) !important; box-shadow: 0 0 0 1px var(--ac-primary); }
+/* Per-radio settings gear. 16x16 total (border-box) to fit the 16.8px card
+   header budget enforced by comms/fit.test.tsx. */
+.radio-gear {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1px solid var(--bd-2);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--tx-1);
+  cursor: pointer;
+}
+.radio-gear:hover { border-color: var(--bd-3); background: var(--bg-3); color: var(--tx-0); }
+.radio-gear[data-open="true"] { color: var(--ac-primary); }
+.radio-gear:focus-visible { outline: none; border-color: var(--ac-primary); box-shadow: 0 0 0 1px var(--ac-primary); }

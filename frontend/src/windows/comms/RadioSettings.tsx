@@ -184,21 +184,7 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
           setOpen((o) => !o);
         }}
         className="radio-gear"
-        style={{
-          boxSizing: "border-box",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 16,
-          height: 16,
-          padding: 0,
-          flexShrink: 0,
-          border: "1px solid var(--bd-2)",
-          borderRadius: 3,
-          background: "var(--bg-2)",
-          color: open ? "var(--ac-primary)" : "var(--tx-1)",
-          cursor: "pointer",
-        }}
+        data-open={open}
       >
         <Icon name="settings" size={12} />
       </button>
