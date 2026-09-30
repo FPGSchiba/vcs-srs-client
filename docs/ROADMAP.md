@@ -282,11 +282,21 @@ unverifiable today.
 
 ### Phase 7.3 — Local persistence
 
-**Status:** `[ ]` not started — spec not yet written.
+**Status:** `[~]` in progress 2026-09-30 — design approved, implementation plan not yet written. **Design doc:** [`2026-09-30-vcs-client-phase-7-3-local-persistence-design.md`](./superpowers/specs/2026-09-30-vcs-client-phase-7-3-local-persistence-design.md)
 
 **Headline deliverables**
-- Radio profile load/save/import/export (JSON files in user-chosen dir)
-- Transmission history view (local JSON ring buffer)
+- Radio profile load/save/import/export (JSON files in user-chosen dir). Live state stays in `config.toml`; a profile is a snapshot of `Radios` + `SelectedRadioID` + `[comms_layout]` plus metadata. `frequency_khz` is stored as an integer and never round-trips through a float — the server compares advertised frequencies with exact `float32` equality (`vcs-srs-server/state/server.go:211`), so a float profile format could drop a radio out of range silently.
+- Transmission history view (local JSON ring buffer): RX + own TX, 2000-entry ring in `AppDataDir()/history.json`, debounced atomic flush.
+
+**Beyond this row's original text — added during design at the user's request, and recorded plainly rather than as if it had always been planned:**
+- **A fully customizable Comms layout.** A profile also carries per-radio block sizes in px and the Comms window size, which means the Comms popout gains a resize/reorder editor it does not have today (a `flex-wrap` flow grid, chosen over a free-form canvas so overlap, clamping and shrink policies are unreachable states rather than rules to get wrong). This is new UI work in a window this row does not mention, and it is an **improvement on the design prototype**, not a port of it — `design/vcs/project/screens/comms.jsx:44-50` has three hardcoded CSS-grid presets with no per-block sizing at all.
+- A dirty indicator with **REVERT** (re-read the active profile) and **RESET** (built-in default layout only — never touches radios) in the Comms chrome.
+
+**Findings from the design survey that contradict what was written down:**
+- **There is no end-of-transmission marker anywhere on the wire**, which is worse than the decomposition spec's "the `voice:rx_active` event does not exist". The server never sends BYE (`internal/voice/session.go:616`) and the client sends one only from `Close()` (`session.go:397`). The only existing end-of-stream signal is the 5s `rxIdleTimeout` reap, an audio-path lifetime. The design adds a dedicated 500ms idle threshold for history and leaves `rxIdleTimeout` untouched. **That 500ms is a guess, not a measurement** — nobody has ever received voice from a real peer on this client.
+- Prototype paths in the decomposition spec §3.1 and CLAUDE.md omit a `project/` segment: it is `design/vcs/project/screens/misc.jsx` and `design/vcs/project/styles.css`.
+- CLAUDE.md's `make proto` does not exist — there is no Makefile. `Taskfile.yml`'s `proto` task runs `buf generate`, and `buf` must be installed before anything compiles.
+- PROTO_GAPS §7's "status bar history affordance" does not exist; `StatusBar.tsx` has only `onNavigate("server")`.
 
 **Blocking deps:** Phase 7.2 (dependency order — see decomposition spec). Independent of 7.4; may run in parallel with it.
 
