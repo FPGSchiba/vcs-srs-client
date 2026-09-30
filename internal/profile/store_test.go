@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,6 +119,40 @@ func TestWriteToUnwritableDirReportsError(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	if err := Write(filepath.Join(dir, "x"+Ext), &Document{SchemaVersion: SchemaVersion, Name: "X"}); err == nil {
 		t.Fatal("a write into an unwritable dir must report the failure, not appear to succeed")
+	}
+}
+
+func TestWriteFailureCleansTmpFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x"+Ext)
+	tmpPath := p + ".tmp"
+	// Create a directory at the temp path, which will cause WriteFile to fail
+	// while still being present at that path.
+	if err := os.Mkdir(tmpPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	d := &Document{
+		SchemaVersion: SchemaVersion,
+		Name:          "X",
+		Radios:        []Radio{{ID: 1, Name: "r", FrequencyKHz: 118500}},
+	}
+	if err := Write(p, d); err == nil {
+		t.Fatal("Write should have failed, but did not")
+	}
+	// The target file should not exist (WriteFile failed, rename never happened).
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("profile file should not exist after Write failure")
+	}
+	// Verify no stray .tmp *file* is left behind. The pre-made directory will
+	// still be there, but Write should not have left any .tmp file.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") && !e.IsDir() {
+			t.Fatalf("found stray .tmp file after Write failure: %s", e.Name())
+		}
 	}
 }
 

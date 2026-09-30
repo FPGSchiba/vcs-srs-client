@@ -32,7 +32,10 @@ type Summary struct {
 // windowstate.Load uses for a first run, where nothing has been written
 // yet. A path that EXISTS but is not a directory (profiles_dir pointing at
 // a regular file) DOES error: that is a misconfiguration the user has to be
-// told about, not an empty shelf.
+// told about, not an empty shelf. (os.ReadDir alone cannot reliably
+// distinguish the two across platforms -- on Windows a regular file reports
+// os.ErrNotExist, which would silently return an empty listing for a
+// misconfigured profiles_dir; Stat pre-checks the path to catch this.)
 //
 // One unparseable file does not fail the listing. A corrupt profile must
 // not hide every other profile the user has; it simply does not appear.
@@ -101,8 +104,10 @@ func Read(path string) (*Document, error) {
 // windowstate.Save established. A half-written profile is never visible,
 // and a crash mid-write leaves the previous version intact.
 //
-// It Reconciles first, so what lands on disk is always self-consistent
-// regardless of what the caller assembled.
+// It Validates first, then Reconciles, so what lands on disk is always
+// self-consistent regardless of what the caller assembled. (Reconciling
+// before Validating would repair a document that should have been refused.)
+// Note that Write mutates the caller's *Document through Reconcile.
 func Write(path string, d *Document) error {
 	if err := d.Validate(); err != nil {
 		return err
@@ -118,6 +123,7 @@ func Write(path string, d *Document) error {
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write profile %s: %w", filepath.Base(path), err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
