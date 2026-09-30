@@ -974,7 +974,14 @@ func (s *Session) recordKeepalive(ev event) {
 	}
 	sent := s.pendingKA[0]
 	s.pendingKA = s.pendingKA[1:]
-	if rtt := ev.at.Sub(sent); rtt > 0 {
+	// A negative delta is a clock step and is discarded. A zero delta is a
+	// real round trip shorter than the clock tick (Windows ticks at ~0.5 ms,
+	// longer than a loopback RTT); RTT() reserves zero for "unmeasured", so
+	// record it as the smallest positive value rather than dropping it.
+	if rtt := ev.at.Sub(sent); rtt >= 0 {
+		if rtt == 0 {
+			rtt = time.Microsecond
+		}
 		s.rtt = rtt
 	}
 }
