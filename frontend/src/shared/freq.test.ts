@@ -64,6 +64,16 @@ describe("stepDigit", () => {
     // refusal logic cannot mistakenly forbid landing on a bound.
     expect(stepDigit(16_677_215, 5, 1)).toBe(MAX_KHZ);
   });
+
+  it("refuses a step that would exceed the 24-bit ceiling, keeping lower digits untouched", () => {
+    // Review Focus #2: distinguish refuse from clamp.
+    // place 5 = 100 MHz = 100_000 kHz
+    // 16_700_000 + 100_000 = 16_800_000, which exceeds MAX_KHZ (16_777_215).
+    // Refuse returns the original value with lower digits intact (00_000).
+    // Clamp would rewrite those digits to 77_215 (from the clamped MAX value).
+    // This test fails if stepDigit clamps instead of refusing.
+    expect(stepDigit(16_700_000, 5, 1)).toBe(16_700_000);
+  });
 });
 
 describe("clampKhz", () => {
