@@ -46,6 +46,50 @@ export interface VoiceStateDTO {
   selected_radio: number;
   connected: boolean;
 }
+export interface LayoutBlock {
+  radio_id: number;
+  w: number;
+  h: number;
+}
+
+export interface LayoutWindow {
+  w: number;
+  h: number;
+}
+
+export interface Layout {
+  window: LayoutWindow;
+  blocks: LayoutBlock[];
+}
+
+export interface ProfileSummary {
+  path: string;
+  name: string;
+  description: string;
+  author: string;
+  modified: string;
+  radio_count: number;
+  window: LayoutWindow;
+  blocks: LayoutBlock[];
+}
+
+export interface ProfileState {
+  active_path: string;
+  active_name: string;
+  dirty: boolean;
+  dir: string;
+}
+
+export interface HistoryEntry {
+  at: string;
+  sender: string;
+  guid: string;
+  freq_khz: number;
+  freq_mhz: number;
+  radio: string;
+  dur_ms: number;
+  own: boolean;
+}
 
 export const api = {
   getBuildInfo: (): Promise<BuildInfo> => App.GetBuildInfo() as Promise<BuildInfo>,
@@ -117,4 +161,26 @@ export const api = {
     App.MarkAllNotificationsRead() as Promise<void>,
   clearNotifications: (): Promise<void> => App.ClearNotifications() as Promise<void>,
   focusMainWindow: (): Promise<void> => App.FocusMainWindow() as Promise<void>,
+  listProfiles: (): Promise<ProfileSummary[]> =>
+    App.ListProfiles() as Promise<ProfileSummary[]>,
+  getProfileState: (): Promise<ProfileState> =>
+    App.GetProfileState() as Promise<ProfileState>,
+  loadProfile: (path: string): Promise<void> => App.LoadProfile(path) as Promise<void>,
+  saveProfile: (): Promise<void> => App.SaveProfile() as Promise<void>,
+  saveProfileAs: (name: string, desc: string): Promise<void> =>
+    App.SaveProfileAs(name, desc) as Promise<void>,
+  renameProfile: (path: string, name: string, desc: string): Promise<void> =>
+    App.RenameProfile(path, name, desc) as Promise<void>,
+  deleteProfile: (path: string): Promise<void> => App.DeleteProfile(path) as Promise<void>,
+  revertProfile: (): Promise<void> => App.RevertProfile() as Promise<void>,
+  resetLayout: (): Promise<void> => App.ResetLayout() as Promise<void>,
+  importProfile: (): Promise<void> => App.ImportProfile() as Promise<void>,
+  exportProfile: (path: string): Promise<void> => App.ExportProfile(path) as Promise<void>,
+  browseProfilesDir: (): Promise<void> => App.BrowseProfilesDir() as Promise<void>,
+  openProfilesDir: (): Promise<void> => App.OpenProfilesDir() as Promise<void>,
+  getCommsLayout: (): Promise<Layout> => App.GetCommsLayout() as Promise<Layout>,
+  setCommsLayout: (l: Layout): Promise<void> => App.SetCommsLayout(l) as Promise<void>,
+  getHistory: (): Promise<HistoryEntry[]> => App.GetHistory() as Promise<HistoryEntry[]>,
+  clearHistory: (): Promise<void> => App.ClearHistory() as Promise<void>,
+  exportHistoryCsv: (): Promise<void> => App.ExportHistoryCSV() as Promise<void>,
 };

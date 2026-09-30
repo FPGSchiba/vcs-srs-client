@@ -34,6 +34,9 @@ export const EV = {
   voiceState: "voice:state",
   voiceAddressUpdate: "voice:address_update",
   notifications: "notifications:changed",
+  profileState: "profile:state",
+  historyAppended: "history:appended",
+  historyCleared: "history:cleared",
 } as const;
 
 // HotkeyEventPayload is the payload shape for EV.hotkeyPressed /
