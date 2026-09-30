@@ -61,3 +61,46 @@ func TestLogFilePath_IsUnderAppDataDir(t *testing.T) {
 		t.Fatalf("expected log directory to exist: %v", err)
 	}
 }
+
+func TestProfilesDirPathHonoursOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "ops")
+	got, err := config.ProfilesDirPath(want)
+	if err != nil {
+		t.Fatalf("ProfilesDirPath: %v", err)
+	}
+	if got != want {
+		t.Fatalf("ProfilesDirPath(%q) = %q, want the override verbatim", want, got)
+	}
+}
+
+func TestProfilesDirPathDefaultsUnderAppData(t *testing.T) {
+	got, err := config.ProfilesDirPath("")
+	if err != nil {
+		t.Fatalf("ProfilesDirPath: %v", err)
+	}
+	if filepath.Base(got) != "profiles" {
+		t.Fatalf("default = %q, want a 'profiles' dir under AppDataDir", got)
+	}
+}
+
+func TestProfilesDirPathTrimsWhitespaceOverride(t *testing.T) {
+	// An override of "   " is a user who cleared the field, not a request
+	// for a directory named three spaces.
+	got, err := config.ProfilesDirPath("   ")
+	if err != nil {
+		t.Fatalf("ProfilesDirPath: %v", err)
+	}
+	if filepath.Base(got) != "profiles" {
+		t.Fatalf("blank override = %q, want the AppData default", got)
+	}
+}
+
+func TestHistoryFilePath(t *testing.T) {
+	got, err := config.HistoryFilePath()
+	if err != nil {
+		t.Fatalf("HistoryFilePath: %v", err)
+	}
+	if filepath.Base(got) != "history.json" {
+		t.Fatalf("HistoryFilePath = %q", got)
+	}
+}
