@@ -803,6 +803,11 @@ func (a *App) SetCommsLayout(l LayoutDTO) error {
 	next := *sb.cfg
 	next.CommsLayout = config.CommsLayout{WindowW: l.Window.W, WindowH: l.Window.H, Blocks: blocks}
 	sb.cfg = &next
+	sb.layoutPending = true
+	// Unlock explicitly, NOT via defer: emitProfileState re-enters sb.mu
+	// through GetProfileState and profileDirty, and a deferred unlock would
+	// move it inside the critical section. This is a self-deadlock trap;
+	// see the SetCommsLayoutDoesNotDeadlockOnEmit test and Task 9's fix.
 	sb.mu.Unlock()
 	a.emitProfileState()
 	return nil
@@ -814,15 +819,26 @@ func (a *App) SetCommsLayout(l LayoutDTO) error {
 // Errors are returned for the test's benefit; ServiceShutdown logs and
 // carries on, because there is no window left to notify into and a failed
 // layout write must not block the quit.
+//
+// Only flushes if layoutPending is set, preventing a user with a corrupt
+// config file from having it silently replaced with defaults on quit when
+// no drag has occurred.
 func (a *App) flushConfig() error {
 	sb := a.settings
 	if sb == nil || sb.cfgPath == "" {
 		return nil
 	}
+	sb.mu.Lock()
+	if !sb.layoutPending {
+		sb.mu.Unlock()
+		return nil
+	}
+	sb.mu.Unlock()
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
 	sb.mu.Lock()
 	snapshot := *sb.cfg
+	sb.layoutPending = false
 	sb.mu.Unlock()
 	if err := config.Save(sb.cfgPath, &snapshot); err != nil {
 		return fmt.Errorf("flush config: %w", err)

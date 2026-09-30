@@ -771,3 +771,69 @@ func TestLayoutFreeRidesOnAnUnrelatedConfigSave(t *testing.T) {
 		t.Fatalf("an unrelated config.Save must carry the pending layout: %+v", back.CommsLayout)
 	}
 }
+
+func TestFlushConfigWithoutLayoutChangeWritesNothing(t *testing.T) {
+	// If SetCommsLayout is never called, flushConfig must not write, even
+	// when called at shutdown. This guards against overwriting a corrupt
+	// config file with defaults when the user never dragged a block.
+	a, cfgPath := newProfileTestApp(t)
+	// Save the config to disk first to establish a baseline.
+	sb := a.settings
+	sb.mu.Lock()
+	snapshot := *sb.cfg
+	sb.mu.Unlock()
+	if err := config.Save(cfgPath, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := st.ModTime()
+
+	time.Sleep(10 * time.Millisecond)
+	// Do NOT call SetCommsLayout; flushConfig with layoutPending false
+	// must be a no-op.
+	if err := a.flushConfig(); err != nil {
+		t.Fatalf("flushConfig: %v", err)
+	}
+
+	st2, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st2.ModTime().Equal(before) {
+		t.Fatal("flushConfig with no layout change must not write to disk")
+	}
+}
+
+func TestSetCommsLayoutDoesNotDeadlockOnEmit(t *testing.T) {
+	// Regression test for the trap where emitProfileState (called outside
+	// sb.mu) re-enters sb.mu through GetProfileState and profileDirty.
+	// If SetCommsLayout mistakenly used defer sb.mu.Unlock(), the unlock
+	// would be deferred to the end of the function, putting the emit inside
+	// the critical section and causing a self-deadlock. This goroutine will
+	// hang if the deadlock occurs.
+	a, _ := newProfileTestApp(t)
+	sb := a.settings
+	a.setNotifier(notify.New(notify.Options{OnSound: func(notify.Item) {
+		// Mimic emitProfileState reaching the audio manager, which takes
+		// sb.mu, same as the deadlock regression test for DeleteProfile.
+		sb.mu.Lock()
+		defer sb.mu.Unlock()
+	}}))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- a.SetCommsLayout(LayoutDTO{
+			Window: ProfileWindowDTO{W: 700, H: 900},
+			Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetCommsLayout deadlocked: emitProfileState must be called outside sb.mu")
+	}
+}

@@ -142,6 +142,14 @@ type settingsBackend struct {
 	// can refuse to persist a seq older than that -- see its doc.
 	radioSelectSeq          uint64
 	radioSelectPersistedSeq uint64
+
+	// layoutPending tracks whether SetCommsLayout has added a change that
+	// needs to be flushed to disk. Set to true by SetCommsLayout, checked by
+	// flushConfig (returning early if false), and cleared to false after a
+	// successful flush. This gates the shutdown write so a user with a corrupt
+	// config file does not have it silently replaced with defaults on quit,
+	// when no drag has occurred.
+	layoutPending bool
 }
 
 // SetJoystickBackend wires the joystick manager. Optional -- when it is never
