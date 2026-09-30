@@ -1,137 +1,181 @@
-import { useState, type KeyboardEvent, type WheelEvent } from "react";
+import { useState, type KeyboardEvent, type MouseEvent, type WheelEvent } from "react";
+import { MAX_KHZ, clampKhz, digitsOf, stepDigit } from "../freq";
 
 interface LcdFreqProps {
-  value: number;
+  /** The canonical integer-kHz value. See shared/freq.ts. */
+  khz: number;
+  /** Digit size in px, supplied by the variant descriptor. */
+  digitPx?: number;
+  /** Render the "MHZ" suffix. The narrow variants drop it. */
+  unit?: boolean;
   className?: string;
   /**
-   * Opt-in editing. When omitted the component renders exactly as before
-   * (Phase 1 behaviour): a presentational, read-only display. When provided,
-   * the LCD becomes focusable and accepts typed digits (Enter to commit,
-   * Escape to revert) and wheel steps, and calls back with the committed
-   * value.
+   * Opt-in editing. Omitted, the LCD is a read-only display with no focus stop
+   * and no buttons. Supplied, it reports a new integer kHz value.
    */
-  onChange?: (value: number) => void;
+  onChange?: (khz: number) => void;
 }
 
-// The wire field is a 24-bit unsigned kHz integer (see internal/voice/freq.go
-// KHz) -- this is the client's ONLY canonical frequency representation.
-// Editing therefore always operates on an integer kHz value, never on the
-// displayed MHz float, so repeated small edits cannot accumulate
-// floating-point drift.
-const MIN_KHZ = 0;
-const MAX_KHZ = 16_777_215; // 2^24 - 1
-
-function clampKhz(khz: number): number {
-  return Math.min(MAX_KHZ, Math.max(MIN_KHZ, khz));
-}
-
-// NOTE: mhzToKhz(khzToMhz(k)) === k fails for ~192,000 of the 16,777,216
-// possible k (starting at k = 16,384,001): float32 runs out of mantissa to
-// separate adjacent 1 kHz steps once khzToMhz's result gets that large, so
-// the round trip through the wheel handler's `mhzToKhz(value)` can land on
-// a neighboring kHz step instead of the exact original. Deliberately not
-// restructured to avoid this -- real radio bands top out around 1 GHz
-// (1,000,000 kHz), nowhere near where this starts, and the MAX_KHZ ceiling
-// below bounds the worst case anyway.
-function mhzToKhz(mhz: number): number {
-  return Math.round(mhz * 1000);
-}
-
-// Mirrors internal/voice/freq.go's KHz.MHz32 EXACTLY
-// (`float32(uint32(k)) / 1000.0`): the server compares the value we
-// advertise against this same expression with ==, so any other rounding
-// here would silently desync from the server's derived value.
-function khzToMhz(khz: number): number {
-  return Math.fround(khz / 1000);
-}
+/** Where the digit cursor starts: the 1 kHz decade. */
+const INITIAL_PLACE = 0;
 
 /**
- * LcdFreq renders an LCD-style frequency display, ported from the
- * prototype's `radio.jsx`/`atoms.jsx` LcdFreq look. The frequency is
- * formatted to 3 decimals (e.g. `118.500`) and rendered as per-character
- * monospace digits inside the `.lcd-screen` wrapper so the ported CSS
- * applies unchanged.
+ * LcdFreq renders an LCD-style frequency readout and, when editable, lets each
+ * decade be changed on its own: hover a digit and wheel, or click it (shift to
+ * go down). Keyboard users get ONE tab stop with spinbutton semantics —
+ * ArrowLeft/ArrowRight move a digit cursor, ArrowUp/ArrowDown step the digit
+ * under it — rather than a tab stop per digit, which would put seven stops on
+ * every radio card.
  *
- * Editing (opt-in via `onChange`) types directly in kHz integers: digit
- * keys build up a draft kHz value, Enter commits it (converted to the MHz
- * float the wire DTO carries, via the identical expression the backend
- * uses), Escape reverts the draft, and wheel steps the committed value by
- * 1 kHz. The draft is clamped to the 24-bit wire range before it is ever
- * handed to `onChange`.
+ * Digits are real <button>s, so click and Enter/Space are native behaviour and
+ * typescript:S1082 does not apply. They carry tabIndex={-1} so only the LCD
+ * itself is in the tab order.
+ *
+ * Typed entry is kept from the previous revision: digit keys build a draft,
+ * Enter commits, Escape and blur discard. Blur is not a purposeful commit
+ * gesture, and leaving a draft open would shadow a live server echo of the
+ * value. While a draft is open the per-digit handlers are INERT — a partially
+ * typed string has no stable decades to target — and the whole-LCD wheel keeps
+ * its ±1 kHz fallback.
+ *
+ * Every value it emits is an integer kHz inside the 24-bit wire range; the MHz
+ * float the DTO carries is derived by the caller at the boundary.
  */
-export function LcdFreq({ value, className, onChange }: LcdFreqProps) {
+export function LcdFreq({ khz, digitPx, unit, className, onChange }: LcdFreqProps) {
   const [draft, setDraft] = useState<string | null>(null);
+  const [place, setPlace] = useState(INITIAL_PLACE);
 
-  const committedStr = value.toFixed(3); // e.g. "118.500"
-  const digits = (draft ?? committedStr).split("");
+  const editable = Boolean(onChange);
+  const cells =
+    draft === null
+      ? digitsOf(khz)
+      : draft.split("").map((c) => ({ char: c, place: null as number | null }));
+  const places = cells.filter((c) => c.place !== null).map((c) => c.place as number);
+
+  function step(p: number, dir: 1 | -1) {
+    if (!onChange || draft !== null) return;
+    const next = stepDigit(khz, p, dir);
+    setPlace(p);
+    if (next !== clampKhz(khz)) onChange(next);
+  }
+
+  function onDigitWheel(e: WheelEvent<HTMLButtonElement>, p: number) {
+    if (!editable || draft !== null) return;
+    e.preventDefault();
+    e.stopPropagation(); // do not also run the whole-LCD fallback
+    step(p, e.deltaY < 0 ? 1 : -1);
+  }
+
+  function onDigitClick(e: MouseEvent<HTMLButtonElement>, p: number) {
+    if (!editable) return;
+    e.stopPropagation(); // a digit click must not select the card
+    step(p, e.shiftKey ? -1 : 1);
+  }
+
+  function moveCursor(dir: -1 | 1) {
+    // `places` runs most-significant first, so ArrowLeft (dir -1) moves toward
+    // the LARGER decade, i.e. one index earlier. The separator is not in
+    // `places` at all, so it is skipped for free.
+    const i = places.indexOf(place);
+    const from = i < 0 ? places.length - 1 : i;
+    const next = places[Math.min(places.length - 1, Math.max(0, from + dir))];
+    if (next !== undefined) setPlace(next);
+  }
 
   function commitDraft() {
     if (draft === null) return;
-    const khz = draft === "" ? 0 : Number.parseInt(draft, 10);
-    onChange?.(khzToMhz(clampKhz(khz)));
+    const value = draft === "" ? 0 : Number.parseInt(draft, 10);
+    onChange?.(clampKhz(value));
     setDraft(null);
   }
 
-  function handleKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    if (!onChange) return;
+  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (!editable) return;
     if (/^[0-9]$/.test(e.key)) {
       e.preventDefault();
       setDraft((prev) => (prev ?? "") + e.key);
       return;
     }
-    if (e.key === "Backspace") {
-      e.preventDefault();
-      setDraft((prev) => (prev ? prev.slice(0, -1) : prev));
-      return;
-    }
-    if (e.key === "Enter") {
-      e.preventDefault();
-      commitDraft();
-      return;
-    }
-    if (e.key === "Escape") {
-      e.preventDefault();
-      setDraft(null);
+    switch (e.key) {
+      case "Backspace":
+        e.preventDefault();
+        setDraft((prev) => (prev ? prev.slice(0, -1) : prev));
+        return;
+      case "Enter":
+        e.preventDefault();
+        commitDraft();
+        return;
+      case "Escape":
+        e.preventDefault();
+        setDraft(null);
+        return;
+      case "ArrowLeft":
+        e.preventDefault();
+        moveCursor(-1);
+        return;
+      case "ArrowRight":
+        e.preventDefault();
+        moveCursor(1);
+        return;
+      case "ArrowUp":
+        e.preventDefault();
+        step(place, 1);
+        return;
+      case "ArrowDown":
+        e.preventDefault();
+        step(place, -1);
     }
   }
 
-  // Discards (never commits) on blur. Blur isn't a purposeful commit
-  // gesture the way Enter is -- clicking away or tabbing out mid-edit is
-  // as likely to be "I changed my mind" as "I'm done", and committing
-  // would risk silently locking the radio to a wildly wrong frequency from
-  // a partially-typed draft (e.g. a single stray digit). Discarding also
-  // clears the draft so it stops shadowing `value`: leaving a draft open
-  // on blur means the LCD keeps showing stale typed digits forever and
-  // ignores a live server echo of `value` for that radio.
-  function handleBlur() {
-    setDraft(null);
-  }
-
-  function handleWheel(e: WheelEvent<HTMLDivElement>) {
-    if (!onChange) return;
+  /** The pre-existing whole-LCD fallback, live only while a draft is open. */
+  function onLcdWheel(e: WheelEvent<HTMLDivElement>) {
+    if (!editable || draft === null) return;
     e.preventDefault();
-    const base = draft !== null ? Number.parseInt(draft || "0", 10) : mhzToKhz(value);
-    const next = clampKhz(base + (e.deltaY < 0 ? 1 : -1));
-    onChange(khzToMhz(next));
+    const base = Number.parseInt(draft || "0", 10);
+    onChange?.(clampKhz(base + (e.deltaY < 0 ? 1 : -1)));
     setDraft(null);
   }
 
   return (
     <div
       className={`lcd-screen ${className ?? ""}`.trim()}
-      tabIndex={onChange ? 0 : undefined}
-      role={onChange ? "spinbutton" : undefined}
-      aria-label={onChange ? "frequency" : undefined}
-      onKeyDown={handleKeyDown}
-      onBlur={handleBlur}
-      onWheel={handleWheel}
+      tabIndex={editable ? 0 : undefined}
+      role={editable ? "spinbutton" : undefined}
+      aria-label={editable ? "frequency" : undefined}
+      aria-valuenow={editable ? khz : undefined}
+      aria-valuemin={editable ? 0 : undefined}
+      aria-valuemax={editable ? MAX_KHZ : undefined}
+      onKeyDown={onKeyDown}
+      onBlur={() => setDraft(null)}
+      onWheel={onLcdWheel}
     >
-      <span className="lcd-digits">
-        {digits.map((c, i) => (
-          <span key={i} className="lcd-digit">
-            {c}
-          </span>
-        ))}
+      <span
+        className="lcd-digits"
+        role="group"
+        aria-label="frequency"
+        style={digitPx ? { fontSize: digitPx, lineHeight: 1 } : undefined}
+      >
+        {cells.map((c, i) =>
+          editable && c.place !== null ? (
+            <button
+              key={i}
+              type="button"
+              tabIndex={-1}
+              className="lcd-digit"
+              data-cursor={c.place === place}
+              aria-label={`digit ${c.place}`}
+              onWheel={(e) => onDigitWheel(e, c.place as number)}
+              onClick={(e) => onDigitClick(e, c.place as number)}
+            >
+              {c.char}
+            </button>
+          ) : (
+            <span key={i} className="lcd-digit">
+              {c.char}
+            </span>
+          ),
+        )}
+        {unit && <span className="lcd-unit">MHZ</span>}
       </span>
     </div>
   );

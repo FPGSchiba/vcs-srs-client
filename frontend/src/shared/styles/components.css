@@ -1445,3 +1445,28 @@ input:focus, select:focus, textarea:focus {
 .popout-chrome button,
 .popout-chrome .ctrl,
 .popout-chrome .ctrl button { --wails-draggable: no-drag; }
+
+/* A digit is a <button> now (native click + Enter/Space, no S1082 shim), so
+   the browser's control styling has to be undone before .lcd-digit's own look
+   applies. */
+button.lcd-digit {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: ns-resize;
+}
+button.lcd-digit[data-cursor="true"] {
+  background: color-mix(in srgb, var(--ac-lcd) 18%, transparent);
+  border-radius: 2px;
+}
+.lcd-unit {
+  font-size: 0.4em;
+  letter-spacing: 0.12em;
+  color: var(--tx-3);
+  align-self: flex-end;
+  padding-bottom: 0.2em;
+  margin-left: 0.4em;
+}
