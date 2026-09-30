@@ -58,7 +58,7 @@ func TestClearEmpties(t *testing.T) {
 	if l.Len() != 0 {
 		t.Fatalf("Len = %d after Clear, want 0", l.Len())
 	}
-	if got := l.Snapshot(); got == nil {
+	if l.Snapshot() == nil {
 		t.Fatal("Snapshot must return a non-nil empty slice: the frontend types it as an array and nil marshals to null")
 	}
 }

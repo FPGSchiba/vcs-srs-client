@@ -96,6 +96,10 @@ func configLayoutToProfile(l config.CommsLayout) profile.Layout {
 	}
 }
 
+// msgProfilesDirUnavailable is the notification title shared by every binding
+// that cannot resolve the profiles directory.
+const msgProfilesDirUnavailable = "Profiles directory unavailable"
+
 // profilesDir resolves where profiles live for this session.
 func (a *App) profilesDir() (string, error) {
 	if a.profilesDirOverride != "" {
@@ -274,7 +278,7 @@ func (a *App) ListProfiles() []ProfileSummaryDTO {
 	out := []ProfileSummaryDTO{}
 	dir, err := a.profilesDir()
 	if err != nil {
-		a.notifyProfileError("Profiles directory unavailable", err)
+		a.notifyProfileError(msgProfilesDirUnavailable, err)
 		return out
 	}
 	sums, err := profile.List(dir)
@@ -378,7 +382,7 @@ func (a *App) SaveProfile() error {
 func (a *App) SaveProfileAs(name, desc string) error {
 	dir, err := a.profilesDir()
 	if err != nil {
-		a.notifyProfileError("Profiles directory unavailable", err)
+		a.notifyProfileError(msgProfilesDirUnavailable, err)
 		return err
 	}
 	path := uniqueProfilePath(dir, profile.Slug(name))
@@ -570,7 +574,7 @@ func (a *App) ImportProfile() error {
 	}
 	dir, err := a.profilesDir()
 	if err != nil {
-		a.notifyProfileError("Profiles directory unavailable", err)
+		a.notifyProfileError(msgProfilesDirUnavailable, err)
 		return err
 	}
 	if err := profile.Write(uniqueProfilePath(dir, profile.Slug(d.Name)), d); err != nil {
@@ -648,7 +652,7 @@ func (a *App) BrowseProfilesDir() error {
 func (a *App) OpenProfilesDir() error {
 	dir, err := a.profilesDir()
 	if err != nil {
-		a.notifyProfileError("Profiles directory unavailable", err)
+		a.notifyProfileError(msgProfilesDirUnavailable, err)
 		return err
 	}
 	return openInFileManager(dir)

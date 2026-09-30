@@ -572,7 +572,7 @@ func TestProfileDialogBindingsWithoutWailsAppAreNoOps(t *testing.T) {
 func TestListProfilesIsNeverNil(t *testing.T) {
 	a, _ := newProfileTestApp(t)
 	a.setProfilesDirForTest(t.TempDir())
-	if got := a.ListProfiles(); got == nil {
+	if a.ListProfiles() == nil {
 		t.Fatal("nil marshals to null; the frontend types this as an array")
 	}
 }

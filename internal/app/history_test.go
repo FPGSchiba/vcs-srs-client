@@ -195,7 +195,7 @@ func TestClearHistoryEmpties(t *testing.T) {
 
 func TestGetHistoryWithNoLogIsEmptyNotNil(t *testing.T) {
 	a := newTestAppWithConfig(t, config.Default(), "")
-	if got := a.GetHistory(); got == nil {
+	if a.GetHistory() == nil {
 		t.Fatal("must be a non-nil empty slice: the frontend types it as an array and nil marshals to null")
 	}
 }
@@ -228,7 +228,7 @@ func TestPressReleaseAndIdleClearPathsLogRows(t *testing.T) {
 	// txRelease with another action still held installs the shrunk set.
 	a.txPress("radio.1.ptt")
 	a.txPress("radio.2.ptt")
-	if held := a.txRelease("radio.2.ptt"); !held {
+	if !a.txRelease("radio.2.ptt") {
 		t.Fatal("radio.1.ptt should still be held")
 	}
 	got := a.GetHistory()
