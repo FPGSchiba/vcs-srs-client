@@ -61,13 +61,25 @@ func TestSeedLeavesUnrecordedExistingFile(t *testing.T) {
 	if err := os.WriteFile(p, mine, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	seedOnce(t, dir, map[string]string{})
+	rec := seedOnce(t, dir, map[string]string{})
 	got, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != string(mine) {
 		t.Fatalf("a pre-existing file with no recorded hash must never be clobbered.\ngot:  %s\nwant: %s", got, mine)
+	}
+
+	// Seed twice: feed back the record to catch regressions where row 2 might
+	// return a hash instead of "", which would cause the file to be overwritten
+	// on a subsequent launch.
+	rec = seedOnce(t, dir, rec)
+	got, err = os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(mine) {
+		t.Fatalf("a pre-existing file with no recorded hash must stay untouched even after re-seeding.\ngot:  %s\nwant: %s", got, mine)
 	}
 }
 

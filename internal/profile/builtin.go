@@ -28,10 +28,10 @@ type Builtin struct {
 // SeedResult reports what Seed decided for one builtin.
 //
 // Hash is what the caller must RECORD for this id: the new content's hash
-// when Written, the caller's existing record when not, and "" when there is
-// nothing to record (rows 2 and 3 -- a file that is not ours, and a file
-// the user deleted, whose record must be preserved as-is by the caller
-// rather than overwritten or cleared).
+// when Written, the caller's existing record when not, and "" only when
+// there is nothing to record. Row 2 returns "" because the client never
+// wrote that file and has no business recording a hash for it. Row 3
+// returns the existing record unchanged so the deletion stays permanent.
 type SeedResult struct {
 	ID      string
 	Path    string
