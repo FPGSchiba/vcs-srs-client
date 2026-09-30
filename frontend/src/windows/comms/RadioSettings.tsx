@@ -183,7 +183,9 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
           stop(e);
           setOpen((o) => !o);
         }}
+        className="radio-gear"
         style={{
+          boxSizing: "border-box",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -191,9 +193,10 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
           height: 16,
           padding: 0,
           flexShrink: 0,
-          border: 0,
-          background: "transparent",
-          color: open ? "var(--ac-primary)" : "var(--tx-3)",
+          border: "1px solid var(--bd-2)",
+          borderRadius: 3,
+          background: "var(--bg-2)",
+          color: open ? "var(--ac-primary)" : "var(--tx-1)",
           cursor: "pointer",
         }}
       >
@@ -244,29 +247,24 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
                 onChange={(v) => onCommit({ ...radio, is_intercom: v })}
               />
             </Row>
-            <fieldset style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
-              <legend className="cap" style={{ color: "var(--tx-2)", fontSize: 10, letterSpacing: "0.1em", padding: 0 }}>
-                Variant
-              </legend>
-              {VARIANTS.map((v) => (
-                <label
-                  key={v.id}
-                  className="row acenter gap-2"
-                  style={{ fontSize: 12, color: "var(--tx-1)", minHeight: 22, cursor: "pointer" }}
-                >
-                  <input
-                    type="radio"
-                    name={`${uid}-variant`}
-                    checked={v.id === variantId}
-                    onChange={() => {
-                      close();
-                      onVariantChange(v.id);
-                    }}
-                  />
-                  {v.label}
-                </label>
-              ))}
-            </fieldset>
+            <Row label="Variant">
+              <select
+                className="input"
+                aria-label="Variant"
+                style={{ height: 20, fontSize: 12, padding: "0 6px", width: 120 }}
+                value={variantId}
+                onChange={(e) => {
+                  close();
+                  onVariantChange(e.target.value);
+                }}
+              >
+                {VARIANTS.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            </Row>
           </div>,
           document.body,
         )}

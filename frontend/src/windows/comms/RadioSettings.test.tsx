@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RadioCard } from "./RadioCard";
 import { VARIANTS } from "./variants";
@@ -67,6 +67,16 @@ describe("the settings gear", () => {
     expect(gear()).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("has a visible resting border and a brighter glyph", () => {
+    show("vertical");
+    expect(gear().style.border).toContain("var(--bd-2)");
+    expect(gear().style.background).toContain("var(--bg-2)");
+    expect(gear().style.color).toBe("var(--tx-1)");
+    expect(gear().style.width).toBe("16px");
+    expect(gear().style.height).toBe("16px");
+    expect(gear().style.boxSizing).toBe("border-box");
+  });
+
   it("no longer puts the toggles on the card", () => {
     show("vertical");
     expect(screen.queryByRole("switch")).toBeNull();
@@ -101,7 +111,7 @@ describe("the drawer", () => {
   it("is not a descendant of the card's clipping frame", () => {
     show();
     open();
-    expect(screen.getByRole("option").contains(screen.getByRole("dialog"))).toBe(false);
+    expect(screen.getByRole("option", { name: "R01 Fleet Common" }).contains(screen.getByRole("dialog"))).toBe(false);
     expect(screen.getByRole("dialog").parentElement).toBe(document.body);
   });
 
@@ -144,7 +154,7 @@ describe("the drawer", () => {
   it("closes on an element scroll (capture) and returns focus", () => {
     show();
     open();
-    fireEvent.scroll(screen.getByRole("option")); // scroll does not bubble
+    fireEvent.scroll(screen.getByRole("option", { name: "R01 Fleet Common" })); // scroll does not bubble
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(gear());
   });
@@ -293,10 +303,13 @@ describe("what the drawer commits", () => {
     const spy = stubUpdate();
     const { onVariantChange } = show("vertical");
     open();
-    for (const v of VARIANTS) expect(screen.getByRole("radio", { name: v.label })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Fifth" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Vertical" })).toBeChecked();
-    fireEvent.click(screen.getByRole("radio", { name: "Horizontal" }));
+    const select = screen.getByRole("combobox", { name: /variant/i });
+    const options = within(select).getAllByRole("option").map((o) => (o as HTMLOptionElement).value);
+    expect(options).toEqual(VARIANTS.map((v) => v.id));
+    expect(options).toContain("fifth");
+    expect(within(select).getByRole("option", { name: "Fifth" })).toBeInTheDocument();
+    expect(select).toHaveValue("vertical");
+    fireEvent.change(select, { target: { value: "horizontal" } });
     expect(onVariantChange).toHaveBeenCalledWith("horizontal");
     expect(spy).not.toHaveBeenCalled();
   });
@@ -304,7 +317,7 @@ describe("what the drawer commits", () => {
   it("closes and returns focus to the gear when a variant is chosen", () => {
     show("vertical");
     open();
-    fireEvent.click(screen.getByRole("radio", { name: "Narrow (tall)" }));
+    fireEvent.change(screen.getByRole("combobox", { name: /variant/i }), { target: { value: VARIANTS[2].id } });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(gear());
   });

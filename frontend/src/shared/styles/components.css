@@ -1482,3 +1482,8 @@ button.lcd-digit[data-cursor="true"] {
   padding-bottom: 0.2em;
   margin-left: 0.4em;
 }
+
+/* Per-radio settings gear: resting look is inline (RadioSettings.tsx); these
+   states must beat inline styles, hence !important. */
+.radio-gear:hover { border-color: var(--bd-3) !important; background: var(--bg-3) !important; color: var(--tx-0) !important; }
+.radio-gear:focus-visible { outline: none; border-color: var(--ac-primary) !important; box-shadow: 0 0 0 1px var(--ac-primary); }
