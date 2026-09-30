@@ -14,7 +14,10 @@ describe("digitsOf", () => {
   });
 
   it("grows past three MHz digits rather than truncating", () => {
-    expect(render(MAX_KHZ)).toBe("16777.215");
+    const cells = digitsOf(MAX_KHZ);
+    expect(cells.map((c) => c.char).join("")).toBe("16777.215");
+    // Places must be correct even with 5 MHz digits: leftmost MHz digit at place 7
+    expect(cells.map((c) => c.place)).toEqual([7, 6, 5, 4, 3, null, 2, 1, 0]);
   });
 
   it("tags each digit with its kHz decade and the separator with null", () => {
@@ -42,8 +45,8 @@ describe("stepDigit", () => {
   // Review Focus #2: the ceiling must not silently rewrite untouched digits.
   it("refuses a step past the 24-bit ceiling instead of clamping", () => {
     expect(stepDigit(MAX_KHZ, 0, 1)).toBe(MAX_KHZ);
-    // A step that would exceed (leave) the range is refused, not clamped.
-    // Test with a value that truly exceeds when stepped by 100 MHz.
+    // A step from MAX returns MAX (both refuse and clamp coincide here).
+    // The distinguishing test is at "refuses a step that would exceed..." — :94.
     expect(stepDigit(16_777_215, 5, 1)).toBe(MAX_KHZ);  // MAX + 100 MHz stays MAX (refused)
   });
 
@@ -88,6 +91,15 @@ describe("the MHz edge conversions", () => {
   it("khzToMhz mirrors the Go KHz.MHz32 expression exactly", () => {
     // internal/voice/freq.go: float32(uint32(k)) / 1000.0
     expect(khzToMhz(118_500)).toBe(Math.fround(118_500 / 1000));
+  });
+
+  it("narrows to float32 precision, not double precision", () => {
+    // 118.1 is not exactly representable in float32. If Math.fround were
+    // dropped, khzToMhz would return the double 118.1 and the server — which
+    // compares advertised frequencies with exact float32 equality — would
+    // never match us. This test must fail if Math.fround is deleted.
+    expect(khzToMhz(118_100)).toBe(Math.fround(118.1));
+    expect(khzToMhz(118_100)).not.toBe(118.1);
   });
 
   it("round-trips the frequencies real radios use", () => {
