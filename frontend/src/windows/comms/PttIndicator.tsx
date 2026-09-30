@@ -17,6 +17,12 @@ const TITLE = "Push-to-talk is driven by your configured keybind, not this butto
  * card, it still restyles and re-texts as transmit state changes, and it gets
  * the browser's own "this does nothing" affordance.
  *
+ * The visible text is deliberately terse ("PTT" / "TX", as
+ * design/vcs/radio-variants.md §2 draws it): the box is 96x28 at VERTICAL, so
+ * after `.ptt`'s 12px side padding, the 12px icon and the 6px gap only 54px
+ * remain, and "PUSH-TO-TALK" (~103px at 11px mono + 0.18em tracking) wrapped.
+ * The accessible name (aria-label) stays the full phrase.
+ *
  * Its box comes from the variant descriptor, so the narrow variants shrink it
  * to an icon without needing a second component.
  */
@@ -39,7 +45,7 @@ export function PttIndicator({ w, h, transmitting, showLabel }: Props) {
       disabled
     >
       <Icon name="mic" size={showLabel ? 12 : 14} />
-      {showLabel && (transmitting ? "TRANSMIT" : "PUSH-TO-TALK")}
+      {showLabel && (transmitting ? "TX" : "PTT")}
     </button>
   );
 }

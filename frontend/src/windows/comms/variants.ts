@@ -6,6 +6,13 @@
  * set automatically and the shells render it without change. Adding a new
  * SHAPE is one new shell plus an entry here.
  *
+ * `h` is the FRAME's border-box height, so it must cover the content plus the
+ * frame's 1px top and bottom border. design/vcs/radio-variants.md §2 built its
+ * row tables without that allowance (and its vertical table sums to 167, not
+ * 166); the heights here are the measured requirement in Chromium, rounded up:
+ * vertical 167.6 -> 168, horizontal 114.6 -> 115, narrow-v 135.4 -> 136,
+ * narrow-h needs 56.2 and keeps 68. fit.test.tsx pins this.
+ *
  * If adding a size ever requires touching a file other than this one, the
  * abstraction has leaked. See docs/superpowers/specs/2026-09-30-vcs-client-comms-radio-redesign-design.md §3.2
  * and design/vcs/radio-variants.md for the agreed layouts.
@@ -47,7 +54,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     id: "vertical",
     label: "Vertical",
     w: 280,
-    h: 166,
+    h: 168,
     orientation: "column",
     density: "comfortable",
     lcdPx: 30,
@@ -58,7 +65,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     id: "horizontal",
     label: "Horizontal",
     w: 360,
-    h: 110,
+    h: 115,
     orientation: "row",
     density: "comfortable",
     lcdPx: 22,
@@ -80,7 +87,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     id: "narrow-v",
     label: "Narrow (tall)",
     w: 150,
-    h: 124,
+    h: 136,
     orientation: "column",
     density: "compact",
     lcdPx: 18,

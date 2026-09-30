@@ -10,6 +10,21 @@ export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioS
   const narrow = variant.density === "compact";
   const showChips = variant.shows.chips !== "none";
 
+  // statusDivider is honoured in BOTH branches (as RadioColumn does), so
+  // whether a row variant draws one is the descriptor's call, not a shell edit.
+  const status = (
+    <div
+      data-testid="shell-status"
+      style={{
+        minWidth: 0,
+        paddingTop: variant.shows.statusDivider ? 6 : undefined,
+        borderTop: variant.shows.statusDivider ? "1px solid var(--bd-1)" : undefined,
+      }}
+    >
+      {talker}
+    </div>
+  );
+
   if (narrow) {
     return (
       <div
@@ -39,9 +54,7 @@ export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioS
             </span>
             {showChips && chips}
           </div>
-          <div data-testid="shell-status" style={{ minWidth: 0 }}>
-            {talker}
-          </div>
+          {status}
         </div>
         {ptt}
       </div>
@@ -77,9 +90,7 @@ export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioS
         {/* Left-aligned, not centred: the column's left edge is the card's
             reading line. */}
         <div style={{ display: "flex", alignSelf: "flex-start", minWidth: 0 }}>{lcd}</div>
-        <div data-testid="shell-status" style={{ minWidth: 0 }}>
-          {talker}
-        </div>
+        {status}
       </div>
       {ptt}
     </div>

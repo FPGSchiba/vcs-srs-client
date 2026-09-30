@@ -89,6 +89,25 @@ describe("the column shell", () => {
   });
 });
 
+describe("the row shell status divider", () => {
+  it("draws the divider exactly when shows.statusDivider says so, in both branches", () => {
+    const Row = SHELLS.row;
+    const divider = "border-top: 1px solid var(--bd-1)";
+    const styleOf = () => screen.getByTestId("shell-status").getAttribute("style") ?? "";
+    // Synthetic ROW variants: no shipped row variant has statusDivider on.
+    for (const base of ["horizontal", "narrow-h"]) {
+      const v = variantById(base);
+      const off = render(<Row {...pieces({ ...v, shows: { ...v.shows, statusDivider: false } })} />);
+      expect(styleOf(), `${base} off`).not.toContain("border-top");
+      off.unmount();
+      const on = render(<Row {...pieces({ ...v, shows: { ...v.shows, statusDivider: true } })} />);
+      expect(styleOf(), `${base} on`).toContain(divider);
+      expect(styleOf(), `${base} on`).toContain("padding-top: 6px");
+      on.unmount();
+    }
+  });
+});
+
 describe("the row shell", () => {
   it("puts the PTT beside the content column, not under it", () => {
     const Row = SHELLS.row;

@@ -25,13 +25,21 @@ describe("PttIndicator", () => {
     expect(screen.getByRole("button").className).not.toContain("keyed");
     rerender(<PttIndicator w={96} h={28} transmitting showLabel />);
     expect(screen.getByRole("button").className).toContain("keyed");
-    expect(screen.getByRole("button")).toHaveTextContent("TRANSMIT");
+    expect(screen.getByRole("button")).toHaveTextContent("TX");
+    expect(screen.getByRole("button")).toHaveAccessibleName(/transmitting/i);
+  });
+
+  it("shows the terse PTT text at rest while the accessible name stays the full phrase", () => {
+    render(<PttIndicator w={96} h={28} transmitting={false} showLabel />);
+    const b = screen.getByRole("button");
+    expect(b).toHaveTextContent(/^PTT$/);
+    expect(b).toHaveAccessibleName(/push-to-talk/i);
   });
 
   it("drops the text but keeps an accessible name when the descriptor has no room", () => {
     render(<PttIndicator w={32} h={30} transmitting={false} showLabel={false} />);
     const b = screen.getByRole("button");
-    expect(b).not.toHaveTextContent("PUSH-TO-TALK");
+    expect(b).not.toHaveTextContent("PTT");
     expect(b).toHaveAccessibleName(/push-to-talk/i);
   });
 });

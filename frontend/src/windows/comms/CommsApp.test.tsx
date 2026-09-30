@@ -367,10 +367,10 @@ describe("CommsApp layout grid", () => {
     await screen.findByText("Alpha");
     await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
     const els = blockEls();
-    expect(els[0].style.height).toBe("124px");
+    expect(els[0].style.height).toBe("136px");
     expect(nameIn(els[0])).toBe("Bravo");
     expect(els[1].style.width).toBe("280px");
-    expect(els[1].style.height).toBe("166px");
+    expect(els[1].style.height).toBe("168px");
     const flow = els[0].parentElement as HTMLElement;
     expect(flow.style.flexWrap).toBe("wrap");
     expect(flow.style.padding).toBe("12px");
@@ -387,7 +387,7 @@ describe("CommsApp layout grid", () => {
     await screen.findByText("Bravo");
     await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
     expect(blockEls()[1].style.width).toBe("280px");
-    expect(blockEls()[1].style.height).toBe("166px");
+    expect(blockEls()[1].style.height).toBe("168px");
     // Hydration alone is not a user edit: nothing may be written back, even
     // once the debounce window has long passed.
     await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
@@ -398,7 +398,7 @@ describe("CommsApp layout grid", () => {
     render(<CommsApp />);
     await screen.findByText("Alpha");
     await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
-    expect(blockEls()[0].style.height).toBe("124px");
+    expect(blockEls()[0].style.height).toBe("136px");
   });
 
   it("keeps every variant inside the popout's content width", () => {
@@ -502,7 +502,7 @@ describe("CommsApp layout grid", () => {
     act(() => emit(EV.profileState, { active_path: "", active_name: "", dirty: false, dir: "/p" }));
     await waitFor(() => expect(blockEls()[0].style.width).toBe("360px"));
     expect(nameIn(blockEls()[0])).toBe("Alpha");
-    expect(blockEls()[1].style.height).toBe("166px");
+    expect(blockEls()[1].style.height).toBe("168px");
   });
 
   it("does not let a profile:state echo clobber an edit that is still pending", async () => {

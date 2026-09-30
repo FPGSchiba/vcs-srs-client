@@ -45,6 +45,14 @@ describe("TalkerLine", () => {
     });
   });
 
+  it("gives the meter a definite width, since .vu/.seg have none of their own", () => {
+    render(<TalkerLine disabled={false} />);
+    const wrap = screen.getByTestId("talker-vu");
+    expect(wrap).toContainElement(screen.getByRole("meter"));
+    expect(wrap.style.width).toBe("44px");
+    expect(wrap.style.flexShrink).toBe("0");
+  });
+
   it("keeps the meter next to the name rather than pushing it to the edge", () => {
     // The flexible spacer must come AFTER the meter, so the group reads as one
     // thing. `flex: 1` on the name would push the meter to the far right.
@@ -52,7 +60,7 @@ describe("TalkerLine", () => {
     const spacer = screen.getByTestId("talker-spacer");
     const meter = screen.getByRole("meter");
     // Verify the spacer comes after the meter in the DOM
-    expect(spacer.previousElementSibling).toBe(meter);
+    expect(spacer.previousElementSibling).toBe(meter.parentElement);
     // Verify the name does not have flex-grow set
     const name = screen.getByText("Dabble");
     const computedStyle = window.getComputedStyle(name);

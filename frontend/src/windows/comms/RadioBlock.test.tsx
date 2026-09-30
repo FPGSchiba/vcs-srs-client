@@ -117,7 +117,7 @@ describe("snap resizing", () => {
     const handle = screen.getByRole("button", { name: /resize/i });
     expect(handle).toHaveStyle({ position: "absolute", right: "0px", bottom: "0px" });
     // Inside the block's bounds, which are the card's bounds exactly.
-    expect(screen.getByTestId("radio-block")).toHaveStyle({ width: "280px", height: "166px" });
+    expect(screen.getByTestId("radio-block")).toHaveStyle({ width: "280px", height: "168px" });
   });
 
   it("stops resizing after pointer up", () => {
@@ -150,12 +150,23 @@ describe("keyboard resizing", () => {
     renderBlock({ variantId: "narrow-h", onResize });
     const handle = screen.getByRole("button", { name: /resize/i });
     expect(handle).toHaveAttribute("tabindex", "0");
-    // Variants ordered by area: narrow-v (18600), narrow-h (20400),
-    // horizontal (39600), vertical (46480).
+    // Variants ordered by area, narrower first on a tie: narrow-v (150x136) and
+    // narrow-h (300x68) are both 20400, then horizontal (41400), vertical (47040).
     fireEvent.keyDown(handle, { key: "ArrowRight" });
     expect(onResize).toHaveBeenLastCalledWith(1, "horizontal");
     fireEvent.keyDown(handle, { key: "ArrowLeft" });
     expect(onResize).toHaveBeenLastCalledWith(1, "narrow-v");
+  });
+
+  it("Enter and Space activate the handle like ArrowRight: step to the next size", () => {
+    const onResize = vi.fn();
+    renderBlock({ variantId: "horizontal", onResize });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.keyDown(handle, { key: "Enter" });
+    expect(onResize).toHaveBeenLastCalledWith(1, "vertical");
+    fireEvent.keyDown(handle, { key: " " });
+    expect(onResize).toHaveBeenCalledTimes(2);
+    expect(onResize).toHaveBeenLastCalledWith(1, "vertical");
   });
 
   it("stops at the ends rather than wrapping", () => {

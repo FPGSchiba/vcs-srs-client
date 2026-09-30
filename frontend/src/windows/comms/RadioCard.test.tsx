@@ -38,13 +38,13 @@ const show = (r: Partial<RadioDTO> = {}, variantId = "vertical") => {
 describe("variant resolution", () => {
   it("takes its box from the named variant", () => {
     show({}, "narrow-v");
-    expect(screen.getByRole("option")).toHaveStyle({ width: "150px", height: "124px" });
+    expect(screen.getByRole("option")).toHaveStyle({ width: "150px", height: "136px" });
   });
 
   // Review Focus #1, end to end.
   it("falls back to the default variant for an id no descriptor defines", () => {
     show({}, "dial-round");
-    expect(screen.getByRole("option")).toHaveStyle({ width: "280px", height: "166px" });
+    expect(screen.getByRole("option")).toHaveStyle({ width: "280px", height: "168px" });
   });
 
   it("shows the MHZ unit and both chips only on the variants that ask", () => {
@@ -106,17 +106,17 @@ describe("the frequency boundary, canonical kHz", () => {
 describe("the PTT label", () => {
   it("follows the descriptor, not the pixel width", () => {
     show({}, "tiny-labelled");
-    expect(screen.getByText("PUSH-TO-TALK")).toBeInTheDocument();
+    expect(screen.getByText("PTT")).toBeInTheDocument();
   });
 
   it.each(["vertical", "narrow-v"])("is present on %s", (id) => {
     show({}, id);
-    expect(screen.getByText("PUSH-TO-TALK")).toBeInTheDocument();
+    expect(screen.getByText("PTT")).toBeInTheDocument();
   });
 
   it("is absent where the descriptor says there is no room", () => {
     show({}, "horizontal");
-    expect(screen.queryByText("PUSH-TO-TALK")).toBeNull();
+    expect(screen.queryByText("PTT")).toBeNull();
   });
 });
 
@@ -187,6 +187,24 @@ describe("state", () => {
     useRadios.setState({ heldPTT: new Set(["radio.1.ptt"]), globalPttTargetId: 0 });
     show();
     expect(screen.getByRole("option")).toHaveAttribute("data-tx", "true");
+  });
+
+  it("never shows the transmitting treatment on a disabled radio", () => {
+    useRadios.setState({
+      heldPTT: new Set(["radio.1.ptt", "global.ptt"]),
+      globalPttTargetId: 1,
+    });
+    show({ enabled: false });
+    expect(screen.getByRole("option")).toHaveAttribute("data-tx", "false");
+    expect(screen.getByRole("button", { name: /push-to-talk/i }).className).not.toContain("keyed");
+    expect(screen.getByText("OFF")).toBeInTheDocument();
+    expect(screen.queryByText("you")).toBeNull();
+  });
+
+  it("opens the name editor on Space as well as Enter and F2", () => {
+    show();
+    fireEvent.keyDown(screen.getByText("Fleet Common"), { key: " " });
+    expect(screen.getByRole("textbox", { name: /radio name/i })).toBeInTheDocument();
   });
 
   it("selects optimistically and tells the backend", () => {

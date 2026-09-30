@@ -62,10 +62,15 @@ export function RadioCard({ radio, allRadios, muted, variantId }: Props) {
   }
 
   const selected = selectedRadioId === radio.id;
-  const transmitting =
-    heldPTT.has(`radio.${radio.id}.ptt`) ||
-    (heldPTT.has("global.ptt") && globalPttTargetId === radio.id);
   const disabled = !radio.enabled;
+  // A disabled radio never transmits: the backend drops every frame for it
+  // (resolveTXTarget returns nil when no ENABLED radio matches), yet
+  // hotkey:pressed still fires, so an ungated held-PTT would light the full
+  // transmitting treatment on a card that is drained and showing OFF.
+  const transmitting =
+    !disabled &&
+    (heldPTT.has(`radio.${radio.id}.ptt`) ||
+      (heldPTT.has("global.ptt") && globalPttTargetId === radio.id));
   const rid = `R${String(radio.id).padStart(2, "0")}`;
 
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
@@ -126,18 +131,19 @@ export function RadioCard({ radio, allRadios, muted, variantId }: Props) {
             // A label, not a permanent bordered input: that input is the single
             // largest reason the shipped card read as a settings form.
             <span
-              title="Double-click (or press Enter / F2) to rename"
+              title="Double-click (or press Enter / Space / F2) to rename"
               role="button"
               tabIndex={0}
               onDoubleClick={(e) => {
                 stop(e);
                 setEditing(true);
               }}
-              // Double-click has no keyboard equivalent, so Enter / F2 opens the
-              // editor too. Keys bubbling from elsewhere are ignored.
+              // Double-click has no keyboard equivalent, so Enter / Space / F2
+              // opens the editor too (a role="button" must answer both Enter
+              // and Space). Keys bubbling from elsewhere are ignored.
               onKeyDown={(e) => {
                 if (e.target !== e.currentTarget) return;
-                if (e.key === "Enter" || e.key === "F2") {
+                if (e.key === "Enter" || e.key === " " || e.key === "F2") {
                   e.preventDefault();
                   e.stopPropagation();
                   setEditing(true);

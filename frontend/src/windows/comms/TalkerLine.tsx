@@ -10,6 +10,9 @@ interface Props {
   disabled: boolean;
 }
 
+/** 6 segments: 6 x 5px + 5 x 2px gaps = 40, plus slack for the 1px borders. */
+const VU_WIDTH = 44;
+
 /**
  * The card's status line: state dot, who is talking, and the meter — ONE
  * group, with the flexible spacer AFTER the meter so the three read as a unit.
@@ -63,7 +66,13 @@ export function TalkerLine({ talker, self, level = 0, disabled }: Props) {
       >
         {self ? "you" : (talker ?? "no traffic")}
       </span>
-      <VU level={active ? level : 0} segs={6} aria-label="signal" />
+      {/* .vu / .seg carry no width (segments are flex: 1 from a zero basis), so
+          in an auto-width flex item the meter collapses to ~22px of borders and
+          gaps. Give it a definite width here, at the call site, so Audio.tsx's
+          stretch-to-parent use of the shared classes is untouched. */}
+      <span data-testid="talker-vu" style={{ width: VU_WIDTH, flexShrink: 0, display: "block" }}>
+        <VU level={active ? level : 0} segs={6} aria-label="signal" />
+      </span>
       <span data-testid="talker-spacer" style={{ flex: 1 }} />
     </div>
   );

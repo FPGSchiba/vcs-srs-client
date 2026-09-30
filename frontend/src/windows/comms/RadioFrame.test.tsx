@@ -141,7 +141,7 @@ describe("selection", () => {
 
   it("is still selectable when the radio is disabled", () => {
     // "Disabled" is the RADIO's enabled flag, not the card's interactivity:
-    // the user has to be able to select a disabled radio to turn it back on.
+    // a disabled radio must remain selectable and keep a visible selection.
     const onSelect = vi.fn();
     fireEvent.click(show({ disabled: true }, onSelect));
     expect(onSelect).toHaveBeenCalledTimes(1);

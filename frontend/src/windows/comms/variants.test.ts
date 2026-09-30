@@ -4,10 +4,10 @@ import { VARIANTS, variantById, nearestVariant, DEFAULT_VARIANT_ID } from "./var
 describe("the registry", () => {
   it("defines the four agreed variants at their agreed sizes", () => {
     const byId = Object.fromEntries(VARIANTS.map((v) => [v.id, v]));
-    expect(byId.vertical).toMatchObject({ w: 280, h: 166, orientation: "column", lcdPx: 30 });
-    expect(byId.horizontal).toMatchObject({ w: 360, h: 110, orientation: "row", lcdPx: 22 });
+    expect(byId.vertical).toMatchObject({ w: 280, h: 168, orientation: "column", lcdPx: 30 });
+    expect(byId.horizontal).toMatchObject({ w: 360, h: 115, orientation: "row", lcdPx: 22 });
     expect(byId["narrow-h"]).toMatchObject({ w: 300, h: 68, orientation: "row", lcdPx: 21 });
-    expect(byId["narrow-v"]).toMatchObject({ w: 150, h: 124, orientation: "column", lcdPx: 18 });
+    expect(byId["narrow-v"]).toMatchObject({ w: 150, h: 136, orientation: "column", lcdPx: 18 });
   });
 
   it("assigns the agreed layout density to each variant", () => {

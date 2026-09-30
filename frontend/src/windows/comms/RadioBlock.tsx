@@ -16,8 +16,13 @@ interface Props {
 
 const DRAG_MIME = "text/plain";
 
-/** Variants smallest-first, so an arrow key means "one size up/down". */
-const BY_AREA = [...VARIANTS].sort((a, b) => a.w * a.h - b.w * b.h || a.id.localeCompare(b.id));
+/**
+ * Variants smallest-first, so an arrow key means "one size up/down". Areas can
+ * tie (narrow-h and narrow-v are both 20400), so the narrower one sorts first.
+ */
+const BY_AREA = [...VARIANTS].sort(
+  (a, b) => a.w * a.h - b.w * b.h || a.w - b.w || a.id.localeCompare(b.id),
+);
 
 interface DragStart {
   x: number;
@@ -102,7 +107,10 @@ export function RadioBlock({
 
   function nudge(e: KeyboardEvent<HTMLSpanElement>) {
     let step = 0;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") step = 1;
+    // Enter / Space activate the button like ArrowRight: step to the next size
+    // up (a role="button" must answer both). The ends do not wrap.
+    if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")
+      step = 1;
     else if (e.key === "ArrowLeft" || e.key === "ArrowUp") step = -1;
     else return;
     e.preventDefault();
@@ -177,7 +185,7 @@ export function RadioBlock({
         role="button"
         tabIndex={0}
         aria-label="Resize radio block"
-        title="Drag to snap to a size (arrow keys step through sizes)"
+        title="Drag to snap to a size (arrow keys, Enter or Space step through sizes)"
         onPointerDown={startResize}
         onKeyDown={nudge}
         style={{
