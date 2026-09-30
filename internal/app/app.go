@@ -11,6 +11,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
+	"github.com/FPGSchiba/vcs-srs-client/internal/history"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
@@ -86,6 +87,10 @@ type App struct {
 	// settings.audio, settings.joy and health: nil in tests and in any
 	// build where wiring failed, so every use site must check.
 	notif *notify.Notifier
+
+	// hist is the transmission log. Optional, the same discipline as notif
+	// and health: nil in tests and in any build where wiring failed.
+	hist *history.Log
 
 	// profilesDirOverride is set only by tests; empty in every shipped
 	// build. See setProfilesDirForTest.

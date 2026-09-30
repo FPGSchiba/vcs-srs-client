@@ -461,3 +461,20 @@ type LayoutDTO struct {
 	Window ProfileWindowDTO  `json:"window"`
 	Blocks []ProfileBlockDTO `json:"blocks"`
 }
+
+// HistoryEntryDTO is one Transmission Log row.
+//
+// At is pre-formatted RFC3339 rather than a time, and FreqMHz is derived
+// here beside the stored kHz integer, so every window renders the same
+// string and the same number without repeating the conversion. FreqKHz
+// stays on the wire because the channel filter matches on it.
+type HistoryEntryDTO struct {
+	At         string  `json:"at"`
+	Sender     string  `json:"sender"`
+	GUID       string  `json:"guid"`
+	FreqKHz    uint32  `json:"freq_khz"`
+	FreqMHz    float64 `json:"freq_mhz"`
+	Radio      string  `json:"radio"`
+	DurationMS int     `json:"dur_ms"`
+	Own        bool    `json:"own"`
+}

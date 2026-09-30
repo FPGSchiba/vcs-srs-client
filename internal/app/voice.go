@@ -141,6 +141,11 @@ func (b *sessionBridge) ReadInto(buf []float32) {
 type voiceState struct {
 	mu sync.Mutex
 
+	// txStarted maps each currently-transmitting frequency to when it
+	// entered the TX set, so installTXTargetsLocked can turn the set
+	// difference into history rows. Guarded by mu, like the tx map beside it.
+	txStarted map[voice.KHz]time.Time
+
 	// sess is the live voice session, nil while disconnected. An interface
 	// field (voiceSessionAPI), not sessionBridge's concrete
 	// atomic.Pointer[voice.Session] -- this one is read under mu by the
@@ -518,7 +523,7 @@ func (a *App) txPress(actionID string) {
 		if freshStart {
 			sess.EndTransmission()
 		}
-		sess.SetTXFrequencies(txTargetsLocked(a.voice.tx))
+		a.installTXTargetsLocked(sess, txTargetsLocked(a.voice.tx))
 	}
 }
 
@@ -543,7 +548,7 @@ func (a *App) txRelease(actionID string) (held bool) {
 	held = len(a.voice.tx) > 0
 	if held {
 		if sess := a.voice.sess; sess != nil {
-			sess.SetTXFrequencies(txTargetsLocked(a.voice.tx))
+			a.installTXTargetsLocked(sess, txTargetsLocked(a.voice.tx))
 		}
 	}
 	return held
@@ -640,7 +645,7 @@ func (a *App) clearTXTargetsIfStillIdle() {
 		return
 	}
 	if sess := a.voice.sess; sess != nil {
-		sess.SetTXFrequencies(nil)
+		a.installTXTargetsLocked(sess, nil)
 	}
 }
 
@@ -735,18 +740,22 @@ func (a *App) voiceDialInputs() (self uuid.UUID, secret string, src voice.Source
 func (a *App) voiceDialOptions() voice.Options {
 	jitterMS := 0
 	maxBufferMS := 0
+	historyIdleMS := 0
 	var em *events.Tagged
 	if sb := a.settings; sb != nil {
 		sb.mu.Lock()
 		jitterMS = sb.cfg.Voice.JitterBufferMS
 		maxBufferMS = sb.cfg.Voice.MaxBufferMS
+		historyIdleMS = sb.cfg.Voice.HistoryIdleMS
 		em = sb.em
 		sb.mu.Unlock()
 	}
 	return voice.Options{
-		Log:         a.logger,
-		JitterMS:    jitterMS,
-		MaxBufferMS: maxBufferMS,
+		Log:           a.logger,
+		JitterMS:      jitterMS,
+		MaxBufferMS:   maxBufferMS,
+		OnRX:          a.onVoiceRX,
+		HistoryIdleMS: historyIdleMS,
 		OnState: func(st voice.State, err error) {
 			msg := ""
 			if err != nil {
