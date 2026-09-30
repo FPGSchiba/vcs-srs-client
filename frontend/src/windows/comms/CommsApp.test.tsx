@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, act, within } from "@testing-library/react";
 
 const getClientState = vi.fn();
 const getSettings = vi.fn();
@@ -531,6 +531,18 @@ describe("CommsApp chrome", () => {
     await screen.findByTitle(/unsaved/i);
     const chrome = document.querySelector(".popout-chrome")!;
     expect(chrome.children).toHaveLength(3);
+    const lead = chrome.firstElementChild as HTMLElement;
+    const ctrl = chrome.lastElementChild as HTMLElement;
+    // Leading group carries the title and the dirty dot.
+    expect(lead).toHaveTextContent("Communications");
+    expect(lead.querySelector('[title="Unsaved layout changes"]')).not.toBeNull();
+    // The controls group carries all four buttons.
+    expect(ctrl).toHaveClass("ctrl");
+    for (const label of ["SAVE", "REVERT", "RESET", "close"]) {
+      expect(within(ctrl).getByRole("button", { name: new RegExp(`^${label}$`, "i") })).toBeInTheDocument();
+    }
+    // The .btn width exemption must not be able to reach the close button.
+    expect(within(ctrl).getByRole("button", { name: /close/i }).className).not.toMatch(/btn/);
   });
 
   it("keeps every control present in the chrome", async () => {

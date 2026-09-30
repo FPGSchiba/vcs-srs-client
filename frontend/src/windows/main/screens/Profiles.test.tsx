@@ -255,7 +255,8 @@ describe("Profiles layout preview", () => {
     seed([summary({ blocks: [] })]);
     render(<Profiles />);
     await act(async () => {});
-    const svg = document.querySelector("svg")!;
+    // Scoped to the preview: the first <svg> in the document is an Icon.
+    const svg = screen.getByTestId("layout-preview");
     expect(svg.querySelectorAll("rect")).toHaveLength(0);
     expect(svg.outerHTML).not.toContain("NaN");
   });
@@ -269,7 +270,7 @@ describe("Profiles layout preview", () => {
     })]);
     render(<Profiles />);
     await act(async () => {});
-    const rects = document.querySelectorAll("svg rect");
+    const rects = screen.getByTestId("layout-preview").querySelectorAll("rect");
     expect(rects).toHaveLength(2);
     expect(Number(rects[0].getAttribute("width"))).toBeGreaterThan(
       Number(rects[1].getAttribute("width")),

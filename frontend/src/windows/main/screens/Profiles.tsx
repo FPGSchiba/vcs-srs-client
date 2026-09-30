@@ -28,7 +28,7 @@ function LayoutPreview({ blocks, window: win }: { blocks: LayoutBlock[]; window:
   const { rects, w, h } = place(blocks, win);
   const scale = Math.min((VIEW_W - 2 * MARGIN) / w, (VIEW_H - 2 * MARGIN) / Math.max(h, 1));
   return (
-    <svg width={VIEW_W} height={VIEW_H} viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} aria-hidden="true">
+    <svg data-testid="layout-preview" width={VIEW_W} height={VIEW_H} viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} aria-hidden="true">
       {rects.map((r, i) => (
         <rect
           key={i}
