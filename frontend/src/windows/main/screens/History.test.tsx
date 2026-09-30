@@ -36,7 +36,15 @@ vi.mock("@wailsio/runtime", async (importOriginal) => {
         if (!mockEventHandlers.has(eventName)) {
           mockEventHandlers.set(eventName, []);
         }
-        const handlerObj = { handler: (data: unknown) => callback({ data }), live: true };
+        const handlerObj = {
+          handler: (data: unknown) => {
+            // Only invoke callback if handler is still live
+            if (handlerObj.live) {
+              callback({ data });
+            }
+          },
+          live: true,
+        };
         mockEventHandlers.get(eventName)!.push(handlerObj);
 
         const unsubscribeFn = vi.fn();
@@ -217,6 +225,7 @@ describe("History screen", () => {
     appendedHandler?.(newEntry);
     const beforeUnmount = useHistory.getState().entries.length;
     expect(beforeUnmount).toBeGreaterThan(0);
+    expect(useHistory.getState().entries.some((e) => e.sender === "NewSender")).toBe(true);
 
     // Unmount
     unmount();
@@ -231,5 +240,11 @@ describe("History screen", () => {
     const liveClearedAfter = clearedHandlers.filter((h) => h.live).length;
     expect(liveAppendedAfter).toBe(0);
     expect(liveClearedAfter).toBe(0);
+
+    // After unmount: invoking the captured handler must NOT reach the store
+    const lenBefore = useHistory.getState().entries.length;
+    appendedHandler?.(row({ sender: "AfterUnmount" }));
+    expect(useHistory.getState().entries.length).toBe(lenBefore);
+    expect(useHistory.getState().entries.some((e) => e.sender === "AfterUnmount")).toBe(false);
   });
 });
