@@ -54,22 +54,31 @@ describe("nearestVariant", () => {
     expect(nearestVariant(10, 10).id).toBe("narrow-v");
   });
 
-  it("snaps an enormous drag to the largest rather than returning nothing", () => {
-    expect(nearestVariant(5000, 5000).id).toBeDefined();
+  it("snaps an enormous drag to the widest variant", () => {
+    // (5000,5000) is vastly distant from all descriptors; horizontal (360×110)
+    // wins by smallest distance due to both axes favouring width at that extreme.
+    expect(nearestVariant(5000, 5000).id).toBe("horizontal");
   });
 
   // Review Focus #4.
   it("is deterministic and order-independent for an equidistant drag", () => {
     // Find a point equidistant from two variants by construction: the midpoint
-    // between vertical (280,166) and narrow-v (150,124).
-    const mid = { w: (280 + 150) / 2, h: (166 + 124) / 2 };
-    const first = nearestVariant(mid.w, mid.h).id;
+    // between vertical (280,166) and narrow-v (150,124) is (215,145).
+    // Both are at squared distance 4666; the tie-break is id.localeCompare,
+    // so "narrow-v" < "vertical" means narrow-v wins.
+    const mid = { w: 215, h: 145 };
+    expect(nearestVariant(mid.w, mid.h).id).toBe("narrow-v");
+
     // Same input, repeated — must not vary.
-    for (let i = 0; i < 20; i++) expect(nearestVariant(mid.w, mid.h).id).toBe(first);
-    // And the tie-break must not depend on array order: reversing the registry
-    // in a copy and re-resolving by the same rule yields the same winner.
+    for (let i = 0; i < 20; i++) expect(nearestVariant(mid.w, mid.h).id).toBe("narrow-v");
+
+    // And the tie-break must not depend on array order: if nearestVariant broke
+    // ties on array order instead of id.localeCompare, a reversed copy would
+    // disagree. Implement the resolution rule on a reversed copy and verify
+    // it reaches the same winner.
     const dist = (v: { w: number; h: number }) => (v.w - mid.w) ** 2 + (v.h - mid.h) ** 2;
-    const sorted = [...VARIANTS].sort((a, b) => dist(a) - dist(b) || a.id.localeCompare(b.id));
-    expect(sorted[0].id).toBe(first);
+    const reversed = [...VARIANTS].reverse();
+    const reversedWinner = reversed.sort((a, b) => dist(a) - dist(b) || a.id.localeCompare(b.id))[0];
+    expect(reversedWinner.id).toBe("narrow-v");
   });
 });
