@@ -571,9 +571,10 @@ func (s *Session) rxVoice(pkt *Packet, at time.Time) {
 	}
 	st.lastSeen.Store(at.UnixNano())
 	// A packet on a stream the history threshold already closed starts a
-	// NEW transmission. The unlocked atomic test keeps the common path
-	// lock-free; the flag is re-checked under rx.mu because rxService
-	// (decode goroutine) writes the same two fields.
+	// NEW transmission. The unlocked atomic read is only a hint, made safe
+	// by the atomic; the decision is re-checked under rx.mu because
+	// rxService (decode goroutine) writes the same two fields. (rxStreamFor
+	// already takes rx.mu on every packet, so this is not a lock-avoidance.)
 	if st.ended.Load() {
 		r.mu.Lock()
 		if st.ended.Load() {
@@ -702,8 +703,12 @@ func (s *Session) rxService(now time.Time) {
 // endTransmission marks this stream's current transmission as reported and
 // returns the row to deliver. ok is false when it was already reported, or
 // when a packet landed between the caller's unlocked idle check and taking
-// the lock: lastSeen is re-read HERE, under mu, so a transmission that had
-// just resumed is not closed on a stale timestamp.
+// the lock: lastSeen is re-read HERE, under mu, which narrows that window.
+// It does not close it: rxVoice does Store(lastSeen) then Load(ended) while
+// this does Load(lastSeen) then Store(ended), which is not a Dekker pair, so
+// both sides can miss each other. The consequence is benign -- at most one
+// inter-packet gap of skew in End, or a one-packet transmission in that
+// instant going unreported -- but it is not a guarantee.
 //
 // The event is RETURNED rather than queued so the caller sends it after mu
 // is released: the queue send is non-blocking, but nothing about the stream

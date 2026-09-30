@@ -256,3 +256,33 @@ func TestHistoryIdleDefault(t *testing.T) {
 		t.Fatalf("a negative override must fall back to the default, got %v", got)
 	}
 }
+
+// A history threshold at or above the reap timeout would never fire -- the
+// stream is reaped in the same sweep and reap emits nothing -- so Dial clamps
+// it. The row must still be produced while the stream is alive.
+func TestRXHistoryIdleAboveReapTimeoutStillProducesRows(t *testing.T) {
+	var mu sync.Mutex
+	var got []RXEvent
+	f := dialRX(t, func(o *Options) {
+		o.HistoryIdleMS = 6000
+		o.OnRX = func(ev RXEvent) {
+			mu.Lock()
+			got = append(got, ev)
+			mu.Unlock()
+		}
+	})
+	f.s.SetRXContext([]KHz{freqAlpha}, nil, nil)
+	f.send(t, f.peer, 0x010200, freqAlpha, markerA)
+
+	// 4.5s of silence: past the clamped threshold, before the 5s reap.
+	f.clk.advance(4500 * time.Millisecond)
+	waitFor(t, "a history row despite HistoryIdleMS > rxIdleTimeout", func() bool {
+		f.s.ReadInto(f.buf)
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 1
+	})
+	if f.s.RXStats().Active != 1 {
+		t.Fatal("stream was reaped before the row; the clamp did not hold the threshold inside the reap window")
+	}
+}

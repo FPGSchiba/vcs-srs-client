@@ -168,7 +168,9 @@ type Options struct {
 	//
 	// Unlike OnState's goroutine, this one IS joined by Close, so the final
 	// rows are flushed before Close returns. OnRX must therefore not call
-	// Close.
+	// Close. Rows still buffered once every producer has stopped are
+	// delivered by a last drain on the goroutine that called Close; that is
+	// never concurrent with the delivery goroutine, which has exited by then.
 	OnRX func(RXEvent)
 
 	// HistoryIdleMS is how long a stream may go without an accepted packet
@@ -255,9 +257,9 @@ type Session struct {
 	self   uuid.UUID
 	secret string
 
-	log       *slog.Logger
-	onState   func(State, error)
-	clock     func() time.Time
+	log     *slog.Logger
+	onState func(State, error)
+	clock   func() time.Time
 
 	onRX        func(RXEvent)
 	historyIdle time.Duration
@@ -363,10 +365,10 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 		jitterMS:  opt.JitterMS,
 
 		historyIdle: historyIdleFor(opt.HistoryIdleMS),
-		events:    make(chan event, eventBuffer),
-		done:      make(chan struct{}),
-		cbSignal:  make(chan struct{}, 1),
-		state:     StateIdle,
+		events:      make(chan event, eventBuffer),
+		done:        make(chan struct{}),
+		cbSignal:    make(chan struct{}, 1),
+		state:       StateIdle,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -400,6 +402,18 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 		s.log.Warn("voice: jitter_buffer_ms exceeds max_buffer_ms; clamping",
 			"jitter_buffer_ms", s.jitterMS, "max_buffer_ms", maxBufferMS)
 		s.jitterMS = maxBufferMS
+	}
+
+	// A history threshold at or above rxIdleTimeout can never fire: the
+	// stream is reaped in the same sweep, reap emits nothing, and every
+	// transmission would silently vanish from the log. Clamp rather than
+	// reject, logged once, as with the jitter clamp above. The margin keeps
+	// the threshold strictly inside the reap window so a sweep lands between
+	// the two.
+	if maxIdle := rxIdleTimeout - time.Second; s.historyIdle > maxIdle {
+		s.log.Warn("voice: history_idle_ms is not below the stream reap timeout; clamping",
+			"requested_ms", s.historyIdle.Milliseconds(), "effective_ms", maxIdle.Milliseconds())
+		s.historyIdle = maxIdle
 	}
 
 	// Created here, before any goroutine exists, so decodeLoop never races
@@ -458,7 +472,8 @@ func (s *Session) RTT() time.Duration {
 
 // Close sends a best-effort BYE, closes the socket and stops the session's
 // goroutines. It is safe to call more than once and from any goroutine,
-// including from inside OnState; only the first call does anything. A BYE
+// including from inside OnState (but NOT from inside OnRX, whose delivery
+// goroutine Close joins); only the first call does anything. A BYE
 // from an unbound address is inert server-side, which is why this is
 // best-effort: the server's liveness sweep is the backstop.
 //
@@ -495,6 +510,23 @@ func (s *Session) Close() error {
 			s.closeErr = conn.Close()
 		}
 		s.wg.Wait()
+		// Final drain of the OnRX queue. endTransmission can win the race
+		// against endOpenRXStreams and queue AFTER rxDeliverLoop's own drain
+		// hit default and returned; every producer is joined here, so
+		// nothing more can arrive. Runs on this goroutine, never concurrent
+		// with the delivery loop (already exited). s.rxEvents is never
+		// closed.
+		if s.rxEvents != nil {
+			for {
+				select {
+				case ev := <-s.rxEvents:
+					s.onRX(ev)
+					continue
+				default:
+				}
+				break
+			}
+		}
 		// After the join, so nothing can be inside an encode or decode call.
 		s.tx.close()
 		s.rx.close()
