@@ -113,6 +113,28 @@ describe("the drawer", () => {
     expect(screen.getByRole("dialog").parentElement).toBe(document.body);
   });
 
+  it("keeps non-Escape keys inside the panel from reaching ancestors, but lets Escape through", () => {
+    const ancestorKey = vi.fn();
+    render(
+      <div onKeyDown={ancestorKey}>
+        <RadioCard
+          radio={radio}
+          allRadios={[radio]}
+          muted={false}
+          variantId="vertical"
+          onVariantChange={vi.fn()}
+        />
+      </div>,
+    );
+    open();
+    const dlg = screen.getByRole("dialog");
+    fireEvent.keyDown(dlg, { key: "a" });
+    fireEvent.keyDown(dlg, { key: "Enter" });
+    expect(ancestorKey).not.toHaveBeenCalled();
+    fireEvent.keyDown(dlg, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("closes on Escape from inside the panel and returns focus to the gear", () => {
     show();
     open();

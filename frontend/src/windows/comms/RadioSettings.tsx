@@ -197,6 +197,13 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
             tabIndex={-1}
             style={panelStyle}
             onClick={stop}
+            // Keystrokes in the panel must not reach the card behind it, but
+            // Escape MUST keep bubbling: it is handled by the document-level
+            // listener above (a hidden panel cannot take focus, so a
+            // panel-local handler would be dead).
+            onKeyDown={(e) => {
+              if (e.key !== "Escape") e.stopPropagation();
+            }}
             onDragStart={stop}
             onDragOver={stop}
             onDrop={stop}

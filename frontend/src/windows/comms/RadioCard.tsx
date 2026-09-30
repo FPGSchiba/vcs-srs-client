@@ -168,7 +168,7 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
           )
         }
         lcd={
-          <span onClick={stop} onDoubleClick={stop}>
+          <span onClick={stop} onDoubleClick={stop} onKeyDown={stop}>
             <LcdFreq
               khz={mhzToKhz(radio.frequency)}
               digitPx={variant.lcdPx}
