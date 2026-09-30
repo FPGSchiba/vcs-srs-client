@@ -249,9 +249,11 @@ type stateChange struct {
 // parses and dispatches; lifecycleLoop, which owns the HELLO ladder and the
 // keepalive schedule; txLoop, which encodes captured audio and writes it;
 // decodeLoop, which decodes and colours received audio; and deliverLoop,
-// which delivers OnState callbacks. Close joins the first four (rxLoop also
-// exits via the socket being closed under it) and does NOT join
-// deliverLoop, which is what makes it safe for OnState to call Close.
+// which delivers OnState callbacks. When an OnRX callback is set a sixth,
+// rxDeliverLoop, delivers RX events. Close joins the first four and
+// rxDeliverLoop (rxLoop also exits via the socket being closed under it) and
+// does NOT join deliverLoop, which is what makes it safe for OnState to call
+// Close.
 type Session struct {
 	src    Sources
 	self   uuid.UUID

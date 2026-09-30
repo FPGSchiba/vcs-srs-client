@@ -53,6 +53,44 @@ func TestSeedWritesOnFirstRun(t *testing.T) {
 	}
 }
 
+// Seed must write through a temp file + rename, so a kill mid-write cannot
+// leave a truncated (silently unlisted, never repaired) profile.
+func TestSeedWritesAtomicallyViaTempFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "standard-fleet"+Ext)
+	// Block the temp path with a directory: an atomic writer must fail and
+	// leave the target absent; a bare os.WriteFile to the target would not.
+	if err := os.Mkdir(p+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Seed(dir, map[string]string{}); err == nil {
+		t.Fatal("Seed must go through <path>.tmp, so a blocked temp path is an error")
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Fatal("target must not be written directly")
+	}
+	_ = os.Remove(p + ".tmp") // the writer cleans up after itself; tolerate either
+
+	// Normal run: raw embedded bytes, no temp left behind.
+	seedOnce(t, dir, map[string]string{})
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []byte
+	for _, b := range Builtins() {
+		if b.ID == "standard-fleet" {
+			want = b.Content
+		}
+	}
+	if HashContent(got) != HashContent(want) {
+		t.Fatal("on-disk bytes must be the raw embedded bytes")
+	}
+	if _, err := os.Stat(p + ".tmp"); err == nil {
+		t.Fatal("temp file left behind")
+	}
+}
+
 // Row 2: no hash recorded + file present -> leave (a user file owns the name).
 func TestSeedLeavesUnrecordedExistingFile(t *testing.T) {
 	dir := t.TempDir()

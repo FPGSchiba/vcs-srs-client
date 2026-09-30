@@ -222,9 +222,21 @@ export function Profiles() {
                   </button>
                 </>
               ) : (
-                <button type="button" className="btn btn-primary" onClick={() => setSaving(true)}>
-                  <Icon name="save" size={11} /> SAVE CURRENT AS NEW
-                </button>
+                <>
+                  {state.dirty && state.active_path && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      title="Save changes into the active profile"
+                      onClick={() => void run(api.saveProfile)}
+                    >
+                      <Icon name="save" size={11} /> SAVE
+                    </button>
+                  )}
+                  <button type="button" className="btn btn-primary" onClick={() => setSaving(true)}>
+                    <Icon name="save" size={11} /> SAVE CURRENT AS NEW
+                  </button>
+                </>
               )}
             </div>
             {error && (

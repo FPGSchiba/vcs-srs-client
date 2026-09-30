@@ -13,6 +13,7 @@ const voiceState = vi.fn();
 const getCommsLayout = vi.fn().mockResolvedValue({ window: { w: 540, h: 720 }, blocks: [] });
 const setCommsLayout = vi.fn();
 const revertProfile = vi.fn();
+const saveProfile = vi.fn();
 const resetLayout = vi.fn();
 const getProfileState = vi.fn().mockResolvedValue({ active_path: "", active_name: "", dirty: false, dir: "" });
 
@@ -30,6 +31,7 @@ vi.mock("../../shared/api/client", () => ({
     getCommsLayout: () => getCommsLayout(),
     setCommsLayout: (l: unknown) => setCommsLayout(l),
     revertProfile: () => revertProfile(),
+    saveProfile: () => saveProfile(),
     resetLayout: () => resetLayout(),
     getProfileState: () => getProfileState(),
     closeWindow: vi.fn(),
@@ -219,6 +221,7 @@ function setupBackend() {
   getCommsLayout.mockReset().mockResolvedValue({ window: { w: 540, h: 720 }, blocks: [] });
   setCommsLayout.mockReset().mockResolvedValue(undefined);
   revertProfile.mockReset().mockResolvedValue(undefined);
+  saveProfile.mockReset().mockResolvedValue(undefined);
   resetLayout.mockReset().mockResolvedValue(undefined);
   useSettings.setState({
     settings: null, keybinds: [],
@@ -238,6 +241,37 @@ describe("CommsApp profile chrome", () => {
     render(<CommsApp />);
     expect(await screen.findByTitle(/unsaved/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /revert/i })).toBeInTheDocument();
+  });
+
+  it("offers SAVE only when dirty with an active profile", async () => {
+    setProfile({ active_path: "", active_name: "", dirty: true, dir: "/p" });
+    const { unmount } = render(<CommsApp />);
+    await screen.findByTitle(/unsaved/i);
+    expect(screen.queryByRole("button", { name: /^save$/i })).not.toBeInTheDocument();
+    unmount();
+
+    setProfile({ active_path: "/p/x.vcs.json", active_name: "Fleet Op", dirty: false, dir: "/p" });
+    const second = render(<CommsApp />);
+    await screen.findByText("Fleet Op");
+    expect(screen.queryByRole("button", { name: /^save$/i })).not.toBeInTheDocument();
+    second.unmount();
+
+    setProfile({ active_path: "/p/x.vcs.json", active_name: "Fleet Op", dirty: true, dir: "/p" });
+    render(<CommsApp />);
+    expect(await screen.findByRole("button", { name: /^save$/i })).toBeInTheDocument();
+  });
+
+  it("SAVE calls saveProfile and the dirty state clears on the resulting profile:state", async () => {
+    setProfile({ active_path: "/p/x.vcs.json", active_name: "Fleet Op", dirty: true, dir: "/p" });
+    saveProfile.mockImplementation(async () => {
+      emit(EV.profileState, { active_path: "/p/x.vcs.json", active_name: "Fleet Op", dirty: false, dir: "/p" });
+    });
+    render(<CommsApp />);
+    fireEvent.click(await screen.findByRole("button", { name: /^save$/i }));
+    expect(saveProfile).toHaveBeenCalledTimes(1);
+    expect(revertProfile).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByTitle(/unsaved/i)).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^save$/i })).not.toBeInTheDocument();
   });
 
   it("hides REVERT when clean", async () => {

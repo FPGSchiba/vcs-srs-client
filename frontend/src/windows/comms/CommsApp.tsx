@@ -230,6 +230,19 @@ export function CommsApp() {
           {profile.dirty && profile.active_path && (
             <button
               type="button"
+              className="btn btn-sm btn-primary"
+              title="Save changes into the active profile"
+              onClick={() => {
+                flush(); // an unsent drag must be part of what is saved
+                void api.saveProfile();
+              }}
+            >
+              SAVE
+            </button>
+          )}
+          {profile.dirty && profile.active_path && (
+            <button
+              type="button"
               className="btn btn-sm"
               title="Discard changes and reload the active profile"
               onClick={() => void api.revertProfile()}

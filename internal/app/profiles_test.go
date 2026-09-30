@@ -692,8 +692,32 @@ func TestSetCommsLayoutIsVisibleImmediatelyInMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := a.GetCommsLayout()
-	if got.Window.W != 700 || len(got.Blocks) != 1 || got.Blocks[0].W != 400 {
+	if len(got.Blocks) != 1 || got.Blocks[0].W != 400 {
 		t.Fatalf("GetCommsLayout = %+v, want the in-memory value", got)
+	}
+}
+
+func TestSetCommsLayoutIgnoresStaleWindowSize(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	sb := a.settings
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.CommsLayout.WindowW, next.CommsLayout.WindowH = 800, 650
+	sb.cfg = &next
+	sb.mu.Unlock()
+
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 540, H: 720}, // stale renderer copy
+		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := a.GetCommsLayout()
+	if got.Window.W != 800 || got.Window.H != 650 {
+		t.Fatalf("window = %+v, want the stored 800x650 kept", got.Window)
+	}
+	if len(got.Blocks) != 1 || got.Blocks[0].W != 400 {
+		t.Fatalf("blocks must still be applied: %+v", got.Blocks)
 	}
 }
 
@@ -742,7 +766,7 @@ func TestFlushConfigWritesTheLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back.CommsLayout.WindowW != 700 || len(back.CommsLayout.Blocks) != 1 {
+	if len(back.CommsLayout.Blocks) != 1 {
 		t.Fatalf("CommsLayout on disk = %+v", back.CommsLayout)
 	}
 }
@@ -767,7 +791,7 @@ func TestLayoutFreeRidesOnAnUnrelatedConfigSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back.CommsLayout.WindowW != 701 {
+	if len(back.CommsLayout.Blocks) != 1 || back.CommsLayout.Blocks[0].W != 401 {
 		t.Fatalf("an unrelated config.Save must carry the pending layout: %+v", back.CommsLayout)
 	}
 }

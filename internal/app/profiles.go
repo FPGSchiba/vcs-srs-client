@@ -783,6 +783,11 @@ func (a *App) GetCommsLayout() LayoutDTO {
 //
 // Dirty state is unaffected by any of this: App.profileDirty compares the
 // IN-MEMORY config, so the dot is correct the instant a block moves.
+//
+// l.Window is IGNORED: the stored window size is kept. captureCommsWindowSize
+// is the sole authority on it (it records the settled native resize); the
+// renderer only echoes what Go told it, so honouring its copy would let a
+// debounced block drag overwrite a newer native resize with a stale size.
 func (a *App) SetCommsLayout(l LayoutDTO) error {
 	sb := a.settings
 	if sb == nil {
@@ -801,7 +806,7 @@ func (a *App) SetCommsLayout(l LayoutDTO) error {
 	}
 	sb.mu.Lock()
 	next := *sb.cfg
-	next.CommsLayout = config.CommsLayout{WindowW: l.Window.W, WindowH: l.Window.H, Blocks: blocks}
+	next.CommsLayout = config.CommsLayout{WindowW: sb.cfg.CommsLayout.WindowW, WindowH: sb.cfg.CommsLayout.WindowH, Blocks: blocks}
 	sb.cfg = &next
 	sb.layoutPending = true
 	// Unlock explicitly, NOT via defer: emitProfileState re-enters sb.mu

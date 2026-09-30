@@ -12,6 +12,7 @@ const {
   deleteProfile,
   renameProfile,
   saveProfileAs,
+  saveProfile,
   browseProfilesDir,
   openProfilesDir,
   importProfile,
@@ -23,6 +24,7 @@ const {
   deleteProfile: vi.fn(async (_path: string) => {}),
   renameProfile: vi.fn(async (_path: string, _name: string, _desc: string) => {}),
   saveProfileAs: vi.fn(async (_name: string, _desc: string) => {}),
+  saveProfile: vi.fn(async () => {}),
   browseProfilesDir: vi.fn(async () => {}),
   openProfilesDir: vi.fn(async () => {}),
   importProfile: vi.fn(async () => {}),
@@ -64,6 +66,7 @@ vi.mock("../../../shared/api/client", async (orig) => {
       deleteProfile,
       renameProfile,
       saveProfileAs,
+      saveProfile,
       browseProfilesDir,
       openProfilesDir,
       importProfile,
@@ -102,6 +105,27 @@ describe("Profiles screen", () => {
     vi.clearAllMocks();
     eventHandlers.clear();
     seed([]);
+  });
+
+  it("offers SAVE in place only when dirty with an active profile, and calls saveProfile", async () => {
+    const active = summary();
+    seed([active], { active_path: "", active_name: "", dirty: true, dir: "/p" });
+    const { unmount } = render(<Profiles />);
+    await screen.findByText("Fleet Op");
+    expect(screen.queryByRole("button", { name: /^save$/i })).not.toBeInTheDocument();
+    unmount();
+
+    seed([active], { active_path: active.path, active_name: "Fleet Op", dirty: false, dir: "/p" });
+    const second = render(<Profiles />);
+    await screen.findByText("Fleet Op");
+    expect(screen.queryByRole("button", { name: /^save$/i })).not.toBeInTheDocument();
+    second.unmount();
+
+    seed([active], { active_path: active.path, active_name: "Fleet Op", dirty: true, dir: "/p" });
+    render(<Profiles />);
+    fireEvent.click(await screen.findByRole("button", { name: /^save$/i }));
+    expect(saveProfile).toHaveBeenCalledTimes(1);
+    expect(saveProfileAs).not.toHaveBeenCalled();
   });
 
   it("renders a row per profile with its radio count", async () => {

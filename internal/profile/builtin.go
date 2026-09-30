@@ -69,6 +69,24 @@ func Builtins() []Builtin {
 	return out
 }
 
+// writeRawAtomic writes b to path via temp file + rename, so a kill mid-write
+// cannot leave a truncated profile (List skips unparseable files silently, and
+// the decision table would never repair it). It writes the RAW bytes: going
+// through Write would reconcile and re-encode, changing the hash the seeding
+// scheme compares.
+func writeRawAtomic(path string, b []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // Seed writes the shipped default profiles into dir, using recorded (id ->
 // hash of the content THIS CLIENT last wrote) to decide what may be
 // touched:
@@ -141,7 +159,7 @@ func Seed(dir string, recorded map[string]string) ([]SeedResult, error) {
 			continue
 		}
 
-		if err := os.WriteFile(res.Path, b.Content, 0o644); err != nil {
+		if err := writeRawAtomic(res.Path, b.Content); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("write builtin %s: %w", b.ID, err)
 			}
