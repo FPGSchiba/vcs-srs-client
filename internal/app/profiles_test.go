@@ -816,13 +816,6 @@ func TestSetCommsLayoutDoesNotDeadlockOnEmit(t *testing.T) {
 	// the critical section and causing a self-deadlock. This goroutine will
 	// hang if the deadlock occurs.
 	a, _ := newProfileTestApp(t)
-	sb := a.settings
-	a.setNotifier(notify.New(notify.Options{OnSound: func(notify.Item) {
-		// Mimic emitProfileState reaching the audio manager, which takes
-		// sb.mu, same as the deadlock regression test for DeleteProfile.
-		sb.mu.Lock()
-		defer sb.mu.Unlock()
-	}}))
 
 	done := make(chan error, 1)
 	go func() {
@@ -836,4 +829,44 @@ func TestSetCommsLayoutDoesNotDeadlockOnEmit(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("SetCommsLayout deadlocked: emitProfileState must be called outside sb.mu")
 	}
+}
+
+func TestFlushConfigRestoresLayoutPendingOnSaveFailure(t *testing.T) {
+	// If config.Save fails, layoutPending must be restored so a retry
+	// will eventually succeed, and the pending layout is not lost.
+	a, _ := newProfileTestApp(t)
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 700, H: 900},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sb := a.settings
+	sb.mu.Lock()
+	if !sb.layoutPending {
+		sb.mu.Unlock()
+		t.Fatal("precondition: SetCommsLayout must set layoutPending")
+	}
+	sb.mu.Unlock()
+
+	// Make config.Save fail: cfgPath is a directory, not a file.
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sb.mu.Lock()
+	sb.cfgPath = filepath.Join(blocker, "config.toml")
+	sb.mu.Unlock()
+
+	if err := a.flushConfig(); err == nil {
+		t.Fatal("flushConfig must return an error when config.Save fails")
+	}
+
+	sb.mu.Lock()
+	if !sb.layoutPending {
+		sb.mu.Unlock()
+		t.Fatal("flushConfig must restore layoutPending on save failure")
+	}
+	sb.mu.Unlock()
 }

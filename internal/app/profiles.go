@@ -841,6 +841,11 @@ func (a *App) flushConfig() error {
 	sb.layoutPending = false
 	sb.mu.Unlock()
 	if err := config.Save(sb.cfgPath, &snapshot); err != nil {
+		// Restore the flag on save failure. Safe against concurrent SetCommsLayout
+		// (which would set it true anyway, making the restore idempotent).
+		sb.mu.Lock()
+		sb.layoutPending = true
+		sb.mu.Unlock()
 		return fmt.Errorf("flush config: %w", err)
 	}
 	return nil
