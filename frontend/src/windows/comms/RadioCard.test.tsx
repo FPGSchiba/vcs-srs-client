@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RadioCard } from "./RadioCard";
 import { api, type RadioDTO } from "../../shared/api/client";
@@ -29,9 +29,11 @@ beforeEach(() => {
   useRadios.setState({ selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 });
 });
 
+const openDrawer = () => fireEvent.click(screen.getByRole("button", { name: "Radio settings" }));
+
 const show = (r: Partial<RadioDTO> = {}, variantId = "vertical") => {
   const full = { ...radio, ...r };
-  render(<RadioCard radio={full} allRadios={[full]} muted={false} variantId={variantId} />);
+  render(<RadioCard radio={full} allRadios={[full]} muted={false} variantId={variantId} onVariantChange={() => {}} />);
   return full;
 };
 
@@ -47,22 +49,11 @@ describe("variant resolution", () => {
     expect(screen.getByRole("option")).toHaveStyle({ width: "280px", height: "168px" });
   });
 
-  it("shows the MHZ unit and both chips only on the variants that ask", () => {
+  it("shows the MHZ unit only on the variants that ask", () => {
     show({}, "vertical");
     expect(screen.getByText("MHZ")).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: /enabled/i })).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: /intercom/i })).toBeInTheDocument();
-  });
-
-  it("shows only the enabled chip on horizontal", () => {
-    show({}, "horizontal");
-    expect(screen.getByRole("switch", { name: /enabled/i })).toBeInTheDocument();
-    expect(screen.queryByRole("switch", { name: /intercom/i })).toBeNull();
-  });
-
-  it("shows no chips and no unit on the narrow variants", () => {
+    cleanup();
     show({}, "narrow-h");
-    expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByText("MHZ")).toBeNull();
   });
 });
@@ -219,16 +210,18 @@ describe("state", () => {
     vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
     const before = useRadios.getState().radios;
     show();
+    openDrawer();
     fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
     expect(useRadios.getState().radios).toBe(before);
   });
 });
 
 describe("controls do not select the card", () => {
-  it("clicking the enabled chip or the LCD does not select", () => {
+  it("clicking the gear, a drawer toggle or the LCD does not select", () => {
     const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
     vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
     show();
+    openDrawer();
     fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
     fireEvent.click(screen.getByRole("spinbutton", { name: "frequency" }));
     expect(spy).not.toHaveBeenCalled();
@@ -240,6 +233,7 @@ describe("ported from the pre-redesign suite", () => {
   it("commits an enabled toggle as a full write-through payload", () => {
     const spy = vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
     const full = show();
+    openDrawer();
     fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
     expect(spy).toHaveBeenCalledWith({ muted: false, radios: [{ ...full, enabled: false }] });
   });
@@ -271,8 +265,8 @@ describe("ported from the pre-redesign suite", () => {
     const b = { ...radio, id: 6, name: "B" } as RadioDTO;
     render(
       <>
-        <RadioCard radio={a} allRadios={[a, b]} muted={false} variantId="vertical" />
-        <RadioCard radio={b} allRadios={[a, b]} muted={false} variantId="vertical" />
+        <RadioCard radio={a} allRadios={[a, b]} muted={false} variantId="vertical" onVariantChange={() => {}} />
+        <RadioCard radio={b} allRadios={[a, b]} muted={false} variantId="vertical" onVariantChange={() => {}} />
       </>,
     );
     const [ca, cb] = screen.getAllByRole("option");

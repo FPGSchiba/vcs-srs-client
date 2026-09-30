@@ -11,7 +11,7 @@ function pieces(variant = variantById("vertical")): RadioShellProps {
     lcd: <span data-testid="lcd">118.500</span>,
     talker: <span data-testid="talker">no traffic</span>,
     ptt: <span data-testid="ptt">PTT</span>,
-    chips: <span data-testid="chips">ON</span>,
+    actions: <span data-testid="actions">gear</span>,
   };
 }
 
@@ -31,15 +31,11 @@ describe("every variant renders through a shell", () => {
     }
   });
 
-  it("shows chips only where the descriptor asks for them", () => {
+  it("renders the actions slot on every variant, unconditionally", () => {
     for (const v of VARIANTS) {
       const Shell = SHELLS[v.orientation];
       const { unmount } = render(<Shell {...pieces(v)} />);
-      if (v.shows.chips === "none") {
-        expect(screen.queryByTestId("chips"), `${v.id} should hide chips`).toBeNull();
-      } else {
-        expect(screen.getByTestId("chips"), `${v.id} should show chips`).toBeInTheDocument();
-      }
+      expect(screen.getByTestId("actions"), `${v.id} should show actions`).toBeInTheDocument();
       unmount();
     }
   });
@@ -165,26 +161,15 @@ describe("a synthetic fifth variant", () => {
     expect(order("ptt", "talker")).toBe(true);
   });
 
-  it("takes the compact row path from density alone and still renders its chips", () => {
+  it("takes the compact row path from density alone and still renders its actions", () => {
     const Row = SHELLS.row;
     const v = { ...variantById("horizontal"), density: "compact" as const };
-    expect(v.shows.chips).toBe("enabled-only");
     const { unmount } = render(<Row {...pieces(v)} />);
-    expect(screen.getByTestId("chips")).toBeInTheDocument();
+    expect(screen.getByTestId("actions")).toBeInTheDocument();
     // Compact row: the LCD leads, ahead of the header (comfortable puts it below).
     expect(order("lcd", "rid")).toBe(true);
     unmount();
     render(<Row {...pieces(variantById("horizontal"))} />);
     expect(order("rid", "lcd")).toBe(true);
-  });
-
-  it("hides chips in a comfortable row that asks for none", () => {
-    const Row = SHELLS.row;
-    const v = {
-      ...variantById("horizontal"),
-      shows: { ...variantById("horizontal").shows, chips: "none" as const },
-    };
-    render(<Row {...pieces(v)} />);
-    expect(screen.queryByTestId("chips")).toBeNull();
   });
 });

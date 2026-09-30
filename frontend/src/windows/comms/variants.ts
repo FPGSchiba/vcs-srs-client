@@ -27,7 +27,7 @@ export interface RadioVariant {
   orientation: "column" | "row";
   /**
    * The layout-density decision shells branch on. Deliberately independent of
-   * `lcdPx` and `shows.chips`: those size and filter the pieces, this picks
+   * `lcdPx`: that sizes the pieces, this picks
    * the arrangement, so a new size never forces a shell edit.
    */
   density: "comfortable" | "compact";
@@ -36,8 +36,6 @@ export interface RadioVariant {
   /** "fill" means the PTT spans the card's content width. */
   ptt: { w: number | "fill"; h: number };
   shows: {
-    /** "full" = ON + INTERCOM, "enabled-only" = ON, "none" = frame carries it. */
-    chips: "full" | "enabled-only" | "none";
     /** The "MHZ" suffix after the digits. */
     unit: boolean;
     /** The border-top above the status row. */
@@ -59,7 +57,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "comfortable",
     lcdPx: 30,
     ptt: { w: 96, h: 28 },
-    shows: { chips: "full", unit: true, statusDivider: true, pttLabel: true },
+    shows: { unit: true, statusDivider: true, pttLabel: true },
   },
   {
     id: "horizontal",
@@ -70,7 +68,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "comfortable",
     lcdPx: 22,
     ptt: { w: 64, h: 64 },
-    shows: { chips: "enabled-only", unit: true, statusDivider: false, pttLabel: false },
+    shows: { unit: true, statusDivider: false, pttLabel: false },
   },
   {
     id: "narrow-h",
@@ -81,7 +79,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "compact",
     lcdPx: 21,
     ptt: { w: 32, h: 30 },
-    shows: { chips: "none", unit: false, statusDivider: false, pttLabel: false },
+    shows: { unit: false, statusDivider: false, pttLabel: false },
   },
   {
     id: "narrow-v",
@@ -92,7 +90,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "compact",
     lcdPx: 18,
     ptt: { w: "fill", h: 26 },
-    shows: { chips: "none", unit: false, statusDivider: false, pttLabel: true },
+    shows: { unit: false, statusDivider: false, pttLabel: true },
   },
 ];
 

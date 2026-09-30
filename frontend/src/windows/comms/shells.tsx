@@ -17,7 +17,7 @@ export interface RadioShellProps {
   lcd: ReactNode;
   talker: ReactNode;
   ptt: ReactNode;
-  chips: ReactNode;
+  actions: ReactNode;
 }
 
 /**

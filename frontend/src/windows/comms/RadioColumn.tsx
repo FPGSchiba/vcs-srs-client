@@ -9,7 +9,7 @@ import type { RadioShellProps } from "./shells";
  * leftover space collecting in a single gap above a pinned status row. See
  * design/vcs/radio-variants.md §3.
  */
-export function RadioColumn({ variant, rid, name, lcd, talker, ptt, chips }: RadioShellProps) {
+export function RadioColumn({ variant, rid, name, lcd, talker, ptt, actions }: RadioShellProps) {
   const narrow = variant.density === "compact";
   const gap = narrow ? 7 : 9;
   const pad = narrow ? "10px" : "14px 12px 12px";
@@ -51,7 +51,7 @@ export function RadioColumn({ variant, rid, name, lcd, talker, ptt, chips }: Rad
         <span data-testid="shell-name-slot" style={{ minWidth: 0, overflow: "hidden", flex: 1 }}>
           {name}
         </span>
-        {variant.shows.chips !== "none" && chips}
+        {actions}
       </div>
 
       <div style={{ display: "flex", justifyContent: "center", minWidth: 0 }}>{lcd}</div>

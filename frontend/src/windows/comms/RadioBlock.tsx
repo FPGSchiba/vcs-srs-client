@@ -157,7 +157,13 @@ export function RadioBlock({
         boxSizing: "border-box",
       }}
     >
-      <RadioCard radio={radio} allRadios={allRadios} muted={muted} variantId={variant.id} />
+      <RadioCard
+        radio={radio}
+        allRadios={allRadios}
+        muted={muted}
+        variantId={variant.id}
+        onVariantChange={(id) => onResize(radio.id, id)}
+      />
       {preview && (
         <span
           data-testid="resize-preview"

@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { api, type RadioDTO } from "../../shared/api/client";
 import { useRadios } from "../../shared/store/radios";
 import { LcdFreq } from "../../shared/components/LcdFreq";
-import { Toggle } from "../../shared/components/Toggle";
 import { khzToMhz, mhzToKhz } from "../../shared/freq";
 import { variantById } from "./variants";
 import { SHELLS } from "./shells";
 import { RadioFrame } from "./RadioFrame";
 import { TalkerLine } from "./TalkerLine";
 import { PttIndicator } from "./PttIndicator";
+import { RadioSettings } from "./RadioSettings";
 
 interface Props {
   radio: RadioDTO;
@@ -16,6 +16,8 @@ interface Props {
   muted: boolean;
   /** The stored variant id. An unknown one resolves to the default. */
   variantId: string;
+  /** The drawer size control; the parent owns where the choice goes. */
+  onVariantChange: (variantId: string) => void;
 }
 
 /**
@@ -39,7 +41,7 @@ interface Props {
  * The frequency crosses one boundary here and nowhere else: the DTO carries an
  * MHz float, the LCD works in canonical integer kHz.
  */
-export function RadioCard({ radio, allRadios, muted, variantId }: Props) {
+export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange }: Props) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(radio.name);
   const selectedRadioId = useRadios((s) => s.selectedRadioId);
@@ -181,21 +183,13 @@ export function RadioCard({ radio, allRadios, muted, variantId }: Props) {
             showLabel={variant.shows.pttLabel}
           />
         }
-        chips={
-          <span className="row acenter gap-2" onClick={stop} style={{ flexShrink: 0 }}>
-            <Toggle
-              on={radio.enabled}
-              aria-label="enabled"
-              onChange={() => commit({ ...radio, enabled: !radio.enabled })}
-            />
-            {variant.shows.chips === "full" && (
-              <Toggle
-                on={radio.is_intercom}
-                aria-label="intercom"
-                onChange={() => commit({ ...radio, is_intercom: !radio.is_intercom })}
-              />
-            )}
-          </span>
+        actions={
+          <RadioSettings
+            radio={radio}
+            variantId={variant.id}
+            onCommit={commit}
+            onVariantChange={onVariantChange}
+          />
         }
       />
     </RadioFrame>

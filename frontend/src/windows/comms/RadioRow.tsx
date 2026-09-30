@@ -6,9 +6,8 @@ import type { RadioShellProps } from "./shells";
  * LCD anchors the left, two text lines take the middle and the PTT anchors the
  * right (design/vcs/radio-variants.md §2).
  */
-export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioShellProps) {
+export function RadioRow({ variant, rid, name, lcd, talker, ptt, actions }: RadioShellProps) {
   const narrow = variant.density === "compact";
-  const showChips = variant.shows.chips !== "none";
 
   // statusDivider is honoured in BOTH branches (as RadioColumn does), so
   // whether a row variant draws one is the descriptor's call, not a shell edit.
@@ -52,7 +51,7 @@ export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioS
             <span data-testid="shell-name-slot" style={{ minWidth: 0, overflow: "hidden", flex: 1 }}>
               {name}
             </span>
-            {showChips && chips}
+            {actions}
           </div>
           {status}
         </div>
@@ -85,7 +84,7 @@ export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioS
           <span data-testid="shell-name-slot" style={{ minWidth: 0, overflow: "hidden", flex: 1 }}>
             {name}
           </span>
-          {showChips && chips}
+          {actions}
         </div>
         {/* Left-aligned, not centred: the column's left edge is the card's
             reading line. */}

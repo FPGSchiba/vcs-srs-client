@@ -19,7 +19,7 @@ const px = (s: string | undefined) => Number.parseFloat(s ?? "0") || 0;
 /** LCD box height by digit size (measured): digits + padding + border + inline strut. */
 const LCD_MEASURED: Record<number, number> = { 30: 44.19, 22: 37.19, 21: 36.19, 18: 34.19 };
 const lcdHeight = (digitPx: number) => LCD_MEASURED[digitPx] ?? digitPx + 16.2; // conservative for a new size
-const headerHeight = (v: RadioVariant) => (v.shows.chips === "none" ? 16.8 : 18); // 18 = the toggle
+const headerHeight = () => 16.8; // the gear is 16px, so text sets the header
 const STATUS_TEXT = 15.39;
 const statusHeight = (v: RadioVariant) => STATUS_TEXT + (v.shows.statusDivider ? 7 : 0); // 6 pad + 1 border
 
@@ -31,7 +31,7 @@ function pieces(variant: RadioVariant): RadioShellProps {
     lcd: <span data-testid="lcd" />,
     talker: <span />,
     ptt: <span data-testid="ptt" />,
-    chips: <span />,
+    actions: <span />,
   };
 }
 
@@ -42,7 +42,7 @@ function requiredHeight(v: RadioVariant): number {
   const outer = screen.getByTestId("shell-outer");
   const gap = px(outer.style.gap);
   const lcd = lcdHeight(v.lcdPx);
-  const header = headerHeight(v);
+  const header = headerHeight();
   const status = statusHeight(v);
   let content: number;
   if (v.orientation === "column") {
