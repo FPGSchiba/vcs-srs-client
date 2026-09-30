@@ -56,13 +56,20 @@ func (r *Registry) scheduleBounds(id string, h WindowHandle) {
 // settleBounds records the window's current bounds and persists windows.json
 // ONCE per drag. It deliberately does not go through SetGeometry, which
 // pushes the bounds back into the window and would echo another resize event.
+//
+// h.Bounds() is read BEFORE r.mu is taken. On Wails it is an InvokeSync that
+// blocks until the main thread services it, while every resize event runs
+// scheduleBounds (which needs r.mu) on that same main thread through a
+// 5-slot event queue: holding r.mu across the call lets a continuing drag
+// fill the queue, stall the main thread, and deadlock the UI. The open[id]==h
+// re-check after locking keeps a handle closed or replaced in between ignored.
 func (r *Registry) settleBounds(id string, h WindowHandle) {
+	g := h.Bounds()
 	r.mu.Lock()
 	if r.open[id] != h { // closed or replaced since the event
 		r.mu.Unlock()
 		return
 	}
-	g := h.Bounds()
 	r.geom[id] = g
 	_ = windowstate.Save(r.path, r.geom)
 	obs := r.observer
@@ -115,9 +122,16 @@ func (r *Registry) Close(id string) {
 		t.Stop()
 		delete(r.timers, id)
 	}
-	r.geom[id] = h.Bounds()
-	h.Close()
+	// Unregister first, so a settle that fires meanwhile sees open[id] != h
+	// and leaves geometry alone. Bounds and Close are window-system calls
+	// that can block on the main thread (see settleBounds), so they run with
+	// r.mu released.
 	delete(r.open, id)
+	r.mu.Unlock()
+	g := h.Bounds()
+	h.Close()
+	r.mu.Lock()
+	r.geom[id] = g
 	_ = windowstate.Save(r.path, r.geom)
 	r.mu.Unlock()
 	r.broadcast()
