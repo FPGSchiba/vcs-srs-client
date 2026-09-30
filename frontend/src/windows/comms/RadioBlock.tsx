@@ -1,23 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, KeyboardEvent, PointerEvent } from "react";
 import type { RadioDTO } from "../../shared/api/client";
-import { clampBlock } from "../../shared/layout";
+import { VARIANTS, nearestVariant, variantById } from "./variants";
 import { RadioCard } from "./RadioCard";
 
 interface Props {
   radio: RadioDTO;
   allRadios: RadioDTO[];
   muted: boolean;
-  width: number;
-  height: number;
+  variantId: string;
   index: number;
-  onResize: (radioId: number, w: number, h: number) => void;
+  onResize: (radioId: number, variantId: string) => void;
   onReorder: (from: number, to: number) => void;
 }
 
-/** Keyboard nudge for the resize handle, in px per arrow press. */
-const KEY_STEP = 16;
 const DRAG_MIME = "text/plain";
+
+/** Variants smallest-first, so an arrow key means "one size up/down". */
+const BY_AREA = [...VARIANTS].sort((a, b) => a.w * a.h - b.w * b.h || a.id.localeCompare(b.id));
 
 interface DragStart {
   x: number;
@@ -27,53 +27,58 @@ interface DragStart {
 }
 
 /**
- * RadioBlock wraps a RadioCard in a block of explicit pixel size with a
- * bottom-right resize handle. The size is fully controlled: this component
- * never stores it, it reports `onResize(radioId, w, h)` and the parent (which
- * owns the layout and debounces persistence) feeds the new size back in.
+ * RadioBlock wraps a RadioCard and resizes it by SNAPPING to a variant.
  *
- * Resize drags attach `pointermove`/`pointerup` to `window` for exactly as long
- * as a drag is active (effect keyed on the drag origin). The cleanup only
- * removes the two listeners this effect added, so running it twice -- StrictMode's
- * simulated unmount, then the real one -- is harmless and leaves no shared
- * state torn down. The handle is a span with pointer handlers, so it carries
- * role="button", tabIndex and arrow-key nudging (typescript:S1082).
+ * The drag reports nothing while the pointer is down: it previews locally and
+ * commits exactly one variant on pointerup. That is what makes it snappy — no
+ * IPC round trip per pointermove frame, and the card never renders at an
+ * in-between size, because there is no such size.
  *
- * Reordering uses HTML5 drag-and-drop on the block body. The drag payload is
- * the source index; `onReorder(from, to)` fires on the target block. There is
+ * Window listeners are attached for exactly as long as a drag is active
+ * (effect keyed on the drag origin) and the cleanup removes only the two this
+ * effect added, so StrictMode's simulated unmount followed by the real one is
+ * harmless.
+ *
+ * The handle sits on the card's own bottom-right corner, inside the block —
+ * the block IS the card's box now, so there is no gap for it to float in.
+ *
+ * Reordering uses HTML5 drag-and-drop on the block body; the payload is the
+ * source index and `onReorder(from, to)` fires on the target. There is
  * deliberately no keyboard path: RESET restores the stored order.
  */
 export function RadioBlock({
   radio,
   allRadios,
   muted,
-  width,
-  height,
+  variantId,
   index,
   onResize,
   onReorder,
 }: Props) {
   const [drag, setDrag] = useState<DragStart | null>(null);
+  const [previewId, setPreviewId] = useState<string | null>(null);
 
-  // Latest props for the window listeners, so they are attached once per drag
-  // rather than re-attached on every reported size.
-  const latest = useRef({ radioId: radio.id, onResize });
-  latest.current = { radioId: radio.id, onResize };
-  // The last size reported during this drag, so pointerup can commit it.
-  const lastSize = useRef<{ w: number; h: number } | null>(null);
+  const variant = variantById(variantId);
+
+  // Latest values for the window listeners, so they attach once per drag.
+  const latest = useRef({ radioId: radio.id, from: variant.id, onResize });
+  latest.current = { radioId: radio.id, from: variant.id, onResize };
+  const landed = useRef<string | null>(null);
 
   useEffect(() => {
     if (!drag) return;
     const move = (e: globalThis.PointerEvent) => {
-      const { w, h } = clampBlock(drag.w + (e.clientX - drag.x), drag.h + (e.clientY - drag.y));
-      lastSize.current = { w, h };
-      latest.current.onResize(latest.current.radioId, w, h);
+      const v = nearestVariant(drag.w + (e.clientX - drag.x), drag.h + (e.clientY - drag.y));
+      landed.current = v.id;
+      setPreviewId(v.id);
     };
     const up = () => {
-      const last = lastSize.current;
-      if (last) latest.current.onResize(latest.current.radioId, last.w, last.h);
-      lastSize.current = null;
+      const to = landed.current;
+      landed.current = null;
+      setPreviewId(null);
       setDrag(null);
+      // A drag that ends on the variant it started from is not a change.
+      if (to && to !== latest.current.from) latest.current.onResize(latest.current.radioId, to);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -89,34 +94,21 @@ export function RadioBlock({
     try {
       e.currentTarget.setPointerCapture?.(e.pointerId);
     } catch {
-      /* capture is a nicety; window listeners still deliver the drag */
+      /* capture is a nicety; the window listeners still deliver the drag */
     }
-    lastSize.current = null;
-    setDrag({ x: e.clientX, y: e.clientY, w: width, h: height });
+    landed.current = null;
+    setDrag({ x: e.clientX, y: e.clientY, w: variant.w, h: variant.h });
   }
 
   function nudge(e: KeyboardEvent<HTMLSpanElement>) {
-    let dw = 0;
-    let dh = 0;
-    switch (e.key) {
-      case "ArrowRight":
-        dw = KEY_STEP;
-        break;
-      case "ArrowLeft":
-        dw = -KEY_STEP;
-        break;
-      case "ArrowDown":
-        dh = KEY_STEP;
-        break;
-      case "ArrowUp":
-        dh = -KEY_STEP;
-        break;
-      default:
-        return;
-    }
+    let step = 0;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") step = 1;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") step = -1;
+    else return;
     e.preventDefault();
-    const { w, h } = clampBlock(width + dw, height + dh);
-    onResize(radio.id, w, h);
+    const i = BY_AREA.findIndex((v) => v.id === variant.id);
+    const next = BY_AREA[i + step];
+    if (next) onResize(radio.id, next.id); // the ends do not wrap
   }
 
   function onDragStart(e: DragEvent<HTMLDivElement>) {
@@ -130,11 +122,6 @@ export function RadioBlock({
     e.dataTransfer.effectAllowed = "move";
   }
 
-  function onDragOver(e: DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-  }
-
   function onDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
     const from = Number.parseInt(e.dataTransfer.getData(DRAG_MIME), 10);
@@ -142,40 +129,66 @@ export function RadioBlock({
     onReorder(from, index);
   }
 
+  const preview = previewId ? variantById(previewId) : null;
+
   return (
     <div
+      data-testid="radio-block"
       draggable
       onDragStart={onDragStart}
-      onDragOver={onDragOver}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }}
       onDrop={onDrop}
       style={{
         position: "relative",
-        width,
-        height,
+        width: variant.w,
+        height: variant.h,
         flexShrink: 0,
         boxSizing: "border-box",
       }}
     >
-      {/* RadioCard keeps its natural height; a block shorter than the card
-          scrolls rather than clipping the controls out of reach. */}
-      <div style={{ width: "100%", height: "100%", overflow: "auto" }}>
-        <RadioCard radio={radio} allRadios={allRadios} muted={muted} />
-      </div>
+      <RadioCard radio={radio} allRadios={allRadios} muted={muted} variantId={variant.id} />
+      {preview && (
+        <span
+          data-testid="resize-preview"
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width: preview.w,
+            height: preview.h,
+            pointerEvents: "none",
+            border: "1px dashed var(--ac-primary)",
+            background: "color-mix(in srgb, var(--ac-primary) 8%, transparent)",
+            color: "var(--ac-primary)",
+            fontSize: 10,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            padding: 4,
+            zIndex: 2,
+          }}
+        >
+          {preview.label}
+        </span>
+      )}
       <span
         role="button"
         tabIndex={0}
         aria-label="Resize radio block"
-        title="Drag to resize (arrow keys nudge)"
+        title="Drag to snap to a size (arrow keys step through sizes)"
         onPointerDown={startResize}
         onKeyDown={nudge}
         style={{
           position: "absolute",
           right: 0,
           bottom: 0,
-          width: 16,
-          height: 16,
+          width: 14,
+          height: 14,
           cursor: "nwse-resize",
           touchAction: "none",
+          zIndex: 3,
           borderRight: "2px solid var(--ac-primary)",
           borderBottom: "2px solid var(--ac-primary)",
         }}

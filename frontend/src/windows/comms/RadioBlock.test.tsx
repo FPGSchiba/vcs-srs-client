@@ -2,21 +2,28 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { RadioBlock } from "./RadioBlock";
-import type { RadioDTO } from "../../shared/api/client";
 
-const radio: RadioDTO = {
-  id: 1,
-  name: "Fleet",
-  frequency: 118.5,
-  enabled: true,
-  is_intercom: false,
-};
+const radio = { id: 1, name: "Fleet Common", frequency: 118.5, enabled: true, is_intercom: false };
 
-function block(over: Partial<React.ComponentProps<typeof RadioBlock>> = {}) {
-  return (
-    <RadioBlock radio={radio} allRadios={[radio]} muted={false}
-      width={400} height={150} index={0} onResize={vi.fn()} onReorder={vi.fn()} {...over} />
+function renderBlock(p: {
+  variantId: string;
+  onResize: (id: number, v: string) => void;
+  onReorder?: (from: number, to: number) => void;
+  index?: number;
+  strict?: boolean;
+}) {
+  const el = (
+    <RadioBlock
+      radio={radio as never}
+      allRadios={[radio] as never}
+      muted={false}
+      variantId={p.variantId}
+      index={p.index ?? 0}
+      onResize={p.onResize}
+      onReorder={p.onReorder ?? vi.fn()}
+    />
   );
+  return render(p.strict ? <StrictMode>{el}</StrictMode> : el);
 }
 
 function fakeDataTransfer(store: Record<string, string>) {
@@ -29,124 +36,132 @@ function fakeDataTransfer(store: Record<string, string>) {
   };
 }
 
-describe("RadioBlock", () => {
-  it("renders at the size it is given", () => {
-    const { container } = render(block());
-    const el = container.firstElementChild as HTMLElement;
-    expect(el.style.width).toBe("400px");
-    expect(el.style.height).toBe("150px");
+describe("snap resizing", () => {
+  it("reports nothing while the pointer is still down", () => {
+    const onResize = vi.fn();
+    renderBlock({ variantId: "vertical", onResize });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: -60 });
+    expect(onResize).not.toHaveBeenCalled();
   });
 
-  it("reports a resize on pointer drag", () => {
-    const onResize = vi.fn();
-    render(block({ onResize }));
+  it("previews the variant the current drag would land on", () => {
+    renderBlock({ variantId: "vertical", onResize: vi.fn() });
     const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
-    fireEvent.pointerMove(window, { clientX: 460, clientY: 190, pointerId: 1 });
-    fireEvent.pointerUp(window, { pointerId: 1 });
-    expect(onResize).toHaveBeenCalledWith(1, 460, 190);
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0 });
+    // 280x166 dragged by (+80, -56) -> ~360x110 -> horizontal.
+    fireEvent.pointerMove(window, { clientX: 80, clientY: -56 });
+    expect(screen.getByTestId("resize-preview")).toHaveTextContent("Horizontal");
   });
 
-  it("clamps a resize to the minimum block size", () => {
+  it("commits exactly one variant on pointerup", () => {
     const onResize = vi.fn();
-    render(block({ onResize }));
+    renderBlock({ variantId: "vertical", onResize });
     const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
-    fireEvent.pointerMove(window, { clientX: 10, clientY: 10, pointerId: 1 });
-    fireEvent.pointerUp(window, { pointerId: 1 });
-    const [, w, h] = onResize.mock.calls.at(-1)!;
-    expect(w).toBeGreaterThanOrEqual(240);
-    expect(h).toBeGreaterThanOrEqual(96);
-  });
-
-  it("clamps width and height independently, to exactly the minimum", () => {
-    const onResize = vi.fn();
-    render(block({ onResize }));
-    const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
-    // Only width collapses: height must follow the pointer untouched.
-    fireEvent.pointerMove(window, { clientX: 0, clientY: 200, pointerId: 1 });
-    expect(onResize).toHaveBeenLastCalledWith(1, 240, 200);
-    // Only height collapses.
-    fireEvent.pointerMove(window, { clientX: 500, clientY: 0, pointerId: 1 });
-    expect(onResize).toHaveBeenLastCalledWith(1, 500, 96);
-    fireEvent.pointerUp(window, { pointerId: 1 });
-  });
-
-  it("commits the final size again on pointer up", () => {
-    const onResize = vi.fn();
-    render(block({ onResize }));
-    const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
-    fireEvent.pointerMove(window, { clientX: 460, clientY: 190, pointerId: 1 });
-    onResize.mockClear();
-    fireEvent.pointerUp(window, { pointerId: 1 });
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: -56 });
+    fireEvent.pointerMove(window, { clientX: 81, clientY: -56 });
+    fireEvent.pointerUp(window);
     expect(onResize).toHaveBeenCalledTimes(1);
-    expect(onResize).toHaveBeenCalledWith(1, 460, 190);
+    expect(onResize).toHaveBeenCalledWith(1, "horizontal");
+  });
+
+  it("clears the preview when the drag ends", () => {
+    renderBlock({ variantId: "vertical", onResize: vi.fn() });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: -56 });
+    fireEvent.pointerUp(window);
+    expect(screen.queryByTestId("resize-preview")).toBeNull();
+  });
+
+  it("reports nothing when the drag lands back on the current variant", () => {
+    const onResize = vi.fn();
+    renderBlock({ variantId: "vertical", onResize });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0 });
+    fireEvent.pointerMove(window, { clientX: 3, clientY: 2 });
+    fireEvent.pointerUp(window);
+    expect(onResize).not.toHaveBeenCalled();
+  });
+
+  it("sits the handle on the card's own corner, inside the block", () => {
+    renderBlock({ variantId: "vertical", onResize: vi.fn() });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    expect(handle).toHaveStyle({ position: "absolute", right: "0px", bottom: "0px" });
+    // Inside the block's bounds, which are the card's bounds exactly.
+    expect(screen.getByTestId("radio-block")).toHaveStyle({ width: "280px", height: "166px" });
   });
 
   it("stops resizing after pointer up", () => {
     const onResize = vi.fn();
-    render(block({ onResize }));
+    renderBlock({ variantId: "vertical", onResize });
     const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
-    fireEvent.pointerMove(window, { clientX: 450, clientY: 150, pointerId: 1 });
-    fireEvent.pointerUp(window, { pointerId: 1 });
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: -56 });
+    fireEvent.pointerUp(window);
     onResize.mockClear();
-    fireEvent.pointerMove(window, { clientX: 600, clientY: 300, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(window);
     expect(onResize).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("resize-preview")).toBeNull();
   });
 
   it("does not resize on pointer movement that never started on the handle", () => {
     const onResize = vi.fn();
-    render(block({ onResize }));
-    fireEvent.pointerMove(window, { clientX: 600, clientY: 300, pointerId: 1 });
+    renderBlock({ variantId: "vertical", onResize });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: -56 });
+    fireEvent.pointerUp(window);
     expect(onResize).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("resize-preview")).toBeNull();
   });
+});
 
-  it("resizes with the keyboard", () => {
-    // S1082: the handle is a non-button element with a pointer handler, so
-    // it must also be operable without a pointer.
+describe("keyboard resizing", () => {
+  it("steps to the next larger variant and the next smaller", () => {
     const onResize = vi.fn();
-    render(block({ onResize }));
+    renderBlock({ variantId: "narrow-h", onResize });
     const handle = screen.getByRole("button", { name: /resize/i });
     expect(handle).toHaveAttribute("tabindex", "0");
+    // Variants ordered by area: narrow-v (18600), narrow-h (20400),
+    // horizontal (39600), vertical (46480).
     fireEvent.keyDown(handle, { key: "ArrowRight" });
-    expect(onResize).toHaveBeenLastCalledWith(1, 416, 150);
-    fireEvent.keyDown(handle, { key: "ArrowDown" });
-    expect(onResize).toHaveBeenLastCalledWith(1, 400, 166);
+    expect(onResize).toHaveBeenLastCalledWith(1, "horizontal");
     fireEvent.keyDown(handle, { key: "ArrowLeft" });
-    expect(onResize).toHaveBeenLastCalledWith(1, 384, 150);
-    fireEvent.keyDown(handle, { key: "ArrowUp" });
-    expect(onResize).toHaveBeenLastCalledWith(1, 400, 134);
+    expect(onResize).toHaveBeenLastCalledWith(1, "narrow-v");
   });
 
-  it("clamps a keyboard shrink to the minimum and ignores other keys", () => {
+  it("stops at the ends rather than wrapping", () => {
     const onResize = vi.fn();
-    render(block({ onResize, width: 240, height: 96 }));
-    const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.keyDown(handle, { key: "ArrowLeft" });
-    expect(onResize).toHaveBeenLastCalledWith(1, 240, 96);
-    onResize.mockClear();
-    fireEvent.keyDown(handle, { key: "a" });
+    renderBlock({ variantId: "narrow-v", onResize });
+    fireEvent.keyDown(screen.getByRole("button", { name: /resize/i }), { key: "ArrowLeft" });
     expect(onResize).not.toHaveBeenCalled();
   });
 
+  it("ignores other keys", () => {
+    const onResize = vi.fn();
+    renderBlock({ variantId: "narrow-h", onResize });
+    fireEvent.keyDown(screen.getByRole("button", { name: /resize/i }), { key: "a" });
+    expect(onResize).not.toHaveBeenCalled();
+  });
+});
+
+describe("reordering and lifecycle", () => {
   it("reorders when another block is dropped on it", () => {
     const onReorder = vi.fn();
-    const { container } = render(block({ onReorder, index: 2 }));
-    const el = container.firstElementChild as HTMLElement;
+    renderBlock({ variantId: "vertical", onResize: vi.fn(), onReorder, index: 2 });
+    const el = screen.getByTestId("radio-block");
     expect(el).toHaveAttribute("draggable", "true");
     // Block 0 (another RadioBlock) published its index on dragstart.
-    const dataTransfer = fakeDataTransfer({ "text/plain": "0" });
-    fireEvent.drop(el, { dataTransfer });
+    fireEvent.drop(el, { dataTransfer: fakeDataTransfer({ "text/plain": "0" }) });
     expect(onReorder).toHaveBeenCalledWith(0, 2);
   });
 
   it("publishes its own index when a drag starts, and ignores a drop on itself", () => {
     const onReorder = vi.fn();
-    const { container } = render(block({ onReorder, index: 3 }));
-    const el = container.firstElementChild as HTMLElement;
+    renderBlock({ variantId: "vertical", onResize: vi.fn(), onReorder, index: 3 });
+    const el = screen.getByTestId("radio-block");
     const store: Record<string, string> = {};
     const dataTransfer = fakeDataTransfer(store);
     fireEvent.dragStart(el, { dataTransfer });
@@ -156,12 +171,13 @@ describe("RadioBlock", () => {
   });
 
   it("does not start a block drag from the resize handle", () => {
-    const { container } = render(block());
+    renderBlock({ variantId: "vertical", onResize: vi.fn() });
     const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
-    const el = container.firstElementChild as HTMLElement;
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0, pointerId: 1 });
     const setData = vi.fn();
-    const notCancelled = fireEvent.dragStart(el, { dataTransfer: { setData } });
+    const notCancelled = fireEvent.dragStart(screen.getByTestId("radio-block"), {
+      dataTransfer: { setData },
+    });
     expect(notCancelled).toBe(false); // preventDefault was called
     expect(setData).not.toHaveBeenCalled();
     fireEvent.pointerUp(window, { pointerId: 1 });
@@ -169,9 +185,9 @@ describe("RadioBlock", () => {
 
   it("detaches its window listeners on real unmount", () => {
     const remove = vi.spyOn(window, "removeEventListener");
-    const { unmount } = render(block());
+    const { unmount } = renderBlock({ variantId: "vertical", onResize: vi.fn() });
     const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0, pointerId: 1 });
     remove.mockClear();
     unmount();
     expect(remove).toHaveBeenCalledWith("pointermove", expect.any(Function));
@@ -184,11 +200,12 @@ describe("RadioBlock", () => {
     // cleanup that tore down shared state permanently broke keybind capture
     // for two phases before it was caught.
     const onResize = vi.fn();
-    render(<StrictMode>{block({ onResize })}</StrictMode>);
+    renderBlock({ variantId: "vertical", onResize, strict: true });
     const handle = screen.getByRole("button", { name: /resize/i });
-    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150, pointerId: 1 });
-    fireEvent.pointerMove(window, { clientX: 500, clientY: 200, pointerId: 1 });
+    fireEvent.pointerDown(handle, { clientX: 0, clientY: 0, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 80, clientY: -56, pointerId: 1 });
     fireEvent.pointerUp(window, { pointerId: 1 });
-    expect(onResize).toHaveBeenCalledWith(1, 500, 200);
+    expect(onResize).toHaveBeenCalledTimes(1);
+    expect(onResize).toHaveBeenCalledWith(1, "horizontal");
   });
 });
