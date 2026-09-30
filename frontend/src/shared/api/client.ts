@@ -48,8 +48,7 @@ export interface VoiceStateDTO {
 }
 export interface LayoutBlock {
   radio_id: number;
-  w: number;
-  h: number;
+  variant: string;
 }
 
 export interface LayoutWindow {

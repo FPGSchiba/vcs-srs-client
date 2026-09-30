@@ -1,50 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { clampBlock, GRID_GAP, GRID_PAD, MIN_BLOCK_H, MIN_BLOCK_W, place } from "./layout";
+import { place, GRID_PAD, GRID_GAP } from "./layout";
+import { variantById } from "../windows/comms/variants";
+
+const b = (radio_id: number, variant: string) => ({ radio_id, variant });
 
 describe("place", () => {
-  it("flows blocks left to right with the grid gap", () => {
-    const { rects } = place(
-      [
-        { radio_id: 1, w: 200, h: 100 },
-        { radio_id: 2, w: 200, h: 80 },
-      ],
-      { w: 2 * GRID_PAD + 500, h: 700 },
-    );
-    expect(rects[0]).toEqual({ x: 0, y: 0, w: 200, h: 100 });
-    expect(rects[1]).toEqual({ x: 200 + GRID_GAP, y: 0, w: 200, h: 80 });
+  it("sizes each rect from its variant", () => {
+    const { rects } = place([b(1, "vertical")], { w: 540, h: 720 });
+    const v = variantById("vertical");
+    expect(rects[0]).toMatchObject({ x: 0, y: 0, w: v.w, h: v.h });
   });
 
-  it("wraps to a new row below the tallest block of the previous row", () => {
-    const { rects, h } = place(
-      [
-        { radio_id: 1, w: 300, h: 100 },
-        { radio_id: 2, w: 300, h: 140 },
-        { radio_id: 3, w: 300, h: 90 },
-      ],
-      { w: 2 * GRID_PAD + 620, h: 700 },
-    );
-    expect(rects[2]).toEqual({ x: 0, y: 140 + GRID_GAP, w: 300, h: 90 });
-    expect(h).toBe(140 + GRID_GAP + 90);
+  it("flows left to right with GRID_GAP between", () => {
+    const { rects } = place([b(1, "narrow-v"), b(2, "narrow-v")], { w: 540, h: 720 });
+    const v = variantById("narrow-v");
+    expect(rects[0].x).toBe(0);
+    expect(rects[1].x).toBe(v.w + GRID_GAP);
+    expect(rects[1].y).toBe(0);
   });
 
-  it("wraps exactly when the row plus gap no longer fits", () => {
-    // 300 + gap + 300 == 608 fits a 608 row; one pixel narrower must wrap.
-    const blocks = [
-      { radio_id: 1, w: 300, h: 50 },
-      { radio_id: 2, w: 300, h: 50 },
-    ];
-    expect(place(blocks, { w: 2 * GRID_PAD + 600 + GRID_GAP, h: 0 }).rects[1].y).toBe(0);
-    expect(place(blocks, { w: 2 * GRID_PAD + 600 + GRID_GAP - 1, h: 0 }).rects[1].y).toBe(
-      50 + GRID_GAP,
-    );
+  it("wraps when the next block would overflow the content width", () => {
+    // Inner width at 540 is 540 - 2*12 = 516. Two verticals (280 each) plus the
+    // gap is 568, so the second must wrap.
+    const { rects } = place([b(1, "vertical"), b(2, "vertical")], { w: 540, h: 720 });
+    expect(rects[1].x).toBe(0);
+    expect(rects[1].y).toBe(variantById("vertical").h + GRID_GAP);
   });
-});
 
-describe("clampBlock", () => {
-  it("enforces the minimums independently and passes larger sizes through", () => {
-    expect(clampBlock(10, 500)).toEqual({ w: MIN_BLOCK_W, h: 500 });
-    expect(clampBlock(500, 10)).toEqual({ w: 500, h: MIN_BLOCK_H });
-    expect(MIN_BLOCK_W).toBe(240);
-    expect(MIN_BLOCK_H).toBe(96);
+  it("reports the content width and total height", () => {
+    const out = place([b(1, "vertical")], { w: 540, h: 720 });
+    expect(out.w).toBe(540 - 2 * GRID_PAD);
+    expect(out.h).toBe(variantById("vertical").h);
+  });
+
+  // Review Focus #5.
+  it("handles an empty block list without NaN geometry", () => {
+    const out = place([], { w: 540, h: 720 });
+    expect(out.rects).toEqual([]);
+    expect(Number.isFinite(out.w)).toBe(true);
+    expect(Number.isFinite(out.h)).toBe(true);
+    expect(out.h).toBe(0);
+  });
+
+  it("falls back to the default variant for an unknown id rather than a zero-size rect", () => {
+    const { rects } = place([b(1, "dial-round")], { w: 540, h: 720 });
+    const d = variantById("dial-round"); // resolves to the default
+    expect(rects[0].w).toBe(d.w);
+    expect(rects[0].w).toBeGreaterThan(0);
   });
 });
