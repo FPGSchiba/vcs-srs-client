@@ -648,3 +648,126 @@ func TestDeleteProfileRefusesNonProfileFiles(t *testing.T) {
 		t.Fatalf("file must survive: %v", err)
 	}
 }
+
+func TestSetCommsLayoutWritesNoFile(t *testing.T) {
+	a, cfgPath := newProfileTestApp(t)
+	// Save the config to disk first to ensure the file exists.
+	sb := a.settings
+	sb.mu.Lock()
+	snapshot := *sb.cfg
+	sb.mu.Unlock()
+	if err := config.Save(cfgPath, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := st.ModTime()
+
+	time.Sleep(10 * time.Millisecond)
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 700, H: 900},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+	}); err != nil {
+		t.Fatalf("SetCommsLayout: %v", err)
+	}
+
+	st2, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st2.ModTime().Equal(before) {
+		t.Fatal("a drag must not write config.toml: no disk I/O on a pointer-move path")
+	}
+}
+
+func TestSetCommsLayoutIsVisibleImmediatelyInMemory(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 700, H: 900},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := a.GetCommsLayout()
+	if got.Window.W != 700 || len(got.Blocks) != 1 || got.Blocks[0].W != 400 {
+		t.Fatalf("GetCommsLayout = %+v, want the in-memory value", got)
+	}
+}
+
+func TestSetCommsLayoutDirtiesImmediately(t *testing.T) {
+	// Dirty compares IN-MEMORY config, so it must be correct the instant a
+	// block moves -- regardless of when the bytes land on disk.
+	a, _ := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+	sb := a.settings
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.Radios = []config.Radio{{ID: 1, Name: "r", FrequencyKHz: 118500, Enabled: true}}
+	sb.cfg = &next
+	sb.mu.Unlock()
+	if err := a.SaveProfileAs("X", ""); err != nil {
+		t.Fatal(err)
+	}
+	if a.profileDirty() {
+		t.Fatal("precondition: clean right after save")
+	}
+
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 999, H: 999},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 999, H: 999}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !a.profileDirty() {
+		t.Fatal("a resize must dirty the profile immediately, before any file is written")
+	}
+}
+
+func TestFlushConfigWritesTheLayout(t *testing.T) {
+	a, cfgPath := newProfileTestApp(t)
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 700, H: 900},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.flushConfig(); err != nil {
+		t.Fatalf("flushConfig: %v", err)
+	}
+	back, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.CommsLayout.WindowW != 700 || len(back.CommsLayout.Blocks) != 1 {
+		t.Fatalf("CommsLayout on disk = %+v", back.CommsLayout)
+	}
+}
+
+func TestLayoutFreeRidesOnAnUnrelatedConfigSave(t *testing.T) {
+	// config.Save serialises the WHOLE Config, so any other settings write
+	// carries the layout to disk long before quit. This is what makes the
+	// crash window much narrower than "everything since launch".
+	a, cfgPath := newProfileTestApp(t)
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 701, H: 901},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 401, H: 151}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Any existing settings writer will do; persistSelectedRadio is the
+	// smallest.
+	if err := a.persistSelectedRadio(0); err != nil {
+		t.Fatal(err)
+	}
+	back, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.CommsLayout.WindowW != 701 {
+		t.Fatalf("an unrelated config.Save must carry the pending layout: %+v", back.CommsLayout)
+	}
+}

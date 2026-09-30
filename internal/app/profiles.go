@@ -749,3 +749,83 @@ func (a *App) notifyProfileError(title string, err error) {
 		Body:     err.Error(),
 	})
 }
+
+// GetCommsLayout returns the live Comms arrangement for a window hydrating
+// on mount. Blocks is always non-nil: the frontend types it as an array.
+func (a *App) GetCommsLayout() LayoutDTO {
+	out := LayoutDTO{Blocks: []ProfileBlockDTO{}}
+	sb := a.settings
+	if sb == nil {
+		return out
+	}
+	sb.mu.Lock()
+	l := sb.cfg.CommsLayout
+	sb.mu.Unlock()
+	out.Window = ProfileWindowDTO{W: l.WindowW, H: l.WindowH}
+	for _, b := range l.Blocks {
+		out.Blocks = append(out.Blocks, ProfileBlockDTO{RadioID: b.RadioID, W: b.W, H: b.H})
+	}
+	return out
+}
+
+// SetCommsLayout records a new arrangement IN MEMORY ONLY.
+//
+// It deliberately does NOT call config.Save. This runs from a drag, and a
+// debounced save on a pointer-move path would put disk I/O behind every
+// block the user nudges -- to protect state that is re-created with one
+// more drag. The bytes land at shutdown, via flushConfig from
+// ServiceShutdown.
+//
+// In practice the window is much narrower than "everything since launch":
+// config.Save serialises the WHOLE Config, so persistRadios,
+// persistSelectedRadio and the settings writers all carry the pending
+// layout to disk as a side effect of ordinary use.
+//
+// Dirty state is unaffected by any of this: App.profileDirty compares the
+// IN-MEMORY config, so the dot is correct the instant a block moves.
+func (a *App) SetCommsLayout(l LayoutDTO) error {
+	sb := a.settings
+	if sb == nil {
+		return nil
+	}
+	blocks := make([]config.LayoutBlock, 0, len(l.Blocks))
+	for _, b := range l.Blocks {
+		w, h := b.W, b.H
+		if w < profile.MinBlockW {
+			w = profile.MinBlockW
+		}
+		if h < profile.MinBlockH {
+			h = profile.MinBlockH
+		}
+		blocks = append(blocks, config.LayoutBlock{RadioID: b.RadioID, W: w, H: h})
+	}
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.CommsLayout = config.CommsLayout{WindowW: l.Window.W, WindowH: l.Window.H, Blocks: blocks}
+	sb.cfg = &next
+	sb.mu.Unlock()
+	a.emitProfileState()
+	return nil
+}
+
+// flushConfig persists the in-memory config. Called from ServiceShutdown so
+// a layout that only ever lived in memory reaches disk on quit.
+//
+// Errors are returned for the test's benefit; ServiceShutdown logs and
+// carries on, because there is no window left to notify into and a failed
+// layout write must not block the quit.
+func (a *App) flushConfig() error {
+	sb := a.settings
+	if sb == nil || sb.cfgPath == "" {
+		return nil
+	}
+	sb.writeMu.Lock()
+	defer sb.writeMu.Unlock()
+	sb.mu.Lock()
+	snapshot := *sb.cfg
+	sb.mu.Unlock()
+	if err := config.Save(sb.cfgPath, &snapshot); err != nil {
+		return fmt.Errorf("flush config: %w", err)
+	}
+	return nil
+}

@@ -262,6 +262,14 @@ func (a *App) ServiceShutdown() error {
 	// into the hotkey library and emit a Wails event after teardown. Bounded,
 	// so a poll blocked behind an in-flight keybind write cannot hang quit.
 	a.stopPermissionPoll(shutdownPollStopTimeout)
+	// Persist anything held only in memory -- today that is the Comms
+	// layout, which SetCommsLayout deliberately does not write during a
+	// drag. Logged rather than notified: by this point there is no window
+	// left to show a notification in, and a failed layout write must not
+	// block the quit.
+	if err := a.flushConfig(); err != nil {
+		a.logger.Warn("config flush on shutdown failed", "err", err)
+	}
 	// Then shut the OS key listener down. The stream is process-global and
 	// outlives every rebind (see internal/hotkeys/registrar_gohook.go), so
 	// this is its one closing bracket. It also releases a hotkey still being
