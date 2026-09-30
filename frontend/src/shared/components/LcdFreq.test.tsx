@@ -158,3 +158,39 @@ describe("typed entry still works", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 });
+
+describe("focus stays on the LCD", () => {
+  it("a digit mousedown is default-prevented so it cannot take focus", () => {
+    render(<LcdFreq khz={118_500} onChange={vi.fn()} />);
+    const lcd = screen.getByRole("spinbutton");
+    lcd.focus();
+    const notPrevented = fireEvent.mouseDown(digits()[5]);
+    fireEvent.click(digits()[5]);
+    expect(notPrevented).toBe(false); // preventDefault was called
+    expect(document.activeElement).toBe(lcd);
+  });
+
+  it("click a digit, type, Enter commits the typed value", () => {
+    const onChange = vi.fn();
+    render(<LcdFreq khz={118_500} onChange={onChange} />);
+    const lcd = screen.getByRole("spinbutton");
+    lcd.focus();
+    fireEvent.mouseDown(digits()[5]);
+    fireEvent.click(digits()[5]);
+    for (const k of ["1", "2", "3", "0", "0", "0"]) fireEvent.keyDown(document.activeElement!, { key: k });
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(onChange).toHaveBeenLastCalledWith(123_000);
+  });
+});
+
+describe("whole-LCD wheel fallback (draft only)", () => {
+  it("steps the draft value by 1 kHz and clears the draft", () => {
+    const onChange = vi.fn();
+    render(<LcdFreq khz={118_500} onChange={onChange} />);
+    const lcd = screen.getByRole("spinbutton");
+    for (const k of ["1", "2", "3", "0", "0", "0"]) fireEvent.keyDown(lcd, { key: k });
+    fireEvent.wheel(lcd, { deltaY: -1 });
+    expect(onChange).toHaveBeenCalledWith(123_001);
+    expect(screen.getByRole("group", { name: "frequency" }).textContent).toBe("118.500");
+  });
+});

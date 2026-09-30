@@ -164,6 +164,7 @@ export function LcdFreq({ khz, digitPx, unit, className, onChange }: LcdFreqProp
               className="lcd-digit"
               data-cursor={c.place === place}
               aria-label={`digit ${c.place}`}
+              onMouseDown={(e) => e.preventDefault()} // never steal focus from the LCD
               onWheel={(e) => onDigitWheel(e, c.place as number)}
               onClick={(e) => onDigitClick(e, c.place as number)}
             >
