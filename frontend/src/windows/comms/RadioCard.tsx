@@ -76,8 +76,6 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
       (heldPTT.has("global.ptt") && globalPttTargetId === radio.id));
   const rid = `R${String(radio.id).padStart(2, "0")}`;
 
-  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
-
   return (
     <RadioFrame
       w={variant.w}
@@ -113,7 +111,6 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
               style={{ height: 20, fontSize: 12, padding: "0 6px", width: "100%" }}
               value={name}
               onChange={(e) => setName(e.target.value)}
-              onClick={stop}
               onBlur={() => {
                 setEditing(false);
                 setName(radio.name);
@@ -135,17 +132,14 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
           ) : (
             // A label, not a permanent bordered input: that input is the single
             // largest reason the shipped card read as a settings form.
-            <span
+            <button
+              type="button"
+              data-card-select // a single click still selects the card; see RadioFrame
               title="Double-click (or press Enter / Space / F2) to rename"
-              role="button"
-              tabIndex={0}
-              onDoubleClick={(e) => {
-                stop(e);
-                setEditing(true);
-              }}
+              onDoubleClick={() => setEditing(true)}
               // Double-click has no keyboard equivalent, so Enter / Space / F2
-              // opens the editor too (a role="button" must answer both Enter
-              // and Space). Keys bubbling from elsewhere are ignored.
+              // opens the editor too. preventDefault keeps the native
+              // Enter/Space click from also selecting the card.
               onKeyDown={(e) => {
                 if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter" || e.key === " " || e.key === "F2") {
@@ -158,24 +152,24 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
                 color: disabled ? "var(--tx-4)" : "var(--tx-0)",
                 fontSize: 12,
                 display: "block",
+                width: "100%",
+                textAlign: "left",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
               }}
             >
               {radio.name}
-            </span>
+            </button>
           )
         }
         lcd={
-          <span onClick={stop} onDoubleClick={stop} onKeyDown={stop}>
-            <LcdFreq
-              khz={mhzToKhz(radio.frequency)}
-              digitPx={variant.lcdPx}
-              unit={variant.shows.unit}
-              onChange={(khz) => commit({ ...radio, frequency: khzToMhz(khz) })}
-            />
-          </span>
+          <LcdFreq
+            khz={mhzToKhz(radio.frequency)}
+            digitPx={variant.lcdPx}
+            unit={variant.shows.unit}
+            onChange={(khz) => commit({ ...radio, frequency: khzToMhz(khz) })}
+          />
         }
         talker={<TalkerLine disabled={disabled} self={transmitting} />}
         ptt={

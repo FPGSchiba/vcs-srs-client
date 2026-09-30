@@ -290,10 +290,11 @@ export function CommsApp() {
           // Geometry here is the contract `place()` in shared/layout.ts
           // reproduces for the Profiles preview: wrap, GRID_PAD padding,
           // GRID_GAP gap, rows start at the top, blocks never shrink.
-          <div
-            role="listbox"
+          <ul
             aria-label="Radios"
             style={{
+              listStyle: "none",
+              margin: 0,
               display: "flex",
               flexWrap: "wrap",
               alignContent: "flex-start",
@@ -305,19 +306,20 @@ export function CommsApp() {
             {shown.map((b, i) => {
               const r = entry.radios.find((x) => x.id === b.radio_id)!;
               return (
-                <RadioBlock
-                  key={r.id}
-                  radio={r}
-                  allRadios={entry.radios}
-                  muted={entry.muted}
-                  variantId={b.variant}
-                  index={i}
-                  onResize={resize}
-                  onReorder={reorder}
-                />
+                <li key={r.id} style={{ flexShrink: 0 }}>
+                  <RadioBlock
+                    radio={r}
+                    allRadios={entry.radios}
+                    muted={entry.muted}
+                    variantId={b.variant}
+                    index={i}
+                    onResize={resize}
+                    onReorder={reorder}
+                  />
+                </li>
               );
             })}
-          </div>
+          </ul>
         )}
       </div>
     </div>

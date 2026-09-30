@@ -1,4 +1,4 @@
-import type { KeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 
 export interface RadioState {
   selected: boolean;
@@ -52,10 +52,22 @@ const CORNERS = [
  * design/vcs/radio-variants.md §4.
  *
  * It is the card's selection stop (its controls — name, LCD, settings gear — are separate
- * tab stops) and carries role="option" against the
- * grid's role="listbox". A key bubbled from a child control (the name input,
- * the LCD) is ignored, so typing a space in the name does not re-select.
+ * tab stops). It is a labelled role="group" inside the grid's <ul>/<li> list,
+ * with the selected card marked aria-current — NOT a listbox option: an
+ * option's content must be presentational, and a card holds several focusable
+ * controls, so the listbox/option framing was invalid ARIA (and made the
+ * variant <select>'s native options collide with the cards in queries).
+ *
+ * The frame itself never owns the controls' events: a key bubbled from a child
+ * control is ignored (typing a space in the name does not re-select), and so
+ * is a click that lands on — or inside — an interactive descendant (the LCD,
+ * a digit, a chip, the gear). The one exception is the name label, whose
+ * single click still selects the card; only its double-click renames.
+ * A click bubbling through a React portal (the settings panel) comes from
+ * outside this element's DOM and is ignored too.
  */
+const CONTROLS = "button,input,select,textarea,[role=spinbutton],[role=switch]";
+
 export function RadioFrame({
   w,
   h,
@@ -70,7 +82,7 @@ export function RadioFrame({
 }: Props) {
   const accent = frameAccent({ selected, receiving, transmitting, intercom, disabled });
   // A disabled radio must stay selectable, so selection has to stay visible:
-  // aria-selected is invisible to sighted users, and with two or more disabled
+  // aria-current is invisible to sighted users, and with two or more disabled
   // radios nothing else says which one is selected. Keep the blue, muted into
   // the background. The brackets still drain to --bd-1 via frameAccent.
   // (Clicking a disabled radio only selects it; the ON toggle re-enables it.)
@@ -90,19 +102,27 @@ export function RadioFrame({
     }
   }
 
+  function onClick(e: MouseEvent<HTMLDivElement>) {
+    const target = e.target as Element;
+    if (!e.currentTarget.contains(target)) return; // portalled panel
+    const control = target.closest(CONTROLS);
+    if (control && control !== e.currentTarget && !control.hasAttribute("data-card-select")) return;
+    onSelect();
+  }
+
   return (
     <div
       className="radio"
-      role="option"
+      role="group"
       aria-label={label}
-      aria-selected={selected}
+      aria-current={selected ? "true" : undefined}
       tabIndex={0}
       data-selected={selected}
       data-rx={receiving}
       data-tx={transmitting}
       data-intercom={intercom}
       data-disabled={disabled}
-      onClick={onSelect}
+      onClick={onClick}
       onKeyDown={onKeyDown}
       style={{
         position: "relative",

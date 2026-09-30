@@ -190,6 +190,14 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
       </button>
       {open &&
         createPortal(
+          // Deliberately a <div role="dialog">, not a native <dialog> (Sonar
+          // S6819 knowingly left): this is a non-modal popover positioned
+          // from the gear's rect. A native <dialog> is display:none until
+          // open, ships UA positioning/margin/border that fight the measured
+          // `position: fixed` placement (it is rendered hidden first, then
+          // placed), and show() would move it to the top layer, changing how
+          // the outside-pointerdown, scroll-close and focus-return behaviour
+          // (all pinned by tests) is reached. Not worth the risk.
           <div
             ref={panelRef}
             role="dialog"

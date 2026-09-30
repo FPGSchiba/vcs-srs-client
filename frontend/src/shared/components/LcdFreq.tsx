@@ -149,9 +149,8 @@ export function LcdFreq({ khz, digitPx, unit, className, onChange }: LcdFreqProp
       onBlur={() => setDraft(null)}
       onWheel={onLcdWheel}
     >
-      <span
+      <fieldset
         className="lcd-digits"
-        role="group"
         aria-label="frequency"
         style={digitPx ? { fontSize: digitPx, lineHeight: 1 } : undefined}
       >
@@ -177,7 +176,7 @@ export function LcdFreq({ khz, digitPx, unit, className, onChange }: LcdFreqProp
           ),
         )}
         {unit && <span className="lcd-unit">MHZ</span>}
-      </span>
+      </fieldset>
     </div>
   );
 }

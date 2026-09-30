@@ -1,4 +1,5 @@
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { Profiles } from "./Profiles";
 import { useProfile } from "../../../shared/store/profile";
@@ -184,27 +185,34 @@ describe("Profiles screen", () => {
     expect(screen.getByText(/no profiles/i)).toBeInTheDocument();
   });
 
-  it("gives the clickable row keyboard affordances", () => {
-    // SonarCloud typescript:S1082 -- a click handler on a non-button
-    // element needs role, tabIndex and Enter/Space in the same commit.
+  it("gives each row a real select button carrying the selected state", () => {
+    // The <tr> cannot be a button (it holds other buttons, and a row is table
+    // structure), so keyboard selection lives on a native <button> in the name
+    // cell; the row click stays as a mouse convenience.
     seed([summary()]);
     render(<Profiles />);
-    const row = screen.getByText("Fleet Op").closest("tr")!;
-    expect(row).toHaveAttribute("tabindex", "0");
-    expect(row).toHaveAttribute("role", "button");
+    const pick = screen.getByRole("button", { name: "Fleet Op" });
+    expect(pick.tagName).toBe("BUTTON");
+    expect(pick.tabIndex).toBe(0);
+    expect(pick).toHaveAttribute("aria-pressed", "false");
+    const row = pick.closest("tr")!;
+    expect(row).not.toHaveAttribute("role");
+    expect(row).not.toHaveAttribute("tabindex");
   });
 
   it.each([
-    ["Enter", "Enter"],
+    ["Enter", "{Enter}"],
     ["Space", " "],
-  ])("selects the row and shows its detail on %s", (_label, key) => {
+  ])("selects the row and shows its detail on %s", async (_label, keys) => {
     seed([summary()]);
     render(<Profiles />);
     expect(screen.queryByText("3 configured")).not.toBeInTheDocument();
-    fireEvent.keyDown(screen.getByText("Fleet Op").closest("tr")!, { key });
+    screen.getByRole("button", { name: "Fleet Op" }).focus();
+    await userEvent.keyboard(keys);
     expect(screen.getByText("3 configured")).toBeInTheDocument();
     expect(screen.getByText("notes")).toBeInTheDocument();
     expect(screen.getByText("FPGSchiba")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fleet Op" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("selects the row on click and shows its detail", () => {

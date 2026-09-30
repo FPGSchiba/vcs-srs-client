@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
 import { api } from "../../../shared/api/client";
 import { place } from "../../../shared/layout";
 import type {
@@ -152,16 +151,6 @@ export function Profiles() {
     });
   };
 
-  // Only react to keys pressed on the row itself; Enter/Space on a nested
-  // button or input must not also select the row.
-  const rowKey = (e: KeyboardEvent<HTMLTableRowElement>, path: string) => {
-    if (e.target !== e.currentTarget) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      setSelected(path);
-    }
-  };
-
   return (
     <div style={{ height: "100%", display: "grid", gridTemplateColumns: "1fr 360px", minHeight: 0 }}>
       <div style={{ overflow: "auto", padding: 16, minHeight: 0 }}>
@@ -264,12 +253,10 @@ export function Profiles() {
                   {rows.map((p) => (
                     <tr
                       key={p.path}
-                      role="button"
-                      tabIndex={0}
-                      aria-pressed={selected === p.path}
                       style={{ background: selected === p.path ? "rgba(96,165,250,0.04)" : undefined }}
+                      // Mouse convenience only: keyboard and assistive tech select
+                      // through the name button below (a <tr> cannot be a button).
                       onClick={() => setSelected(p.path)}
-                      onKeyDown={(e) => rowKey(e, p.path)}
                     >
                       <td>
                         <LayoutPreview blocks={p.blocks ?? []} window={p.window} />
@@ -289,7 +276,13 @@ export function Profiles() {
                             }}
                           />
                         ) : (
-                          <span style={{ color: "var(--tx-0)", fontWeight: 500 }}>{p.name}</span>
+                          <button
+                            type="button"
+                            aria-pressed={selected === p.path}
+                            style={{ color: "var(--tx-0)", fontWeight: 500, textAlign: "left" }}
+                          >
+                            {p.name}
+                          </button>
                         )}
                         {p.path === state.active_path && (
                           <span className="cap" style={{ color: "var(--ac-primary)", marginLeft: 8 }}>

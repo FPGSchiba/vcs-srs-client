@@ -371,7 +371,7 @@ describe("CommsApp layout grid", () => {
     expect(nameIn(els[0])).toBe("Bravo");
     expect(els[1].style.width).toBe("280px");
     expect(els[1].style.height).toBe("168px");
-    const flow = els[0].parentElement as HTMLElement;
+    const flow = screen.getByRole("list", { name: "Radios" });
     expect(flow.style.flexWrap).toBe("wrap");
     expect(flow.style.padding).toBe("12px");
     expect(flow.style.gap).toBe("8px");

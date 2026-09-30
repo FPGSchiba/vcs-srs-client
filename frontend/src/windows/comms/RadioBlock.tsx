@@ -93,7 +93,7 @@ export function RadioBlock({
     };
   }, [drag]);
 
-  function startResize(e: PointerEvent<HTMLSpanElement>) {
+  function startResize(e: PointerEvent<HTMLButtonElement>) {
     e.preventDefault();
     e.stopPropagation();
     try {
@@ -105,10 +105,10 @@ export function RadioBlock({
     setDrag({ x: e.clientX, y: e.clientY, w: variant.w, h: variant.h });
   }
 
-  function nudge(e: KeyboardEvent<HTMLSpanElement>) {
+  function nudge(e: KeyboardEvent<HTMLButtonElement>) {
     let step = 0;
     // Enter / Space activate the button like ArrowRight: step to the next size
-    // up (a role="button" must answer both). The ends do not wrap.
+    // up (a button must answer both). The ends do not wrap.
     if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")
       step = 1;
     else if (e.key === "ArrowLeft" || e.key === "ArrowUp") step = -1;
@@ -187,9 +187,8 @@ export function RadioBlock({
           {preview.label}
         </span>
       )}
-      <span
-        role="button"
-        tabIndex={0}
+      <button
+        type="button"
         aria-label="Resize radio block"
         title="Drag to snap to a size (arrow keys, Enter or Space step through sizes)"
         onPointerDown={startResize}

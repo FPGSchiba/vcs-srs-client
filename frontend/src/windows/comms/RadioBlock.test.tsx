@@ -149,7 +149,8 @@ describe("keyboard resizing", () => {
     const onResize = vi.fn();
     renderBlock({ variantId: "narrow-h", onResize });
     const handle = screen.getByRole("button", { name: /resize/i });
-    expect(handle).toHaveAttribute("tabindex", "0");
+    expect(handle.tagName).toBe("BUTTON"); // natively focusable, in the tab order
+    expect(handle.tabIndex).toBe(0);
     // Variants ordered by area, narrower first on a tie: narrow-v (150x136) and
     // narrow-h (300x68) are both 20400, then horizontal (41400), vertical (47040).
     fireEvent.keyDown(handle, { key: "ArrowRight" });

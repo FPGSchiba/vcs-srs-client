@@ -21,7 +21,7 @@ function show(s: Partial<RadioState> = {}, onSelect = vi.fn()) {
       <span>body</span>
     </RadioFrame>,
   );
-  return screen.getByRole("option");
+  return screen.getByRole("group", { name: /^R\d+ / });
 }
 
 describe("state attributes", () => {
@@ -112,10 +112,16 @@ describe("intercom and disabled treatments", () => {
 });
 
 describe("selection", () => {
-  it("is an option carrying its own selected state and accessible name", () => {
+  it("is a named group carrying its own selected state as aria-current", () => {
     const f = show({ selected: true });
-    expect(f).toHaveAttribute("aria-selected", "true");
+    expect(f).toHaveAttribute("aria-current", "true");
     expect(f).toHaveAccessibleName("R01 Fleet Common");
+    expect(show({ selected: false })).not.toHaveAttribute("aria-current");
+  });
+
+  it("is not a listbox option (its content is interactive)", () => {
+    show();
+    expect(screen.queryByRole("option")).toBeNull();
   });
 
   it("selects on click", () => {

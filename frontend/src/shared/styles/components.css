@@ -1032,6 +1032,15 @@ input:focus, select:focus, textarea:focus {
 }
 .lcd-amber { color: var(--ac-lcd-amber); background: var(--bg-lcd-warm); }
 .lcd-amber::after { background: radial-gradient(ellipse at center, rgba(245,185,75,0.05), transparent 70%); }
+/* A <fieldset> (implicit role=group) gives the digits one accessible name;
+   strip its default box so it lays out exactly like the span it replaced. */
+.lcd-digits {
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
 .lcd-digit {
   display: inline-block;
   cursor: ns-resize;

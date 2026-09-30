@@ -109,7 +109,7 @@ describe("the drawer", () => {
   it("is not a descendant of the card's clipping frame", () => {
     show();
     open();
-    expect(screen.getByRole("option", { name: "R01 Fleet Common" }).contains(screen.getByRole("dialog"))).toBe(false);
+    expect(screen.getByRole("group", { name: "R01 Fleet Common" }).contains(screen.getByRole("dialog"))).toBe(false);
     expect(screen.getByRole("dialog").parentElement).toBe(document.body);
   });
 
@@ -174,7 +174,7 @@ describe("the drawer", () => {
   it("closes on an element scroll (capture) and returns focus", () => {
     show();
     open();
-    fireEvent.scroll(screen.getByRole("option", { name: "R01 Fleet Common" })); // scroll does not bubble
+    fireEvent.scroll(screen.getByRole("group", { name: "R01 Fleet Common" })); // scroll does not bubble
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(gear());
   });
@@ -406,7 +406,7 @@ describe("the name draft", () => {
   it("rejects an all-whitespace name in the inline editor too", () => {
     const spy = stubUpdate();
     show();
-    fireEvent.doubleClick(screen.getByText("Fleet Common", { selector: "span" }));
+    fireEvent.doubleClick(screen.getByText("Fleet Common", { selector: "button" }));
     const input = screen.getByRole("textbox", { name: "radio name" });
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -444,7 +444,7 @@ describe("events do not leak through the portal", () => {
 describe("state stays readable from the frame", () => {
   it("exposes disabled and intercom as data attributes", () => {
     show("narrow-h", { enabled: false, is_intercom: true });
-    const frame = screen.getByRole("option");
+    const frame = screen.getByRole("group", { name: /^R\d+ / });
     expect(frame).toHaveAttribute("data-disabled", "true");
     expect(frame).toHaveAttribute("data-intercom", "true");
   });

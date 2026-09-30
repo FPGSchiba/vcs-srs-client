@@ -40,13 +40,13 @@ const show = (r: Partial<RadioDTO> = {}, variantId = "vertical") => {
 describe("variant resolution", () => {
   it("takes its box from the named variant", () => {
     show({}, "narrow-v");
-    expect(screen.getByRole("option")).toHaveStyle({ width: "150px", height: "136px" });
+    expect(screen.getByRole("group", { name: /^R\d+ / })).toHaveStyle({ width: "150px", height: "136px" });
   });
 
   // Review Focus #1, end to end.
   it("falls back to the default variant for an id no descriptor defines", () => {
     show({}, "dial-round");
-    expect(screen.getByRole("option")).toHaveStyle({ width: "280px", height: "168px" });
+    expect(screen.getByRole("group", { name: /^R\d+ / })).toHaveStyle({ width: "280px", height: "168px" });
   });
 
   it("shows the MHZ unit only on the variants that ask", () => {
@@ -154,13 +154,13 @@ describe("the name", () => {
 describe("state", () => {
   it("marks the card disabled when the radio is off", () => {
     show({ enabled: false });
-    expect(screen.getByRole("option")).toHaveAttribute("data-disabled", "true");
+    expect(screen.getByRole("group", { name: /^R\d+ / })).toHaveAttribute("data-disabled", "true");
     expect(screen.getByText("OFF")).toBeInTheDocument();
   });
 
   it("marks intercom on the frame even where no chip is shown", () => {
     show({ is_intercom: true }, "narrow-v");
-    expect(screen.getByRole("option")).toHaveAttribute("data-intercom", "true");
+    expect(screen.getByRole("group", { name: /^R\d+ / })).toHaveAttribute("data-intercom", "true");
     expect(screen.queryByRole("switch")).toBeNull();
   });
 
@@ -171,13 +171,13 @@ describe("state", () => {
       heldPTT: new Set(["global.ptt"]),
     });
     show();
-    expect(screen.getByRole("option")).toHaveAttribute("data-tx", "true");
+    expect(screen.getByRole("group", { name: /^R\d+ / })).toHaveAttribute("data-tx", "true");
   });
 
   it("marks transmit for this radio's own PTT action", () => {
     useRadios.setState({ heldPTT: new Set(["radio.1.ptt"]), globalPttTargetId: 0 });
     show();
-    expect(screen.getByRole("option")).toHaveAttribute("data-tx", "true");
+    expect(screen.getByRole("group", { name: /^R\d+ / })).toHaveAttribute("data-tx", "true");
   });
 
   it("never shows the transmitting treatment on a disabled radio", () => {
@@ -186,7 +186,7 @@ describe("state", () => {
       globalPttTargetId: 1,
     });
     show({ enabled: false });
-    expect(screen.getByRole("option")).toHaveAttribute("data-tx", "false");
+    expect(screen.getByRole("group", { name: /^R\d+ / })).toHaveAttribute("data-tx", "false");
     expect(screen.getByRole("button", { name: /push-to-talk/i }).className).not.toContain("keyed");
     expect(screen.getByText("OFF")).toBeInTheDocument();
     expect(screen.queryByText("you")).toBeNull();
@@ -201,7 +201,7 @@ describe("state", () => {
   it("selects optimistically and tells the backend", () => {
     const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
     show();
-    fireEvent.click(screen.getByRole("option"));
+    fireEvent.click(screen.getByRole("group", { name: /^R\d+ / }));
     expect(useRadios.getState().selectedRadioId).toBe(1);
     expect(spy).toHaveBeenCalledWith(1);
   });
@@ -224,6 +224,9 @@ describe("controls do not select the card", () => {
     openDrawer();
     fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
     fireEvent.click(screen.getByRole("spinbutton", { name: "frequency" }));
+    fireEvent.click(screen.getByRole("button", { name: "digit 3" }));
+    fireEvent.doubleClick(screen.getByRole("spinbutton", { name: "frequency" }));
+    fireEvent.keyDown(screen.getByRole("spinbutton", { name: "frequency" }), { key: "Enter" });
     expect(spy).not.toHaveBeenCalled();
     expect(useRadios.getState().selectedRadioId).toBe(0);
   });
@@ -241,7 +244,7 @@ describe("ported from the pre-redesign suite", () => {
   it("selects via keyboard when the card itself has focus", () => {
     const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
     show();
-    fireEvent.keyDown(screen.getByRole("option"), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("group", { name: /^R\d+ / }), { key: "Enter" });
     expect(spy).toHaveBeenCalledWith(1);
     expect(useRadios.getState().selectedRadioId).toBe(1);
   });
@@ -269,7 +272,7 @@ describe("ported from the pre-redesign suite", () => {
         <RadioCard radio={b} allRadios={[a, b]} muted={false} variantId="vertical" onVariantChange={() => {}} />
       </>,
     );
-    const [ca, cb] = screen.getAllByRole("option");
+    const [ca, cb] = screen.getAllByRole("group", { name: /^R\d+ / });
     act(() => useRadios.getState().setSelectedRadioId(5));
     act(() => useRadios.getState().setPTTHeld("global.ptt", true));
     expect(ca).toHaveAttribute("data-tx", "true");
