@@ -763,7 +763,7 @@ func TestProfileFieldsRoundTrip(t *testing.T) {
 	cfg.CommsLayout = config.CommsLayout{
 		WindowW: 540,
 		WindowH: 720,
-		Blocks:  []config.LayoutBlock{{RadioID: 1, W: 516, H: 180}, {RadioID: 2, W: 253, H: 120}},
+		Blocks:  []config.LayoutBlock{{RadioID: 1, Variant: "vertical"}, {RadioID: 2, Variant: "narrow-h"}},
 	}
 	cfg.Voice.HistoryIdleMS = 400
 	if err := config.Save(p, cfg); err != nil {
@@ -786,8 +786,8 @@ func TestProfileFieldsRoundTrip(t *testing.T) {
 	if back.CommsLayout.WindowW != 540 || len(back.CommsLayout.Blocks) != 2 {
 		t.Errorf("CommsLayout = %+v", back.CommsLayout)
 	}
-	if back.CommsLayout.Blocks[1].RadioID != 2 || back.CommsLayout.Blocks[1].W != 253 {
-		t.Errorf("block order or contents lost: %+v", back.CommsLayout.Blocks)
+	if back.CommsLayout.Blocks[1].RadioID != 2 || back.CommsLayout.Blocks[1].Variant != "narrow-h" {
+		t.Errorf("block order or variant lost: %+v", back.CommsLayout.Blocks)
 	}
 	if back.Voice.HistoryIdleMS != 400 {
 		t.Errorf("Voice.HistoryIdleMS = %d, want 400", back.Voice.HistoryIdleMS)

@@ -74,7 +74,7 @@ func TestApplyProfileWritesConfigOnce(t *testing.T) {
 		},
 		Layout: profile.Layout{
 			Window: profile.WindowSize{W: 600, H: 800},
-			Blocks: []profile.Block{{RadioID: 1, W: 400, H: 150}},
+			Blocks: []profile.Block{{RadioID: 1, Variant: "horizontal"}},
 		},
 	}
 	path := filepath.Join(t.TempDir(), "fleet-op"+profile.Ext)
@@ -135,7 +135,7 @@ func TestCaptureProfileRoundTripsThroughApply(t *testing.T) {
 		},
 		Layout: profile.Layout{
 			Window: profile.WindowSize{W: 610, H: 810},
-			Blocks: []profile.Block{{RadioID: 2, W: 300, H: 120}, {RadioID: 1, W: 400, H: 150}},
+			Blocks: []profile.Block{{RadioID: 2, Variant: "narrow-h"}, {RadioID: 1, Variant: "horizontal"}},
 		},
 	}
 	if err := a.applyProfile(src, filepath.Join(dir, "src"+profile.Ext)); err != nil {
@@ -210,7 +210,7 @@ func TestProfileDirtyAfterLayoutChangeButNotAfterSelectionChange(t *testing.T) {
 	sb := a.settings
 	sb.mu.Lock()
 	next := *sb.cfg
-	next.CommsLayout.Blocks = []config.LayoutBlock{{RadioID: 1, W: 999, H: 150}, {RadioID: 2, W: 400, H: 150}}
+	next.CommsLayout.Blocks = []config.LayoutBlock{{RadioID: 1, Variant: "narrow-v"}, {RadioID: 2, Variant: "horizontal"}}
 	sb.cfg = &next
 	sb.mu.Unlock()
 	if !a.profileDirty() {
@@ -374,7 +374,7 @@ func TestResetLayoutLeavesRadiosAlone(t *testing.T) {
 	next.Radios = []config.Radio{{ID: 1, Name: "Fleet", FrequencyKHz: 118500, Enabled: true}}
 	next.SelectedRadioID = 1
 	next.CommsLayout = config.CommsLayout{WindowW: 999, WindowH: 999,
-		Blocks: []config.LayoutBlock{{RadioID: 1, W: 999, H: 999}}}
+		Blocks: []config.LayoutBlock{{RadioID: 1, Variant: "narrow-v"}}}
 	sb.cfg = &next
 	sb.mu.Unlock()
 
@@ -390,8 +390,8 @@ func TestResetLayoutLeavesRadiosAlone(t *testing.T) {
 	if got.CommsLayout.WindowW != profile.DefaultWindowW {
 		t.Fatalf("window = %+v, want the built-in default", got.CommsLayout)
 	}
-	if got.CommsLayout.Blocks[0].W != profile.DefaultBlockW {
-		t.Fatalf("blocks = %+v, want default sizes", got.CommsLayout.Blocks)
+	if got.CommsLayout.Blocks[0].Variant != profile.DefaultVariant {
+		t.Fatalf("blocks = %+v, want the default variant", got.CommsLayout.Blocks)
 	}
 }
 
@@ -411,7 +411,7 @@ func TestRevertRestoresTheSavedProfile(t *testing.T) {
 
 	sb.mu.Lock()
 	n2 := *sb.cfg
-	n2.CommsLayout.Blocks = []config.LayoutBlock{{RadioID: 1, W: 999, H: 999}}
+	n2.CommsLayout.Blocks = []config.LayoutBlock{{RadioID: 1, Variant: "narrow-v"}}
 	sb.cfg = &n2
 	sb.mu.Unlock()
 	if !a.profileDirty() {
@@ -669,7 +669,7 @@ func TestSetCommsLayoutWritesNoFile(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	if err := a.SetCommsLayout(LayoutDTO{
 		Window: ProfileWindowDTO{W: 700, H: 900},
-		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "horizontal"}},
 	}); err != nil {
 		t.Fatalf("SetCommsLayout: %v", err)
 	}
@@ -687,12 +687,12 @@ func TestSetCommsLayoutIsVisibleImmediatelyInMemory(t *testing.T) {
 	a, _ := newProfileTestApp(t)
 	if err := a.SetCommsLayout(LayoutDTO{
 		Window: ProfileWindowDTO{W: 700, H: 900},
-		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "horizontal"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	got := a.GetCommsLayout()
-	if len(got.Blocks) != 1 || got.Blocks[0].W != 400 {
+	if len(got.Blocks) != 1 || got.Blocks[0].Variant != "horizontal" {
 		t.Fatalf("GetCommsLayout = %+v, want the in-memory value", got)
 	}
 }
@@ -708,7 +708,7 @@ func TestSetCommsLayoutIgnoresStaleWindowSize(t *testing.T) {
 
 	if err := a.SetCommsLayout(LayoutDTO{
 		Window: ProfileWindowDTO{W: 540, H: 720}, // stale renderer copy
-		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "horizontal"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +716,7 @@ func TestSetCommsLayoutIgnoresStaleWindowSize(t *testing.T) {
 	if got.Window.W != 800 || got.Window.H != 650 {
 		t.Fatalf("window = %+v, want the stored 800x650 kept", got.Window)
 	}
-	if len(got.Blocks) != 1 || got.Blocks[0].W != 400 {
+	if len(got.Blocks) != 1 || got.Blocks[0].Variant != "horizontal" {
 		t.Fatalf("blocks must still be applied: %+v", got.Blocks)
 	}
 }
@@ -742,7 +742,7 @@ func TestSetCommsLayoutDirtiesImmediately(t *testing.T) {
 
 	if err := a.SetCommsLayout(LayoutDTO{
 		Window: ProfileWindowDTO{W: 999, H: 999},
-		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 999, H: 999}},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "narrow-v"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +755,7 @@ func TestFlushConfigWritesTheLayout(t *testing.T) {
 	a, cfgPath := newProfileTestApp(t)
 	if err := a.SetCommsLayout(LayoutDTO{
 		Window: ProfileWindowDTO{W: 700, H: 900},
-		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "horizontal"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -778,7 +778,7 @@ func TestLayoutFreeRidesOnAnUnrelatedConfigSave(t *testing.T) {
 	a, cfgPath := newProfileTestApp(t)
 	if err := a.SetCommsLayout(LayoutDTO{
 		Window: ProfileWindowDTO{W: 701, H: 901},
-		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 401, H: 151}},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "narrow-h"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +791,7 @@ func TestLayoutFreeRidesOnAnUnrelatedConfigSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(back.CommsLayout.Blocks) != 1 || back.CommsLayout.Blocks[0].W != 401 {
+	if len(back.CommsLayout.Blocks) != 1 || back.CommsLayout.Blocks[0].Variant != "narrow-h" {
 		t.Fatalf("an unrelated config.Save must carry the pending layout: %+v", back.CommsLayout)
 	}
 }
@@ -845,7 +845,7 @@ func TestSetCommsLayoutDoesNotDeadlockOnEmit(t *testing.T) {
 	go func() {
 		done <- a.SetCommsLayout(LayoutDTO{
 			Window: ProfileWindowDTO{W: 700, H: 900},
-			Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+			Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "horizontal"}},
 		})
 	}()
 	select {
@@ -861,7 +861,7 @@ func TestFlushConfigRestoresLayoutPendingOnSaveFailure(t *testing.T) {
 	a, _ := newProfileTestApp(t)
 	if err := a.SetCommsLayout(LayoutDTO{
 		Window: ProfileWindowDTO{W: 700, H: 900},
-		Blocks: []ProfileBlockDTO{{RadioID: 1, W: 400, H: 150}},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "horizontal"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -893,4 +893,32 @@ func TestFlushConfigRestoresLayoutPendingOnSaveFailure(t *testing.T) {
 		t.Fatal("flushConfig must restore layoutPending on save failure")
 	}
 	sb.mu.Unlock()
+}
+
+func TestSetCommsLayoutStoresVariantsVerbatim(t *testing.T) {
+	a := newTestAppWithConfig(t, config.Default(), filepath.Join(t.TempDir(), "config.toml"))
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 700, H: 900},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "narrow-v"}},
+	}); err != nil {
+		t.Fatalf("SetCommsLayout: %v", err)
+	}
+	got := a.GetCommsLayout()
+	if len(got.Blocks) != 1 || got.Blocks[0].Variant != "narrow-v" {
+		t.Fatalf("blocks = %+v, want the variant carried through unchanged", got.Blocks)
+	}
+}
+
+func TestSetCommsLayoutPreservesAnUnknownVariant(t *testing.T) {
+	// The Go side must not validate against a registry it does not have.
+	a := newTestAppWithConfig(t, config.Default(), filepath.Join(t.TempDir(), "config.toml"))
+	if err := a.SetCommsLayout(LayoutDTO{
+		Window: ProfileWindowDTO{W: 700, H: 900},
+		Blocks: []ProfileBlockDTO{{RadioID: 1, Variant: "dial-round"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.GetCommsLayout().Blocks[0].Variant; got != "dial-round" {
+		t.Fatalf("Variant = %q, want it preserved", got)
+	}
 }

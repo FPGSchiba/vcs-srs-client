@@ -80,7 +80,7 @@ func configRadiosToProfile(in []config.Radio) []profile.Radio {
 func profileLayoutToConfig(l profile.Layout) config.CommsLayout {
 	blocks := make([]config.LayoutBlock, 0, len(l.Blocks))
 	for _, b := range l.Blocks {
-		blocks = append(blocks, config.LayoutBlock{RadioID: b.RadioID, W: b.W, H: b.H})
+		blocks = append(blocks, config.LayoutBlock{RadioID: b.RadioID, Variant: b.Variant})
 	}
 	return config.CommsLayout{WindowW: l.Window.W, WindowH: l.Window.H, Blocks: blocks}
 }
@@ -88,7 +88,7 @@ func profileLayoutToConfig(l profile.Layout) config.CommsLayout {
 func configLayoutToProfile(l config.CommsLayout) profile.Layout {
 	blocks := make([]profile.Block, 0, len(l.Blocks))
 	for _, b := range l.Blocks {
-		blocks = append(blocks, profile.Block{RadioID: b.RadioID, W: b.W, H: b.H})
+		blocks = append(blocks, profile.Block{RadioID: b.RadioID, Variant: b.Variant})
 	}
 	return profile.Layout{
 		Window: profile.WindowSize{W: l.WindowW, H: l.WindowH},
@@ -285,7 +285,7 @@ func (a *App) ListProfiles() []ProfileSummaryDTO {
 	for _, s := range sums {
 		blocks := make([]ProfileBlockDTO, 0, len(s.Blocks))
 		for _, b := range s.Blocks {
-			blocks = append(blocks, ProfileBlockDTO{RadioID: b.RadioID, W: b.W, H: b.H})
+			blocks = append(blocks, ProfileBlockDTO{RadioID: b.RadioID, Variant: b.Variant})
 		}
 		modified := ""
 		if !s.ModifiedAt.IsZero() {
@@ -519,7 +519,7 @@ func (a *App) ResetLayout() error {
 		blocks := make([]config.LayoutBlock, 0, len(next.Radios))
 		for _, r := range next.Radios {
 			blocks = append(blocks, config.LayoutBlock{
-				RadioID: r.ID, W: profile.DefaultBlockW, H: profile.DefaultBlockH,
+				RadioID: r.ID, Variant: profile.DefaultVariant,
 			})
 		}
 		next.CommsLayout = config.CommsLayout{
@@ -763,7 +763,7 @@ func (a *App) GetCommsLayout() LayoutDTO {
 	sb.mu.Unlock()
 	out.Window = ProfileWindowDTO{W: l.WindowW, H: l.WindowH}
 	for _, b := range l.Blocks {
-		out.Blocks = append(out.Blocks, ProfileBlockDTO{RadioID: b.RadioID, W: b.W, H: b.H})
+		out.Blocks = append(out.Blocks, ProfileBlockDTO{RadioID: b.RadioID, Variant: b.Variant})
 	}
 	return out
 }
@@ -795,14 +795,7 @@ func (a *App) SetCommsLayout(l LayoutDTO) error {
 	}
 	blocks := make([]config.LayoutBlock, 0, len(l.Blocks))
 	for _, b := range l.Blocks {
-		w, h := b.W, b.H
-		if w < profile.MinBlockW {
-			w = profile.MinBlockW
-		}
-		if h < profile.MinBlockH {
-			h = profile.MinBlockH
-		}
-		blocks = append(blocks, config.LayoutBlock{RadioID: b.RadioID, W: w, H: h})
+		blocks = append(blocks, config.LayoutBlock{RadioID: b.RadioID, Variant: b.Variant})
 	}
 	sb.mu.Lock()
 	next := *sb.cfg

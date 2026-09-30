@@ -430,8 +430,7 @@ type ProfileWindowDTO struct {
 
 type ProfileBlockDTO struct {
 	RadioID uint32 `json:"radio_id"`
-	W       int    `json:"w"`
-	H       int    `json:"h"`
+	Variant string `json:"variant"`
 }
 
 type ProfileSummaryDTO struct {

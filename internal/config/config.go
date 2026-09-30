@@ -192,10 +192,12 @@ type CommsLayout struct {
 // LayoutBlock is one radio's tile. Order within CommsLayout.Blocks IS the
 // flow order; there is deliberately no index field to keep consistent with
 // the slice.
+//
+// Variant names a frontend descriptor (see variants.ts). This package does not
+// validate it: an id written by a newer client must survive a load/save cycle.
 type LayoutBlock struct {
 	RadioID uint32 `toml:"radio_id"`
-	W       int    `toml:"w"`
-	H       int    `toml:"h"`
+	Variant string `toml:"variant"`
 }
 
 // AudioLevels holds the four mixer bus positions from Settings > Audio.
