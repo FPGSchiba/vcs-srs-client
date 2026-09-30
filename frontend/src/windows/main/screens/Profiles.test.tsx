@@ -248,7 +248,7 @@ describe("Profiles screen", () => {
     live[0].fire({ active_path: "", active_name: "", dirty: false, dir: "/after" });
     await act(async () => {});
     expect(useProfile.getState().state.dir).toBe("/sentinel");
-    expect(listProfiles.mock.calls.length).toBe(listed);
+    expect(listProfiles.mock.calls).toHaveLength(listed);
   });
 });
 

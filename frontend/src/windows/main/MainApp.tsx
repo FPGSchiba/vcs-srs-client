@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { api } from "../../shared/api/client";
 import type { ClientInfoDTO, RadioInfoDTO } from "../../shared/api/client";
 import { on, EV } from "../../shared/api/events";
@@ -36,6 +36,38 @@ interface RadioUpdatePayload {
 }
 
 /**
+ * Pull the full snapshot (clients, radios, self) and replace the stores.
+ * Called on mount and again once the control link reports `connected`,
+ * because SyncClient populates the Go store during connect without emitting
+ * per-client events.
+ */
+function hydrate() {
+  api
+    .getClientState()
+    .then((snap) => {
+      useClients.getState().replaceAll(snap.clients ?? {});
+      useRadios.getState().replaceAll(snap.radios ?? {});
+      useSession.getState().setSelf(
+        snap.self
+          ? { callsign: snap.self.name, ffid: snap.self.unit_id, coalition: snap.self.coalition }
+          : null,
+      );
+    })
+    .catch(() => {
+      /* not connected yet — ignore */
+    });
+}
+
+/** The console screen for a nav key; anything unmapped is the placeholder. */
+const SCREENS: Record<string, () => ReactElement> = {
+  home: () => <Home />,
+  players: () => <Players />,
+  history: () => <History />,
+  profiles: () => <Profiles />,
+  settings: () => <SettingsScreen />,
+};
+
+/**
  * MainApp is the main-window shell. It gates on the session `phase`: before the
  * control link is `connected` it renders the guest login (Welcome); once
  * connected it renders the console (TopBar + NavRail + screen + StatusBar) with
@@ -61,27 +93,6 @@ export function MainApp() {
   useNotificationsSync();
 
   useEffect(() => {
-    // Pull the full snapshot (clients, radios, self) and replace the stores.
-    // Called on mount and again once the control link reports `connected`,
-    // because SyncClient populates the Go store during connect without emitting
-    // per-client events.
-    const hydrate = () => {
-      api
-        .getClientState()
-        .then((snap) => {
-          useClients.getState().replaceAll(snap.clients ?? {});
-          useRadios.getState().replaceAll(snap.radios ?? {});
-          useSession.getState().setSelf(
-            snap.self
-              ? { callsign: snap.self.name, ffid: snap.self.unit_id, coalition: snap.self.coalition }
-              : null,
-          );
-        })
-        .catch(() => {
-          /* not connected yet — ignore */
-        });
-    };
-
     hydrate();
     api
       .getOpenWindows()
@@ -116,13 +127,7 @@ export function MainApp() {
 
   if (phase !== "connected") return <Welcome />;
 
-  const screen =
-    view === "home" ? <Home /> :
-    view === "players" ? <Players /> :
-    view === "history" ? <History /> :
-    view === "profiles" ? <Profiles /> :
-    view === "settings" ? <SettingsScreen /> :
-    <Placeholder />;
+  const screen = (SCREENS[view] ?? (() => <Placeholder />))();
 
   const handleLogout = () => {
     void api.disconnect();

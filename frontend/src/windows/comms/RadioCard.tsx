@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type RadioDTO } from "../../shared/api/client";
 import { useRadios } from "../../shared/store/radios";
 import { LcdFreq } from "../../shared/components/LcdFreq";
@@ -42,7 +42,7 @@ interface Props {
  * The frequency crosses one boundary here and nowhere else: the DTO carries an
  * MHz float, the LCD works in canonical integer kHz.
  */
-export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange }: Props) {
+export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange }: Readonly<Props>) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(radio.name);
   const selectedRadioId = useRadios((s) => s.selectedRadioId);
@@ -51,6 +51,11 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
 
   // Re-sync the draft when the upstream name changes (e.g. a server echo).
   useEffect(() => setName(radio.name), [radio.name]);
+  const nameRef = useRef<HTMLInputElement>(null);
+  // The inline editor opens on a deliberate double-click; focus it then.
+  useEffect(() => {
+    if (editing) nameRef.current?.focus();
+  }, [editing]);
 
   const variant = variantById(variantId);
   const Shell = SHELLS[variant.orientation];
@@ -107,7 +112,7 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
             <input
               className="input"
               aria-label="radio name"
-              autoFocus
+              ref={nameRef}
               style={{ height: 20, fontSize: 12, padding: "0 6px", width: "100%" }}
               value={name}
               onChange={(e) => setName(e.target.value)}

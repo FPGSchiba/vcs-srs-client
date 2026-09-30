@@ -23,14 +23,14 @@ const MARGIN = 1;
  * contract. It replaces the prototype's three hardcoded schematics
  * (2x2 / POWER / STRIP), which were presets this format does not have.
  */
-function LayoutPreview({ blocks, window: win }: { blocks: LayoutBlock[]; window: LayoutWindow }) {
+function LayoutPreview({ blocks, window: win }: Readonly<{ blocks: LayoutBlock[]; window: LayoutWindow }>) {
   const { rects, w, h } = place(blocks, win);
   const scale = Math.min((VIEW_W - 2 * MARGIN) / w, (VIEW_H - 2 * MARGIN) / Math.max(h, 1));
   return (
     <svg data-testid="layout-preview" width={VIEW_W} height={VIEW_H} viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} aria-hidden="true">
       {rects.map((r, i) => (
         <rect
-          key={i}
+          key={blocks[i].radio_id}
           x={MARGIN + r.x * scale}
           y={MARGIN + r.y * scale}
           width={Math.max(r.w * scale, 1)}
@@ -77,10 +77,20 @@ export function Profiles() {
   const [renaming, setRenaming] = useState<{ path: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const saveRef = useRef<HTMLInputElement>(null);
+  const renameRef = useRef<HTMLInputElement>(null);
   const armedAt = useRef(0);
   const armTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => () => clearTimeout(armTimer.current), []);
+  // Focus the inline editors as they open (both are user-initiated).
+  useEffect(() => {
+    if (saving) saveRef.current?.focus();
+  }, [saving]);
+  const renamingPath = renaming?.path;
+  useEffect(() => {
+    if (renamingPath) renameRef.current?.focus();
+  }, [renamingPath]);
 
   const disarm = (path?: string) => {
     clearTimeout(armTimer.current);
@@ -190,7 +200,7 @@ export function Profiles() {
                     className="input"
                     aria-label="New profile name"
                     placeholder="New profile name"
-                    autoFocus
+                    ref={saveRef}
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => {
@@ -266,7 +276,7 @@ export function Profiles() {
                           <input
                             className="input"
                             aria-label="Profile name"
-                            autoFocus
+                            ref={renameRef}
                             value={renaming.name}
                             onClick={(e) => e.stopPropagation()}
                             onChange={(e) => setRenaming({ path: p.path, name: e.target.value })}

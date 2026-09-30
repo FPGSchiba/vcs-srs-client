@@ -23,7 +23,7 @@ const VU_WIDTH = 44;
  * with no talker this honestly says "no traffic" at zero level. Nothing here
  * simulates activity.
  */
-export function TalkerLine({ talker, self, level = 0, disabled }: Props) {
+export function TalkerLine({ talker, self, level = 0, disabled }: Readonly<Props>) {
   if (disabled) {
     return (
       <div className="row acenter gap-2" style={{ minWidth: 0 }}>
@@ -35,7 +35,9 @@ export function TalkerLine({ talker, self, level = 0, disabled }: Props) {
   }
 
   const active = self || Boolean(talker);
-  const accent = self ? "var(--ac-primary)" : talker ? "var(--ac-ok)" : "var(--tx-4)";
+  let accent = "var(--tx-4)";
+  if (self) accent = "var(--ac-primary)";
+  else if (talker) accent = "var(--ac-ok)";
 
   return (
     <div className="row acenter gap-2" style={{ minWidth: 0 }}>

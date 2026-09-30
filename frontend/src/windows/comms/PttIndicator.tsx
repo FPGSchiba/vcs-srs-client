@@ -26,7 +26,7 @@ const TITLE = "Push-to-talk is driven by your configured keybind, not this butto
  * Its box comes from the variant descriptor, so the narrow variants shrink it
  * to an icon without needing a second component.
  */
-export function PttIndicator({ w, h, transmitting, showLabel }: Props) {
+export function PttIndicator({ w, h, transmitting, showLabel }: Readonly<Props>) {
   return (
     <button
       className={`ptt ${transmitting ? "keyed" : ""}`.trim()}

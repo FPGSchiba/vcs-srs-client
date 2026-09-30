@@ -41,15 +41,19 @@ const INITIAL_PLACE = 0;
  * Every value it emits is an integer kHz inside the 24-bit wire range; the MHz
  * float the DTO carries is derived by the caller at the boundary.
  */
-export function LcdFreq({ khz, digitPx, unit, className, onChange }: LcdFreqProps) {
+export function LcdFreq({ khz, digitPx, unit, className, onChange }: Readonly<LcdFreqProps>) {
   const [draft, setDraft] = useState<string | null>(null);
   const [place, setPlace] = useState(INITIAL_PLACE);
 
   const editable = Boolean(onChange);
-  const cells =
+  // A decade's place is its stable identity; the "." and typed-draft characters
+  // have none, so they fall back to their position (the draft is a transient
+  // string with no per-character identity to preserve).
+  const cells = (
     draft === null
       ? digitsOf(khz)
-      : draft.split("").map((c) => ({ char: c, place: null as number | null }));
+      : draft.split("").map((c) => ({ char: c, place: null as number | null }))
+  ).map((c, pos) => ({ ...c, key: c.place === null ? `x${pos}` : `d${c.place}` }));
   const places = cells.filter((c) => c.place !== null).map((c) => c.place as number);
 
   function step(p: number, dir: 1 | -1) {
@@ -154,10 +158,10 @@ export function LcdFreq({ khz, digitPx, unit, className, onChange }: LcdFreqProp
         aria-label="frequency"
         style={digitPx ? { fontSize: digitPx, lineHeight: 1 } : undefined}
       >
-        {cells.map((c, i) =>
+        {cells.map((c) =>
           editable && c.place !== null ? (
             <button
-              key={i}
+              key={c.key}
               type="button"
               tabIndex={-1}
               className="lcd-digit"
@@ -170,7 +174,7 @@ export function LcdFreq({ khz, digitPx, unit, className, onChange }: LcdFreqProp
               {c.char}
             </button>
           ) : (
-            <span key={i} className="lcd-digit">
+            <span key={c.key} className="lcd-digit">
               {c.char}
             </span>
           ),

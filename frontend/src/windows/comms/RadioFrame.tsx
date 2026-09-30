@@ -68,6 +68,24 @@ const CORNERS = [
  */
 const CONTROLS = "button,input,select,textarea,[role=spinbutton],[role=switch]";
 
+/**
+ * The frame's border colour. Precedence: a disabled radio is muted (dimmer blue
+ * when selected, --bd-1 otherwise); an enabled one is blue when selected or
+ * transmitting, --bd-2 otherwise.
+ */
+function frameBorder({
+  selected,
+  transmitting,
+  disabled,
+}: Readonly<{ selected: boolean; transmitting: boolean; disabled: boolean }>): string {
+  if (disabled) {
+    return selected
+      ? "color-mix(in srgb, var(--ac-primary) 45%, var(--bg-1))"
+      : "var(--bd-1)";
+  }
+  return selected || transmitting ? "var(--ac-primary)" : "var(--bd-2)";
+}
+
 export function RadioFrame({
   w,
   h,
@@ -79,20 +97,14 @@ export function RadioFrame({
   transmitting,
   intercom,
   disabled,
-}: Props) {
+}: Readonly<Props>) {
   const accent = frameAccent({ selected, receiving, transmitting, intercom, disabled });
   // A disabled radio must stay selectable, so selection has to stay visible:
   // aria-current is invisible to sighted users, and with two or more disabled
   // radios nothing else says which one is selected. Keep the blue, muted into
   // the background. The brackets still drain to --bd-1 via frameAccent.
   // (Clicking a disabled radio only selects it; the ON toggle re-enables it.)
-  const border = disabled
-    ? selected
-      ? "color-mix(in srgb, var(--ac-primary) 45%, var(--bg-1))"
-      : "var(--bd-1)"
-    : selected || transmitting
-      ? "var(--ac-primary)"
-      : "var(--bd-2)";
+  const border = frameBorder({ selected, transmitting, disabled });
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
     if (e.target !== e.currentTarget) return;

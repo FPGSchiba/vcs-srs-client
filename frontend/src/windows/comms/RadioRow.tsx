@@ -6,7 +6,7 @@ import type { RadioShellProps } from "./shells";
  * LCD anchors the left, two text lines take the middle and the PTT anchors the
  * right (design/vcs/radio-variants.md §2).
  */
-export function RadioRow({ variant, rid, name, lcd, talker, ptt, actions }: RadioShellProps) {
+export function RadioRow({ variant, rid, name, lcd, talker, ptt, actions }: Readonly<RadioShellProps>) {
   const narrow = variant.density === "compact";
 
   // statusDivider is honoured in BOTH branches (as RadioColumn does), so

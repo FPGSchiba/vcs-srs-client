@@ -29,7 +29,7 @@ describe("useHistory", () => {
   it("caps the list so a long session cannot grow the renderer without bound", () => {
     useHistory.getState().replaceAll([]);
     for (let i = 0; i < 2100; i++) useHistory.getState().append(entry(i % 60));
-    expect(useHistory.getState().entries.length).toBe(2000);
+    expect(useHistory.getState().entries).toHaveLength(2000);
   });
 
   it("clears", () => {

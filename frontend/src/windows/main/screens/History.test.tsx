@@ -210,8 +210,8 @@ describe("History screen", () => {
     // StrictMode: each event has 2 total registrations (1 gets unsubscribed, 1 survives)
     const appendedHandlers = mockEventHandlers.get("history:appended") ?? [];
     const clearedHandlers = mockEventHandlers.get("history:cleared") ?? [];
-    expect(appendedHandlers.length).toBe(2);
-    expect(clearedHandlers.length).toBe(2);
+    expect(appendedHandlers).toHaveLength(2);
+    expect(clearedHandlers).toHaveLength(2);
 
     // Exactly 1 live listener per event
     const liveAppended = appendedHandlers.filter((h) => h.live).length;
@@ -244,7 +244,7 @@ describe("History screen", () => {
     // After unmount: invoking the captured handler must NOT reach the store
     const lenBefore = useHistory.getState().entries.length;
     appendedHandler?.(row({ sender: "AfterUnmount" }));
-    expect(useHistory.getState().entries.length).toBe(lenBefore);
+    expect(useHistory.getState().entries).toHaveLength(lenBefore);
     expect(useHistory.getState().entries.some((e) => e.sender === "AfterUnmount")).toBe(false);
   });
 });

@@ -22,7 +22,7 @@ const GAP = 4;
 const ESTIMATED_HEIGHT = 190;
 
 /** A compact label + control row. Adding a setting is one more of these. */
-function Row({ label, children }: { label: string; children: ReactNode }) {
+function Row({ label, children }: Readonly<{ label: string; children: ReactNode }>) {
   // A <label> wrapping its control: clicking the visible text operates it.
   return (
     <label className="row acenter" style={{ justifyContent: "space-between", gap: 10, minHeight: 24 }}>
@@ -58,7 +58,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  * element, and the first pass is hidden until it is measured. Escape is
  * handled on the document so dismissal never depends on where focus is.
  */
-export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: Props) {
+export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: Readonly<Props>) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [name, setName] = useState(radio.name);

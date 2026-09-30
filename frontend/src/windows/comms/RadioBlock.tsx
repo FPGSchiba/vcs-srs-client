@@ -59,7 +59,7 @@ export function RadioBlock({
   index,
   onResize,
   onReorder,
-}: Props) {
+}: Readonly<Props>) {
   const [drag, setDrag] = useState<DragStart | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
 
