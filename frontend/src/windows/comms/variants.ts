@@ -35,6 +35,8 @@ export interface RadioVariant {
     unit: boolean;
     /** The border-top above the status row. */
     statusDivider: boolean;
+    /** The variant has room for the PTT's text as well as its icon. */
+    pttLabel: boolean;
   };
 }
 
@@ -50,7 +52,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "comfortable",
     lcdPx: 30,
     ptt: { w: 96, h: 28 },
-    shows: { chips: "full", unit: true, statusDivider: true },
+    shows: { chips: "full", unit: true, statusDivider: true, pttLabel: true },
   },
   {
     id: "horizontal",
@@ -61,7 +63,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "comfortable",
     lcdPx: 22,
     ptt: { w: 64, h: 64 },
-    shows: { chips: "enabled-only", unit: true, statusDivider: false },
+    shows: { chips: "enabled-only", unit: true, statusDivider: false, pttLabel: false },
   },
   {
     id: "narrow-h",
@@ -72,7 +74,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "compact",
     lcdPx: 21,
     ptt: { w: 32, h: 30 },
-    shows: { chips: "none", unit: false, statusDivider: false },
+    shows: { chips: "none", unit: false, statusDivider: false, pttLabel: false },
   },
   {
     id: "narrow-v",
@@ -83,7 +85,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     density: "compact",
     lcdPx: 18,
     ptt: { w: "fill", h: 26 },
-    shows: { chips: "none", unit: false, statusDivider: false },
+    shows: { chips: "none", unit: false, statusDivider: false, pttLabel: true },
   },
 ];
 

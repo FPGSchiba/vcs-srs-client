@@ -51,7 +51,8 @@ const CORNERS = [
  * states read identically at 150px and at 360px — see
  * design/vcs/radio-variants.md §4.
  *
- * It is the card's single tab stop and carries role="option" against the
+ * It is the card's selection stop (its controls — name, LCD, chips — are separate
+ * tab stops) and carries role="option" against the
  * grid's role="listbox". A key bubbled from a child control (the name input,
  * the LCD) is ignored, so typing a space in the name does not re-select.
  */

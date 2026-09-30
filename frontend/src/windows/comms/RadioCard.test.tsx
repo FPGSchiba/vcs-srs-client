@@ -4,6 +4,18 @@ import { RadioCard } from "./RadioCard";
 import { api, type RadioDTO } from "../../shared/api/client";
 import { useRadios } from "../../shared/store/radios";
 
+// A synthetic variant lets a test set descriptor fields no shipped variant has.
+vi.mock("./variants", async (orig) => {
+  const actual = await orig<typeof import("./variants")>();
+  return {
+    ...actual,
+    variantById: (id: string | undefined) =>
+      id === "tiny-labelled"
+        ? { ...actual.variantById("narrow-h"), id, ptt: { w: 20, h: 30 }, shows: { ...actual.variantById("narrow-h").shows, pttLabel: true } }
+        : actual.variantById(id),
+  };
+});
+
 const radio: RadioDTO = {
   id: 1,
   name: "Fleet Common",
@@ -74,6 +86,40 @@ describe("the frequency boundary", () => {
   });
 });
 
+describe("the frequency boundary, canonical kHz", () => {
+  const khzOf = (variantId: string, frequency: number) => {
+    show({ frequency }, variantId);
+    return screen.getByRole("spinbutton", { name: "frequency" }).getAttribute("aria-valuenow");
+  };
+
+  it("hands the LCD integer kHz on the default variant", () => {
+    expect(khzOf("vertical", 118.5)).toBe("118500");
+  });
+
+  it("rounds a float32-inexact DTO frequency to the nearest kHz, not truncating", () => {
+    // Math.fround(118.1) * 1000 = 118099.998..., so truncation gives 118099.
+    expect(Math.fround(118.1) * 1000).toBeLessThan(118100);
+    expect(khzOf("vertical", Math.fround(118.1))).toBe("118100");
+  });
+});
+
+describe("the PTT label", () => {
+  it("follows the descriptor, not the pixel width", () => {
+    show({}, "tiny-labelled");
+    expect(screen.getByText("PUSH-TO-TALK")).toBeInTheDocument();
+  });
+
+  it.each(["vertical", "narrow-v"])("is present on %s", (id) => {
+    show({}, id);
+    expect(screen.getByText("PUSH-TO-TALK")).toBeInTheDocument();
+  });
+
+  it("is absent where the descriptor says there is no room", () => {
+    show({}, "horizontal");
+    expect(screen.queryByText("PUSH-TO-TALK")).toBeNull();
+  });
+});
+
 describe("the name", () => {
   it("is a label, not a permanent input", () => {
     show();
@@ -100,9 +146,12 @@ describe("the name", () => {
     fireEvent.keyDown(input, { key: "Escape" });
     expect(spy).not.toHaveBeenCalled();
     expect(screen.getByText("Fleet Common")).toBeInTheDocument();
+    // The draft must be reset too, or the stale "Ops" reappears on the next open.
+    fireEvent.doubleClick(screen.getByText("Fleet Common"));
+    expect(screen.getByRole("textbox", { name: /radio name/i })).toHaveValue("Fleet Common");
   });
 
-  it("does not select the card while the name is being edited", () => {
+  it("does not select the card when the name input is clicked", () => {
     const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
     show();
     fireEvent.doubleClick(screen.getByText("Fleet Common"));
@@ -154,6 +203,18 @@ describe("state", () => {
     show();
     fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
     expect(useRadios.getState().radios).toBe(before);
+  });
+});
+
+describe("controls do not select the card", () => {
+  it("clicking the enabled chip or the LCD does not select", () => {
+    const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
+    vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
+    show();
+    fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
+    fireEvent.click(screen.getByRole("spinbutton", { name: "frequency" }));
+    expect(spy).not.toHaveBeenCalled();
+    expect(useRadios.getState().selectedRadioId).toBe(0);
   });
 });
 

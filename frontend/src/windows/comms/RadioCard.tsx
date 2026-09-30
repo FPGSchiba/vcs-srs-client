@@ -57,7 +57,6 @@ export function RadioCard({ radio, allRadios, muted, variantId }: Props) {
   }
 
   function select() {
-    if (editing) return;
     useRadios.getState().setSelectedRadioId(radio.id);
     void api.selectRadio(radio.id);
   }
@@ -173,7 +172,7 @@ export function RadioCard({ radio, allRadios, muted, variantId }: Props) {
             w={variant.ptt.w}
             h={variant.ptt.h}
             transmitting={transmitting}
-            showLabel={variant.ptt.w === "fill" || variant.ptt.w >= 90}
+            showLabel={variant.shows.pttLabel}
           />
         }
         chips={
