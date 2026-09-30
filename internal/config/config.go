@@ -84,6 +84,33 @@ type Config struct {
 	// state.Store (in-memory), so global.ptt -- the primary PTT -- resolved
 	// to nothing on every fresh launch until the user clicked a radio card.
 	SelectedRadioID uint32 `toml:"selected_radio_id"`
+
+	// ActiveProfile is the absolute path of the radio profile currently
+	// loaded, or "" for none. It is a POINTER, not a copy: the live radio
+	// and layout state lives in this file (Radios, SelectedRadioID,
+	// CommsLayout), and a profile is a snapshot of those. Dirty state is
+	// COMPUTED by comparing the two, never stored, so there is nothing to
+	// keep in sync and nothing that can go stale across a crash or an
+	// external edit.
+	ActiveProfile string `toml:"active_profile"`
+
+	// ProfilesDir overrides where profiles are read and written. Empty
+	// means AppDataDir()/profiles -- see ProfilesDirPath.
+	ProfilesDir string `toml:"profiles_dir"`
+
+	// BuiltinProfiles maps a shipped profile's id to the sha256 of the
+	// content THIS CLIENT last wrote for it. It is what lets startup
+	// seeding tell "untouched, safe to update" from "the user edited it,
+	// never overwrite" -- and, because a recorded hash proves the file was
+	// written at least once, "the user deleted it" from "first run".
+	// See internal/profile.Seed.
+	BuiltinProfiles map[string]string `toml:"builtin_profiles"`
+
+	// CommsLayout is the Comms window's arrangement. Written to disk at
+	// shutdown rather than during a drag -- see internal/app's layout
+	// binding for why, and note that because Save serialises the WHOLE
+	// Config, this free-rides on every other config write too.
+	CommsLayout CommsLayout `toml:"comms_layout"`
 }
 
 // Voice holds Settings > Voice network/buffering tuning for the UDP voice
@@ -105,6 +132,19 @@ type Voice struct {
 	// App.voiceDialOptions (M2 fix; it used to be persisted, defaulted, and
 	// then silently ignored in favour of a hard-coded 500ms constant).
 	MaxBufferMS int `toml:"max_buffer_ms"`
+
+	// HistoryIdleMS is how long a received stream may go quiet before the
+	// transmission is considered over FOR THE HISTORY LOG. 0 means the
+	// package default (500ms). It does not affect when a decoder and
+	// jitter buffer are released -- that is internal/voice's own
+	// rxIdleTimeout, 5s, and re-tuning it to suit a log would change voice
+	// behaviour to serve a view.
+	//
+	// It is a config key and not just a constant because the 500ms default
+	// is a GUESS: nobody has ever received voice from a real peer on this
+	// client, so the real inter-packet gap distribution is unknown and a
+	// field test has to be able to sweep values without a rebuild.
+	HistoryIdleMS int `toml:"history_idle_ms"`
 }
 
 // Radio is one persisted radio preset.
@@ -134,6 +174,30 @@ type Radio struct {
 	FrequencyKHz uint32 `toml:"frequency_khz"`
 	Enabled      bool   `toml:"enabled"`
 	IsIntercom   bool   `toml:"is_intercom"`
+}
+
+// CommsLayout is the persisted Comms window arrangement: the window's own
+// size plus one sized block per radio, in flow order.
+//
+// It is a raw-values layer, the same discipline as Audio/Voice/Keybinds:
+// this package does not import internal/profile, so these are plain fields
+// with TOML tags and no knowledge of profile semantics. internal/app owns
+// the mapping.
+type CommsLayout struct {
+	WindowW int           `toml:"window_w"`
+	WindowH int           `toml:"window_h"`
+	Blocks  []LayoutBlock `toml:"blocks"`
+}
+
+// LayoutBlock is one radio's tile. Order within CommsLayout.Blocks IS the
+// flow order; there is deliberately no index field to keep consistent with
+// the slice.
+//
+// Variant names a frontend descriptor (see variants.ts). This package does not
+// validate it: an id written by a newer client must survive a load/save cycle.
+type LayoutBlock struct {
+	RadioID uint32 `toml:"radio_id"`
+	Variant string `toml:"variant"`
 }
 
 // AudioLevels holds the four mixer bus positions from Settings > Audio.

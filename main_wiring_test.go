@@ -445,3 +445,39 @@ func TestNotificationAdaptersStayOffTheBoundServiceSurface(t *testing.T) {
 			"app.PlayNotificationSFX(gui, ...) -- the notification sound would never play")
 	}
 }
+
+// TestHistoryIsWired guards the transmission log's wiring: a complete,
+// tested log that main.go never attaches makes every history binding
+// early-return, so the Transmission Log stays empty with nothing logged to
+// explain it. It also pins the two neighbouring wirings needed for anything
+// to be recorded at all -- OnRX/HistoryIdleMS in the voice dial options (no
+// RX row is ever logged without them) -- and that the builtin profile seed
+// is called exactly once.
+func TestHistoryIsWired(t *testing.T) {
+	text := readMainGo(t)
+	for _, want := range []string{
+		"history.Load(",
+		"histLog.SetPersist(",
+		"app.SetHistory(gui, histLog)",
+		"app.StartHistoryTicker(gui)",
+		"app.NotifyHistoryFlush(gui, err)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("main.go does not contain %s -- the transmission log would be inert", want)
+		}
+	}
+	if n := strings.Count(text, "gui.SeedBuiltinProfiles()"); n != 1 {
+		t.Errorf("main.go calls gui.SeedBuiltinProfiles() %d times, want exactly 1 (a second call double-seeds)", n)
+	}
+
+	voiceSrc, err := os.ReadFile("internal/app/voice.go")
+	if err != nil {
+		t.Fatalf("read voice.go: %v", err)
+	}
+	vtext := string(voiceSrc)
+	for _, want := range []string{"OnRX:", "HistoryIdleMS:"} {
+		if n := strings.Count(vtext, want); n != 1 {
+			t.Errorf("voice.go has %d occurrences of %s in voiceDialOptions, want exactly 1", n, want)
+		}
+	}
+}

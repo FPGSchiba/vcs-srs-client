@@ -1,0 +1,2 @@
+# Embedded builtin profiles are hashed byte-for-byte; keep LF on every host.
+*.vcs.json text eol=lf

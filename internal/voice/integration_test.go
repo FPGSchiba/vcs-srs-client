@@ -424,7 +424,14 @@ func TestIntegrationKeepaliveEchoFeedsLatency(t *testing.T) {
 	srv := testdata.Start(t)
 	c := connectGuest(t, srv, "Solo")
 	rec := newStateRecorder()
-	s := dialVoice(t, srv, c, rec)
+	s := dialVoice(t, srv, c, rec, func(o *Options) {
+		// The poll deadline below must comfortably exceed the keepalive
+		// interval. With the default 5 s interval and a 5 s deadline the test
+		// waited exactly one interval for a keepalive to be sent AND echoed,
+		// and lost that race on a slow runner under -race. A short interval
+		// puts the first echo far inside the deadline.
+		o.Keepalive = 200 * time.Millisecond
+	})
 
 	pollUntil(t, 10*time.Second, "Connected", func() bool { return s.State() == StateConnected })
 	pollUntil(t, 5*time.Second, "a non-zero RTT from the keepalive echo", func() bool { return s.RTT() > 0 })

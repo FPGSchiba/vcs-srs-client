@@ -142,6 +142,19 @@ type settingsBackend struct {
 	// can refuse to persist a seq older than that -- see its doc.
 	radioSelectSeq          uint64
 	radioSelectPersistedSeq uint64
+
+	// layoutPending tracks whether SetCommsLayout has added a change that
+	// needs to be flushed to disk. Set to true by SetCommsLayout, checked by
+	// flushConfig (returning early if false). flushConfig clears it before
+	// persisting and restores it if the save fails, making the restore
+	// idempotent against a concurrent SetCommsLayout (which would set true
+	// anyway). This pattern prevents lost updates: a drag landing during the
+	// unlocked config.Save would set the flag true, which would then be
+	// preserved by the pre-save clear and restore-on-failure. See Task 5's
+	// history.Flush for the same race-safe pattern. The gate prevents a user
+	// with a corrupt config file from having it silently replaced with defaults
+	// on quit when no drag has occurred.
+	layoutPending bool
 }
 
 // SetJoystickBackend wires the joystick manager. Optional -- when it is never

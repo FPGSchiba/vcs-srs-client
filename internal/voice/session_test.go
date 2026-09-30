@@ -620,6 +620,34 @@ func TestSessionRTTMatchesTheKeepaliveItAnswers(t *testing.T) {
 	}
 }
 
+// A genuine round trip that finishes inside one clock tick (Windows' clock
+// ticks at ~0.5 ms; a loopback RTT is shorter) measures as exactly zero. RTT()
+// uses zero to mean "nothing measured", so that sample must be recorded as a
+// minimal positive value, not dropped -- dropping it left RTT() at zero
+// indefinitely on Windows loopback. A negative delta (clock step) is still
+// discarded.
+func TestSessionRTTSubTickReplyIsRecordedNotDropped(t *testing.T) {
+	s := &Session{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	base := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+	s.mu.Lock()
+	s.noteKeepaliveSentLocked(base)
+	s.mu.Unlock()
+	s.recordKeepalive(event{kind: evKeepaliveReply, at: base, serverTS: 1})
+	if got := s.RTT(); got <= 0 {
+		t.Fatalf("RTT = %v after a zero-elapsed reply, want a positive sub-tick floor", got)
+	}
+
+	s.mu.Lock()
+	s.noteKeepaliveSentLocked(base.Add(time.Second))
+	s.mu.Unlock()
+	before := s.RTT()
+	s.recordKeepalive(event{kind: evKeepaliveReply, at: base, serverTS: 2})
+	if got := s.RTT(); got != before {
+		t.Fatalf("RTT = %v after a negative delta, want unchanged %v", got, before)
+	}
+}
+
 func TestSessionCloseSendsBye(t *testing.T) {
 	ts := newTestServer(t, goodSecret)
 	clk := newFakeClock()

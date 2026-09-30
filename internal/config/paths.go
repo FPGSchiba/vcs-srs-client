@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // AppDataDir returns the per-user directory where VCS stores configs, profiles,
@@ -78,4 +79,35 @@ func LogFilePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(logDir, "vcs-client.log"), nil
+}
+
+// ProfilesDirPath resolves where radio profiles live. A non-blank
+// `configured` (config.toml's profiles_dir) is returned verbatim; anything
+// else falls back to a "profiles" directory under AppDataDir, which is
+// created if absent.
+//
+// A whitespace-only override is treated as empty: that is a user who
+// cleared the field, not a request for a directory named three spaces.
+func ProfilesDirPath(configured string) (string, error) {
+	if c := strings.TrimSpace(configured); c != "" {
+		return c, nil
+	}
+	dir, err := AppDataDir()
+	if err != nil {
+		return "", err
+	}
+	out := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// HistoryFilePath returns the path to history.json under AppDataDir.
+func HistoryFilePath() (string, error) {
+	dir, err := AppDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "history.json"), nil
 }

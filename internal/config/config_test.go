@@ -748,3 +748,67 @@ func TestPlayNotificationSoundsDefaultsTrueAndRoundTrips(t *testing.T) {
 		t.Error("PlayNotificationSounds lost in round trip: want false, got true")
 	}
 }
+
+func TestProfileFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+
+	cfg, err := config.LoadOrCreate(p)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	cfg.ActiveProfile = filepath.Join(dir, "fleet-op.vcs.json")
+	cfg.ProfilesDir = filepath.Join(dir, "profiles")
+	cfg.BuiltinProfiles = map[string]string{"standard-fleet": "deadbeef"}
+	cfg.CommsLayout = config.CommsLayout{
+		WindowW: 540,
+		WindowH: 720,
+		Blocks:  []config.LayoutBlock{{RadioID: 1, Variant: "vertical"}, {RadioID: 2, Variant: "narrow-h"}},
+	}
+	cfg.Voice.HistoryIdleMS = 400
+	if err := config.Save(p, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	back, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if back.ActiveProfile != cfg.ActiveProfile {
+		t.Errorf("ActiveProfile = %q, want %q", back.ActiveProfile, cfg.ActiveProfile)
+	}
+	if back.ProfilesDir != cfg.ProfilesDir {
+		t.Errorf("ProfilesDir = %q, want %q", back.ProfilesDir, cfg.ProfilesDir)
+	}
+	if back.BuiltinProfiles["standard-fleet"] != "deadbeef" {
+		t.Errorf("BuiltinProfiles = %+v", back.BuiltinProfiles)
+	}
+	if back.CommsLayout.WindowW != 540 || len(back.CommsLayout.Blocks) != 2 {
+		t.Errorf("CommsLayout = %+v", back.CommsLayout)
+	}
+	if back.CommsLayout.Blocks[1].RadioID != 2 || back.CommsLayout.Blocks[1].Variant != "narrow-h" {
+		t.Errorf("block order or variant lost: %+v", back.CommsLayout.Blocks)
+	}
+	if back.Voice.HistoryIdleMS != 400 {
+		t.Errorf("Voice.HistoryIdleMS = %d, want 400", back.Voice.HistoryIdleMS)
+	}
+}
+
+func TestProfileFieldsDefaultToZero(t *testing.T) {
+	// A config.toml written by an older build has none of these keys. They
+	// must load as their documented zero values, not fail the parse.
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte("server_url = \"localhost:5002\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("an older config must still load: %v", err)
+	}
+	if cfg.ActiveProfile != "" || cfg.ProfilesDir != "" {
+		t.Errorf("want empty defaults, got %q / %q", cfg.ActiveProfile, cfg.ProfilesDir)
+	}
+	if cfg.Voice.HistoryIdleMS != 0 {
+		t.Errorf("HistoryIdleMS = %d, want 0 meaning 'the documented default'", cfg.Voice.HistoryIdleMS)
+	}
+}

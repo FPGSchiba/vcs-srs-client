@@ -11,6 +11,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
+	"github.com/FPGSchiba/vcs-srs-client/internal/history"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
 	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
@@ -87,6 +88,17 @@ type App struct {
 	// build where wiring failed, so every use site must check.
 	notif *notify.Notifier
 
+	// hist is the transmission log. Optional, the same discipline as notif
+	// and health: nil in tests and in any build where wiring failed.
+	hist *history.Log
+	// histStop/histDone belong to the ticker StartHistoryTicker starts.
+	histStop chan struct{}
+	histDone chan struct{}
+
+	// profilesDirOverride is set only by tests; empty in every shipped
+	// build. See setProfilesDirForTest.
+	profilesDirOverride string
+
 	// notifWinJoystick/notifWinAudio override the per-source coalescing
 	// windows (notify.WindowJoystick / notify.WindowAudio). Zero means "use
 	// the package default", mirroring setHotkeyPermissionPoll's
@@ -142,6 +154,21 @@ func (a *App) Store() *state.Store { return a.st }
 func (a *App) SetBackend(sess sessionAPI, windows windowsAPI) {
 	a.sess = sess
 	a.windows = windows
+	// A user resize of the Comms window must reach the profile (spec D3). The
+	// registry reports settled geometry; it is the only path by which a window
+	// edge drag is observed at all.
+	if o, ok := windows.(interface {
+		SetGeometryObserver(func(string, windowstate.Geometry))
+	}); ok {
+		o.SetGeometryObserver(a.onWindowGeometry)
+	}
+}
+
+// onWindowGeometry receives settled window geometry from the registry.
+func (a *App) onWindowGeometry(id string, g windowstate.Geometry) {
+	if id == "comms" {
+		a.captureCommsWindowSize(g.W, g.H)
+	}
 }
 
 // SetApp injects the Wails application reference. Must be called before Run().
@@ -258,6 +285,14 @@ func (a *App) ServiceShutdown() error {
 	// into the hotkey library and emit a Wails event after teardown. Bounded,
 	// so a poll blocked behind an in-flight keybind write cannot hang quit.
 	a.stopPermissionPoll(shutdownPollStopTimeout)
+	// Persist anything held only in memory -- today that is the Comms
+	// layout, which SetCommsLayout deliberately does not write during a
+	// drag. Logged rather than notified: by this point there is no window
+	// left to show a notification in, and a failed layout write must not
+	// block the quit.
+	if err := a.flushConfig(); err != nil {
+		a.logger.Warn("config flush on shutdown failed", "err", err)
+	}
 	// Then shut the OS key listener down. The stream is process-global and
 	// outlives every rebind (see internal/hotkeys/registrar_gohook.go), so
 	// this is its one closing bracket. It also releases a hotkey still being
@@ -273,6 +308,13 @@ func (a *App) ServiceShutdown() error {
 	// or a voice session outlives the control connection it was dialed
 	// against, sending BYE nowhere and leaking its goroutines past quit.
 	a.stopVoiceSession()
+	// The final history flush comes AFTER the voice stop: Session.Close
+	// emits a row for every RX stream still open, and that row must be in
+	// the log when it is written. flushHistory stops and joins the ticker
+	// first -- see StartHistoryTicker. Logged, not notified: no window is left.
+	if err := a.flushHistory(); err != nil {
+		a.logger.Warn("history flush on shutdown failed", "err", err)
+	}
 	if a.sess != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownDisconnectTimeout)
 		defer cancel()

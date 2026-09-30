@@ -282,11 +282,30 @@ unverifiable today.
 
 ### Phase 7.3 — Local persistence
 
-**Status:** `[ ]` not started — spec not yet written.
+**Status:** `[x]` complete 2026-09-30 — radio profiles, builtin defaults with hash-gated migration, the transmission log, and a resizable Comms layout. **Design doc:** [`2026-09-30-vcs-client-phase-7-3-local-persistence-design.md`](./superpowers/specs/2026-09-30-vcs-client-phase-7-3-local-persistence-design.md) · **Plan:** [`2026-09-30-phase-7-3-local-persistence.md`](./superpowers/plans/2026-09-30-phase-7-3-local-persistence.md)
+
+**Verification status:** automated suite green (`go build`/`go vet`/`go test -race -count=1 ./...` with `-tags purego` across every package; frontend `vitest` 316/316 across 33 files; `npx tsc --noEmit`). **Not field-verified** — this is the **eighth** manual checklist to sit unrun in `docs/superpowers/plans/`, joining Phases 3, 3.5, 4, 5, 6, 7.1 and 7.2. See [`2026-09-30-phase-7-3-manual-verification.md`](./superpowers/plans/2026-09-30-phase-7-3-manual-verification.md).
+
+**The single most important unknown: the 500 ms RX idle threshold is a guess, not a measurement.** There is no end-of-transmission marker anywhere on the wire — the server never sends BYE (`internal/voice/session.go:616`) and the client sends one only from `Close()` — so a received transmission's end is detected by a dedicated idle threshold, which must sit above a real talker's worst inter-packet gap and below a natural speech pause. Nobody has ever received voice from a real peer on this client, so the distribution it must clear is unmeasured. Too low splits one sentence into several rows; too high merges two exchanges into one. It is exposed as `voice.Options.HistoryIdleMS` *and* `[voice] history_idle_ms` precisely so it can be swept on hardware without a rebuild, and is clamped to `rxIdleTimeout - 1s` (4000 ms) so a value above the 5 s stream reap cannot silently disable the whole log. Checklist item 1 is the sweep.
+
+**Also never exercised:** native file dialogs (BROWSE/IMPORT/EXPORT/OPEN) on any OS; the Comms resize/reorder grid in a real Wails webview; touch/pen drags (there is no `pointercancel` handler); and cross-client RX rows, since `VNGD-SimpleRadioStandalone` PR #253 still sends no voice secret and cannot authenticate.
 
 **Headline deliverables**
-- Radio profile load/save/import/export (JSON files in user-chosen dir)
-- Transmission history view (local JSON ring buffer)
+- Radio profile load/save/import/export (JSON files in user-chosen dir). Live state stays in `config.toml`; a profile is a snapshot of `Radios` + `[comms_layout]` plus metadata — **not** `SelectedRadioID`, which is compared by the dirty check and would otherwise light the dirty dot on every `radio.<n>.select` hotkey press mid-operation. `frequency_khz` is stored as an integer and never round-trips through a float — the server compares advertised frequencies with exact `float32` equality (`vcs-srs-server/state/server.go:211`), so a float profile format could drop a radio out of range silently.
+- Transmission history view (local JSON ring buffer): RX + own TX, 2000-entry ring in `AppDataDir()/history.json`, debounced atomic flush.
+
+**Beyond this row's original text — added during design at the user's request, and recorded plainly rather than as if it had always been planned:**
+- **A fully customizable Comms layout.** A profile also carries per-radio block sizes in px and the Comms window size, which means the Comms popout gains a resize/reorder editor it does not have today (a `flex-wrap` flow grid, chosen over a free-form canvas so overlap, clamping and shrink policies are unreachable states rather than rules to get wrong). This is new UI work in a window this row does not mention, and it is an **improvement on the design prototype**, not a port of it — `design/vcs/project/screens/comms.jsx:44-50` has three hardcoded CSS-grid presets with no per-block sizing at all.
+- A dirty indicator with **REVERT** (re-read the active profile) and **RESET** (built-in default layout only — never touches radios) in the Comms chrome.
+- **Builtin default profiles**, `go:embed`'d and seeded into `profiles_dir` at startup, with a recorded content hash in `config.toml` deciding whether a shipped update may replace the on-disk file. A user edit is permanent (the hash diverges, and that file is never touched again by any future build) and so is a deletion (a recorded hash proves the file was written once, so its absence is a decision, not a fresh install).
+- `selected_radio_id` is deliberately **not** in the profile — it is compared by the dirty check, so storing it would light the dirty dot on every `radio.<n>.select` hotkey press. LOAD re-validates the selection against the incoming radio set instead, because `resolveTXTarget` returns `nil` for a missing radio and that is a silently dead PTT.
+- The Comms layout is held in memory during a drag and written at shutdown — no disk I/O on a pointer-move path. The history ring keeps its ~5s debounce, because a lost log cannot be re-created the way a lost drag can.
+
+**Findings from the design survey that contradict what was written down:**
+- **There is no end-of-transmission marker anywhere on the wire**, which is worse than the decomposition spec's "the `voice:rx_active` event does not exist". The server never sends BYE (`internal/voice/session.go:616`) and the client sends one only from `Close()` (`session.go:397`). The only existing end-of-stream signal is the 5s `rxIdleTimeout` reap, an audio-path lifetime. The design adds a dedicated 500ms idle threshold for history and leaves `rxIdleTimeout` untouched. **That 500ms is a guess, not a measurement** — nobody has ever received voice from a real peer on this client.
+- Prototype paths in the decomposition spec §3.1 and CLAUDE.md omit a `project/` segment: it is `design/vcs/project/screens/misc.jsx` and `design/vcs/project/styles.css`.
+- CLAUDE.md's `make proto` does not exist — there is no Makefile. `Taskfile.yml`'s `proto` task runs `buf generate`, and `buf` must be installed before anything compiles.
+- PROTO_GAPS §7's "status bar history affordance" does not exist; `StatusBar.tsx` has only `onNavigate("server")`.
 
 **Blocking deps:** Phase 7.2 (dependency order — see decomposition spec). Independent of 7.4; may run in parallel with it.
 

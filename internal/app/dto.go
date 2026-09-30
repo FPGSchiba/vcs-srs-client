@@ -416,3 +416,64 @@ type HotkeyPermissionResultDTO struct {
 	// the window-focus re-check, both of which emit hotkeys:state.
 	Permission string `json:"permission"`
 }
+
+// ProfileWindowDTO / ProfileBlockDTO / ProfileSummaryDTO are the
+// binding-facing profile shapes.
+//
+// Modified is a pre-formatted string, not a time: the Profiles table renders
+// it verbatim in a monospace column, and formatting it here keeps one
+// rendering of "when" rather than one per window.
+type ProfileWindowDTO struct {
+	W int `json:"w"`
+	H int `json:"h"`
+}
+
+type ProfileBlockDTO struct {
+	RadioID uint32 `json:"radio_id"`
+	Variant string `json:"variant"`
+}
+
+type ProfileSummaryDTO struct {
+	Path        string            `json:"path"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Author      string            `json:"author"`
+	Modified    string            `json:"modified"`
+	RadioCount  int               `json:"radio_count"`
+	Window      ProfileWindowDTO  `json:"window"`
+	Blocks      []ProfileBlockDTO `json:"blocks"`
+}
+
+// ProfileStateDTO is what the dirty dot, the REVERT/RESET controls and the
+// Profiles screen's directory field all read.
+//
+// Dirty is COMPUTED on every call, never stored -- see App.profileDirty.
+type ProfileStateDTO struct {
+	ActivePath string `json:"active_path"`
+	ActiveName string `json:"active_name"`
+	Dirty      bool   `json:"dirty"`
+	Dir        string `json:"dir"`
+}
+
+// LayoutDTO is the Comms arrangement as the frontend sends it back.
+type LayoutDTO struct {
+	Window ProfileWindowDTO  `json:"window"`
+	Blocks []ProfileBlockDTO `json:"blocks"`
+}
+
+// HistoryEntryDTO is one Transmission Log row.
+//
+// At is pre-formatted RFC3339 rather than a time, and FreqMHz is derived
+// here beside the stored kHz integer, so every window renders the same
+// string and the same number without repeating the conversion. FreqKHz
+// stays on the wire because the channel filter matches on it.
+type HistoryEntryDTO struct {
+	At         string  `json:"at"`
+	Sender     string  `json:"sender"`
+	GUID       string  `json:"guid"`
+	FreqKHz    uint32  `json:"freq_khz"`
+	FreqMHz    float64 `json:"freq_mhz"`
+	Radio      string  `json:"radio"`
+	DurationMS int     `json:"dur_ms"`
+	Own        bool    `json:"own"`
+}

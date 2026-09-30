@@ -111,6 +111,23 @@ const (
 	// the Notifications window -- the same reason connection:state and
 	// window:state are Go-owned.
 	EventNotifications = "notifications:changed"
+	// EventHistoryAppended carries ONE entry, not a snapshot.
+	//
+	// A deliberate divergence from EventNotifications, which broadcasts the
+	// full list: that works because notify.DefaultCap is small, whereas
+	// history.DefaultCap is 2000 entries at ~120B -- roughly 240KB per emit, at
+	// up to several transmissions per second. Windows hydrate with
+	// App.GetHistory() and apply deltas after that.
+	EventHistoryAppended = "history:appended"
+	// EventHistoryCleared says the log was emptied.
+	EventHistoryCleared = "history:cleared"
+	// EventProfileState carries the active profile path, its name, the computed
+	// dirty flag and the resolved profiles directory.
+	//
+	// Broadcast to EVERY window: the Comms popout renders the dirty dot and the
+	// REVERT/RESET controls and is a separate webview with its own JS heap, the
+	// same reason connection:state and notifications:changed are Go-owned.
+	EventProfileState = "profile:state"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -403,3 +420,10 @@ func (t *Tagged) ConnectionHealth(payload any) {
 // shape is notify.Snapshot, and naming it here would make this package
 // depend on one of its own consumers' collaborators for no benefit.
 func (t *Tagged) Notifications(payload any) { t.em.Emit(EventNotifications, payload) }
+
+func (t *Tagged) HistoryAppended(entry any) { t.em.Emit(EventHistoryAppended, entry) }
+func (t *Tagged) HistoryCleared()           { t.em.Emit(EventHistoryCleared, nil) }
+
+// ProfileState emits EventProfileState. The payload is typed as any for the
+// same reason Notifications' is: the concrete shape is app.ProfileStateDTO.
+func (t *Tagged) ProfileState(payload any) { t.em.Emit(EventProfileState, payload) }

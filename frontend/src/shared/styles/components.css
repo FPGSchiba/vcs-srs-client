@@ -68,7 +68,8 @@
 }
 .popout-chrome .ctrl {
   display: flex;
-  gap: 2px;
+  gap: 4px;
+  align-items: center;
 }
 .popout-chrome .ctrl button {
   width: 24px; height: 24px;
@@ -76,6 +77,14 @@
   color: var(--tx-2);
   border-radius: 2px;
   cursor: pointer;
+}
+/* The 24px square above is for icon controls. A text button in the chrome
+   (SAVE / REVERT / RESET) needs its own width, or the label is clipped to a
+   24px box and the controls read as overlapping. */
+.popout-chrome .ctrl button.btn {
+  width: auto;
+  height: 22px;
+  padding: 0 8px;
 }
 .popout-chrome .ctrl button:hover { background: var(--bg-3); color: var(--tx-0); }
 .popout-chrome .ctrl button.close:hover { background: var(--ac-alert); color: #fff; }
@@ -1020,6 +1029,15 @@ input:focus, select:focus, textarea:focus {
 }
 .lcd-amber { color: var(--ac-lcd-amber); background: var(--bg-lcd-warm); }
 .lcd-amber::after { background: radial-gradient(ellipse at center, rgba(245,185,75,0.05), transparent 70%); }
+/* A <fieldset> (implicit role=group) gives the digits one accessible name;
+   strip its default box so it lays out exactly like the span it replaced. */
+.lcd-digits {
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
 .lcd-digit {
   display: inline-block;
   cursor: ns-resize;
@@ -1294,6 +1312,8 @@ input:focus, select:focus, textarea:focus {
 }
 .tbl tr:hover td { background: var(--bg-3); }
 
+.own { color: var(--ac-primary); }
+
 /* ========== Drag-and-drop / utility ========== */
 .row { display: flex; align-items: center; }
 .col { display: flex; flex-direction: column; }
@@ -1443,3 +1463,49 @@ input:focus, select:focus, textarea:focus {
 .popout-chrome button,
 .popout-chrome .ctrl,
 .popout-chrome .ctrl button { --wails-draggable: no-drag; }
+
+/* A digit is a <button> now (native click + Enter/Space, no S1082 shim), so
+   the browser's control styling has to be undone before .lcd-digit's own look
+   applies. */
+button.lcd-digit {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: ns-resize;
+}
+button.lcd-digit[data-cursor="true"] {
+  background: color-mix(in srgb, var(--ac-lcd) 18%, transparent);
+  border-radius: 2px;
+}
+.lcd-unit {
+  font-size: 0.4em;
+  letter-spacing: 0.12em;
+  color: var(--tx-3);
+  align-self: flex-end;
+  padding-bottom: 0.2em;
+  margin-left: 0.4em;
+}
+
+/* Per-radio settings gear. 16x16 total (border-box) to fit the 16.8px card
+   header budget enforced by comms/fit.test.tsx. */
+.radio-gear {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1px solid var(--bd-2);
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--tx-1);
+  cursor: pointer;
+}
+.radio-gear:hover { border-color: var(--bd-3); background: var(--bg-3); color: var(--tx-0); }
+.radio-gear[data-open="true"] { color: var(--ac-primary); }
+.radio-gear:focus-visible { outline: none; border-color: var(--ac-primary); box-shadow: 0 0 0 1px var(--ac-primary); }
