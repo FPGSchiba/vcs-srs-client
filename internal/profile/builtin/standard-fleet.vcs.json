@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "Standard Fleet",
+  "description": "Three monitored channels: fleet common, wing and intercom. The default starting point for a fresh install.",
+  "author": "Vanguard",
+  "created_at": "2026-09-30T00:00:00Z",
+  "modified_at": "2026-09-30T00:00:00Z",
+  "radios": [
+    { "id": 1, "name": "Fleet Common", "frequency_khz": 118500, "enabled": true, "is_intercom": false },
+    { "id": 2, "name": "Wing", "frequency_khz": 122750, "enabled": true, "is_intercom": false },
+    { "id": 3, "name": "Intercom", "frequency_khz": 100000, "enabled": true, "is_intercom": true }
+  ],
+  "layout": {
+    "window": { "w": 540, "h": 720 },
+    "blocks": [
+      { "radio_id": 1, "w": 516, "h": 180 },
+      { "radio_id": 2, "w": 516, "h": 180 },
+      { "radio_id": 3, "w": 516, "h": 180 }
+    ]
+  }
+}
