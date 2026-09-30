@@ -20,13 +20,40 @@ Four variants. All four carry the radio name, the talker name and the VU meter.
 
 | Variant | Size | Orientation | LCD | PTT | Chips | `MHZ` unit |
 |---|---|---|---|---|---|---|
-| **VERTICAL** | 280×166 | column | 30px | 96×28 | `ON` · `INTERCOM` | yes |
-| **HORIZONTAL** | 360×110 | row | 22px | 64×64 | `ON` | yes |
+| **VERTICAL** | 280×168 | column | 30px | 96×28 | `ON` · `INTERCOM` | yes |
+| **HORIZONTAL** | 360×115 | row | 22px | 64×64 | `ON` | yes |
 | **NARROW-H** | 300×68 | row | 21px | 32×30 | frame only | — |
-| **NARROW-V** | 150×124 | column | 18px | fill×26 | frame only | — |
+| **NARROW-V** | 150×136 | column | 18px | fill×26 | frame only | — |
 
 For scale: the card being replaced is **516×180, 14px frequency, 160×48 PTT**.
 Every variant is smaller and every frequency is larger.
+
+> **Heights corrected 2026-09-30, after implementation.** The heights first agreed here
+> (166 / 110 / 68 / 124) were derived from the row tables in §2 by addition, and three of
+> them were too small for the components as actually built — the frame's 1px border was
+> never budgeted, and several rows measure larger than the table assumed. The real
+> components were then measured in headless Chrome:
+>
+> | Variant | Agreed | Measured need | Shipped |
+> |---|---|---|---|
+> | VERTICAL | 166 | 167.6 | **168** |
+> | HORIZONTAL | 110 | 114.6 | **115** |
+> | NARROW-H | 68 | 56.2 | **68** (no overflow; unchanged) |
+> | NARROW-V | 124 | 135.4 | **136** |
+>
+> NARROW-V is the significant one: its LCD measures 34px against the 30 in §2, its header
+> 16.8 against 14, and its status row 15.4 against 12, so 124 was never achievable. Under
+> the agreed heights every row had `flex-shrink: 1`, so the shortfall was absorbed silently
+> by compressing the LCD — which has `overflow: hidden` — and clipping the frequency digits.
+> The §2 row tables below are kept as the agreed DESIGN INTENT and have not been rewritten;
+> where they disagree with these totals, the totals are what ships.
+>
+> Consequence worth knowing: at 150×136, NARROW-V's area (20400) exactly equals NARROW-H's
+> (300×68), so the keyboard resize order in `RadioBlock.tsx` needs an explicit tiebreak.
+>
+> Open for the user: accept these heights, or hold the agreed footprint and shrink the
+> internals instead — the latter means a smaller frequency, which cuts against the
+> redesign's first goal.
 
 ---
 
