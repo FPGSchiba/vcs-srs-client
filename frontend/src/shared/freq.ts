@@ -73,8 +73,5 @@ export function digitsOf(khz: number): FreqCell[] {
 export function stepDigit(khz: number, place: number, dir: 1 | -1): number {
   const next = clampKhz(khz) + dir * 10 ** place;
   if (next < MIN_KHZ || next > MAX_KHZ) return clampKhz(khz);
-  // Refuse large steps (≥ 1 MHz, place > 3) that land exactly on MAX to prevent
-  // the user from getting stuck with no headroom for further steps
-  if (next === MAX_KHZ && place > 3) return clampKhz(khz);
   return next;
 }

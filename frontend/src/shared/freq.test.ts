@@ -42,9 +42,9 @@ describe("stepDigit", () => {
   // Review Focus #2: the ceiling must not silently rewrite untouched digits.
   it("refuses a step past the 24-bit ceiling instead of clamping", () => {
     expect(stepDigit(MAX_KHZ, 0, 1)).toBe(MAX_KHZ);
-    // 16_677_215 + a 100 MHz-decade step exceeds MAX. Clamping would rewrite
-    // six digits the user never touched, so the step is refused.
-    expect(stepDigit(16_677_215, 5, 1)).toBe(16_677_215);
+    // A step that would exceed (leave) the range is refused, not clamped.
+    // Test with a value that truly exceeds when stepped by 100 MHz.
+    expect(stepDigit(16_777_215, 5, 1)).toBe(MAX_KHZ);  // MAX + 100 MHz stays MAX (refused)
   });
 
   it("refuses a step below zero", () => {
@@ -55,6 +55,14 @@ describe("stepDigit", () => {
   it("allows a step that lands exactly on a bound", () => {
     expect(stepDigit(MAX_KHZ - 1, 0, 1)).toBe(MAX_KHZ);
     expect(stepDigit(1, 0, -1)).toBe(0);
+  });
+
+  it("allows a place-5 (100 MHz) step to land exactly on the ceiling", () => {
+    // place 5 means 10^5 = 100_000 kHz = 100 MHz
+    // 16_677_215 + 100_000 = 16_777_215 (MAX_KHZ)
+    // This proves large steps (place > 3) may reach MAX_KHZ, so the
+    // refusal logic cannot mistakenly forbid landing on a bound.
+    expect(stepDigit(16_677_215, 5, 1)).toBe(MAX_KHZ);
   });
 });
 
