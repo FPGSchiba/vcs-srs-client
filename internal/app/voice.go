@@ -368,6 +368,11 @@ func (a *App) voiceSessionSwap(sess voiceSessionAPI, gen uint64) (old voiceSessi
 	}
 	if sess == nil {
 		a.voice.gen++
+		// A teardown ends every in-flight own transmission: flush them as
+		// history rows ending now and clear txStarted, or the next release of
+		// the same frequency would log a row spanning the gap. Nil branch
+		// only -- a redirect that replaces a session may continue a hold.
+		a.installTXTargetsLocked(nil, nil)
 	}
 	old = a.voice.sess
 	a.voice.sess = sess

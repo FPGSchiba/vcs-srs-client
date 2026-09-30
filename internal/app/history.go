@@ -155,9 +155,11 @@ func (a *App) installTXTargetsLocked(sess voiceSessionAPI, targets []voice.TXTar
 		sess.SetTXFrequencies(targets)
 	}
 
-	// Recorded AFTER the session store so the lock is held for exactly as
-	// long as it was before, and so a slow history append can never delay
-	// the frequency list reaching the wire.
+	// Recorded AFTER the session store so a slow history append can never
+	// delay the frequency list reaching the wire. The caller's lock IS held
+	// across this, though: the critical section now also spans the settings
+	// and state-store lock acquisitions, the history append and the emit.
+	// Safe only because none of those paths takes voiceState.mu.
 	for _, e := range ended {
 		a.appendHistory(history.Entry{
 			At:         e.start,

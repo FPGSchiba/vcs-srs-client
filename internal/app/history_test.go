@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,9 @@ func TestResolveSenderHandlesNonCanonicalStoreKey(t *testing.T) {
 	a.st.UpdateClient(strings.ToUpper(id.String()), &srspb.ClientInfo{Name: "Shouty"})
 
 	guid, callsign := a.resolveSender(id)
+	if guid != strings.ToUpper(id.String()) {
+		t.Fatalf("guid = %q, want the store's own key %q", guid, strings.ToUpper(id.String()))
+	}
 	if callsign != "Shouty" {
 		t.Fatalf("callsign = %q, want Shouty -- the index must normalise GUID spelling", callsign)
 	}
@@ -76,7 +80,11 @@ func TestGlobalChannelRowHasNoChannelName(t *testing.T) {
 	// without one.
 	start := time.Now().UTC()
 	a.onVoiceRX(voice.RXEvent{Sender: uuid.New(), Freq: 200000, Start: start, End: start.Add(time.Second)})
-	if got := a.GetHistory(); got[0].Radio != "" {
+	got := a.GetHistory()
+	if len(got) != 1 {
+		t.Fatalf("history = %+v, want 1 row", got)
+	}
+	if got[0].Radio != "" {
 		t.Fatalf("Radio = %q, want empty -- inventing a channel name for a global would be a lie", got[0].Radio)
 	}
 }
@@ -112,10 +120,15 @@ func TestInstallTXTargetsRecordsOneRowPerFrequency(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("two targets released together must produce two rows, got %d: %+v", len(got), got)
 	}
+	seen := map[uint32]int{}
 	for _, r := range got {
 		if !r.Own || r.Sender != "FPGSchiba" {
 			t.Fatalf("own rows must carry the local callsign: %+v", r)
 		}
+		seen[r.FreqKHz]++
+	}
+	if seen[118500] != 1 || seen[122750] != 1 {
+		t.Fatalf("want one row for each of 118500 and 122750, got %v", seen)
 	}
 }
 
@@ -164,9 +177,17 @@ func TestOwnRowWithNoSelfStillRecords(t *testing.T) {
 func TestClearHistoryEmpties(t *testing.T) {
 	a := newTestAppWithConfig(t, config.Default(), "")
 	a.setHistory(history.New(10))
+	rec := &recordingEmitter{}
+	a.settings.em = events.New(rec)
 	a.onVoiceRX(voice.RXEvent{Sender: uuid.New(), Freq: 118500,
 		Start: time.Now(), End: time.Now().Add(time.Second)})
+	if len(a.GetHistory()) != 1 {
+		t.Fatal("precondition: a row must exist before clearing")
+	}
 	a.ClearHistory()
+	if rec.count(events.EventHistoryCleared) != 1 {
+		t.Fatalf("HistoryCleared emitted %d times, want 1", rec.count(events.EventHistoryCleared))
+	}
 	if got := a.GetHistory(); len(got) != 0 {
 		t.Fatalf("history = %+v, want empty", got)
 	}
@@ -176,5 +197,119 @@ func TestGetHistoryWithNoLogIsEmptyNotNil(t *testing.T) {
 	a := newTestAppWithConfig(t, config.Default(), "")
 	if got := a.GetHistory(); got == nil {
 		t.Fatal("must be a non-nil empty slice: the frontend types it as an array and nil marshals to null")
+	}
+}
+
+func twoRadios(a *App) {
+	sb := a.settings
+	sb.mu.Lock()
+	next := *sb.cfg
+	next.Radios = []config.Radio{
+		{ID: 1, Name: "Fleet Common", FrequencyKHz: 118500, Enabled: true},
+		{ID: 2, Name: "Wing", FrequencyKHz: 122750, Enabled: true},
+	}
+	sb.cfg = &next
+	sb.mu.Unlock()
+}
+
+func setSess(a *App, s voiceSessionAPI) {
+	a.voice.mu.Lock()
+	a.voice.sess = s
+	a.voice.mu.Unlock()
+}
+
+// The central claim: the REAL press, release and idle-clear paths all log.
+func TestPressReleaseAndIdleClearPathsLogRows(t *testing.T) {
+	a := newTestAppWithConfig(t, config.Default(), "")
+	a.setHistory(history.New(10))
+	twoRadios(a)
+	setSess(a, &fakeVoiceSession{})
+
+	// txRelease with another action still held installs the shrunk set.
+	a.txPress("radio.1.ptt")
+	a.txPress("radio.2.ptt")
+	if held := a.txRelease("radio.2.ptt"); !held {
+		t.Fatal("radio.1.ptt should still be held")
+	}
+	got := a.GetHistory()
+	if len(got) != 1 || got[0].FreqKHz != 122750 {
+		t.Fatalf("txRelease path must log the released frequency: %+v", got)
+	}
+
+	// Final release + idle clear logs the last one.
+	a.txRelease("radio.1.ptt")
+	a.clearTXTargetsIfStillIdle()
+	got = a.GetHistory()
+	if len(got) != 2 || got[0].FreqKHz != 118500 {
+		t.Fatalf("idle-clear path must log the last frequency: %+v", got)
+	}
+}
+
+func TestHistoryAppendedEmitsExactlyOneEntry(t *testing.T) {
+	a := newTestAppWithConfig(t, config.Default(), "")
+	a.setHistory(history.New(10))
+	rec := &recordingEmitter{}
+	a.settings.em = events.New(rec)
+	start := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		a.onVoiceRX(voice.RXEvent{Sender: uuid.New(), Freq: 118500, Start: start, End: start.Add(time.Second)})
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	n := 0
+	for i, name := range rec.events {
+		if name != events.EventHistoryAppended {
+			continue
+		}
+		n++
+		if _, ok := rec.payloads[i].(HistoryEntryDTO); !ok {
+			t.Fatalf("payload %d is %T, want one HistoryEntryDTO (not a snapshot)", i, rec.payloads[i])
+		}
+	}
+	if n != 3 {
+		t.Fatalf("emitted %d times, want 3", n)
+	}
+}
+
+func TestTeardownFlushesInFlightTransmission(t *testing.T) {
+	a := newTestAppWithConfig(t, config.Default(), "")
+	a.setHistory(history.New(10))
+	twoRadios(a)
+	rec := &recordingEmitter{}
+	a.settings.em = events.New(rec)
+	setSess(a, &fakeVoiceSession{})
+	a.txPress("radio.1.ptt")
+	if len(a.GetHistory()) != 0 {
+		t.Fatal("nothing logs while transmitting")
+	}
+	a.setVoiceSession(nil, 0)
+	got := a.GetHistory()
+	if len(got) != 1 || !got[0].Own || got[0].FreqKHz != 118500 {
+		t.Fatalf("teardown must flush the in-flight row: %+v", got)
+	}
+	if rec.count(events.EventHistoryAppended) != 1 {
+		t.Fatalf("teardown emitted %d appends, want 1", rec.count(events.EventHistoryAppended))
+	}
+}
+
+func TestStaleTXStartDoesNotSurviveTeardown(t *testing.T) {
+	a := newTestAppWithConfig(t, config.Default(), "")
+	a.setHistory(history.New(10))
+	twoRadios(a)
+	setSess(a, &fakeVoiceSession{})
+	a.txPress("radio.1.ptt")
+	a.setVoiceSession(nil, 0)
+	time.Sleep(150 * time.Millisecond)
+
+	setSess(a, &fakeVoiceSession{})
+	a.txPress("radio.1.ptt")
+	a.txRelease("radio.1.ptt")
+	a.clearTXTargetsIfStillIdle()
+	got := a.GetHistory() // newest first
+	if len(got) != 2 {
+		t.Fatalf("want teardown row + second row, got %+v", got)
+	}
+	if got[0].DurationMS >= 100 {
+		t.Fatalf("second row duration %dms spans the teardown gap (stale txStarted)", got[0].DurationMS)
 	}
 }
