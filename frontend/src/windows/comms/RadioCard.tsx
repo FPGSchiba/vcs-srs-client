@@ -3,165 +3,196 @@ import { api, type RadioDTO } from "../../shared/api/client";
 import { useRadios } from "../../shared/store/radios";
 import { LcdFreq } from "../../shared/components/LcdFreq";
 import { Toggle } from "../../shared/components/Toggle";
-import { Icon } from "../../shared/components/Icon";
+import { khzToMhz, mhzToKhz } from "../../shared/freq";
+import { variantById } from "./variants";
+import { SHELLS } from "./shells";
+import { RadioFrame } from "./RadioFrame";
+import { TalkerLine } from "./TalkerLine";
+import { PttIndicator } from "./PttIndicator";
 
 interface Props {
   radio: RadioDTO;
   allRadios: RadioDTO[];
   muted: boolean;
+  /** The stored variant id. An unknown one resolves to the default. */
+  variantId: string;
 }
 
 /**
- * RadioCard renders an editable radio strip ported from the design prototype's
- * `radio.jsx` RadioWidget. The frequency LCD, name, and enable/intercom toggles
- * are shown, plus selection and live transmit state.
+ * RadioCard resolves a variant descriptor, builds the card's pieces, and hands
+ * them to the shell for that descriptor's orientation. It holds no geometry of
+ * its own: adding a variant SIZE requires no change here.
  *
- * Editing is write-through: the name input holds transient local state while
- * focused, and on commit (blur / Enter, toggle click, LCD edit) the edited radio
- * is merged into `allRadios` to build a full `RadioInfoDTO` which is sent to the
- * backend via `api.updateRadioInfo`. The store is NOT updated optimistically for
- * these fields — the server's `state:radio_update` echo (handled by CommsApp) is
- * the single source of truth.
+ * Editing is write-through: the edited radio is merged into `allRadios` to
+ * build a full RadioInfoDTO and sent via api.updateRadioInfo. The store is NOT
+ * updated optimistically — the server's `state:radio_update` echo is the
+ * single source of truth for radio fields.
  *
- * Selection (clicking the card) and transmit state are different: selection is
- * pure client-local UI state (a.st.SelectedRadio has no server echo — see
- * App.SelectRadio), so it IS updated optimistically via the shared `useRadios`
- * store, which CommsApp also feeds from api.voiceState() on mount. Transmit
- * state is derived, not stored per-radio: `radio.<id>.ptt` held, or
- * `global.ptt` held while this radio is selected (holding both is a set union —
- * see App.resolveTXTarget/txPress in internal/app/voice.go).
+ * Selection is different: a.st.SelectedRadio has no server echo (see
+ * App.SelectRadio), so it IS applied optimistically to the shared store.
+ *
+ * Transmit state is derived: this radio's own PTT action held, or `global.ptt`
+ * held with this radio as the FROZEN press-time target. Using live `selected`
+ * there would let re-selecting mid-transmission retarget the indicator while
+ * the backend keeps transmitting on whatever was selected at key-down.
+ *
+ * The frequency crosses one boundary here and nowhere else: the DTO carries an
+ * MHz float, the LCD works in canonical integer kHz.
  */
-export function RadioCard({ radio, allRadios, muted }: Props) {
+export function RadioCard({ radio, allRadios, muted, variantId }: Props) {
+  const [editing, setEditing] = useState(false);
   const [name, setName] = useState(radio.name);
   const selectedRadioId = useRadios((s) => s.selectedRadioId);
   const heldPTT = useRadios((s) => s.heldPTT);
   const globalPttTargetId = useRadios((s) => s.globalPttTargetId);
 
-  // Re-sync local draft when the upstream radio name changes (e.g. server echo).
+  // Re-sync the draft when the upstream name changes (e.g. a server echo).
   useEffect(() => setName(radio.name), [radio.name]);
 
+  const variant = variantById(variantId);
+  const Shell = SHELLS[variant.orientation];
+
   function commit(next: RadioDTO) {
-    const radios = allRadios.map((r) => (r.id === next.id ? next : r));
-    void api.updateRadioInfo({ muted, radios });
+    void api.updateRadioInfo({ muted, radios: allRadios.map((r) => (r.id === next.id ? next : r)) });
   }
 
   function select() {
+    if (editing) return;
     useRadios.getState().setSelectedRadioId(radio.id);
     void api.selectRadio(radio.id);
   }
 
   const selected = selectedRadioId === radio.id;
-  // global.ptt's contribution uses the FROZEN press-time target
-  // (globalPttTargetId), not the live `selected` above -- see the
-  // globalPttTargetId doc comment in the radios store. Using `selected`
-  // here would let re-selecting a different radio mid-transmission
-  // retarget the indicator even though the backend keeps transmitting on
-  // whatever was selected when the key went down.
   const transmitting =
     heldPTT.has(`radio.${radio.id}.ptt`) ||
     (heldPTT.has("global.ptt") && globalPttTargetId === radio.id);
+  const disabled = !radio.enabled;
+  const rid = `R${String(radio.id).padStart(2, "0")}`;
+
+  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
 
   return (
-    <div
-      className="radio"
-      onClick={select}
-      // `aria-selected` is only meaningful on a handful of roles (option,
-      // row, tab, treeitem, gridcell, ...) -- plain <div>s ignore it
-      // entirely, so it was orphaned. `option` fits (this is one card in a
-      // set of radios the user picks from; CommsApp's list wrapper carries
-      // the matching `role="listbox"`), and pairing it with a real
-      // tabIndex + Enter/Space handler makes selection keyboard-reachable
-      // too, not mouse-only.
-      role="option"
-      aria-selected={selected}
-      tabIndex={0}
-      onKeyDown={(e) => {
-        // Only handle keys targeting the card itself -- the name input,
-        // toggles, and LCD are independently focusable/keyboard-operable
-        // children, and a bubbled Space from typing in the name input must
-        // not be hijacked into a card-select.
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          select();
-        }
-      }}
-      style={{
-        border: `1px solid ${selected ? "var(--ac-primary)" : "var(--bd-2)"}`,
-        cursor: "pointer",
-      }}
+    <RadioFrame
+      w={variant.w}
+      h={variant.h}
+      label={`${rid} ${radio.name}`}
+      onSelect={select}
+      selected={selected}
+      receiving={false} /* no live per-radio RX feed yet — see the spec §7 */
+      transmitting={transmitting}
+      intercom={radio.is_intercom}
+      disabled={disabled}
     >
-      <div className="row acenter gap-3" style={{ minHeight: 22 }}>
-        <span
-          className="cap mono"
-          style={{ color: "var(--ac-primary)", letterSpacing: "0.16em" }}
-        >
-          R{String(radio.id).padStart(2, "0")}
-        </span>
-        <input
-          className="input"
-          aria-label="radio name"
-          style={{ height: 22, fontSize: 12, padding: "0 6px", flex: 1 }}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onBlur={() => commit({ ...radio, name })}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-          }}
-          onClick={(e) => e.stopPropagation()}
-        />
-        {radio.is_intercom && (
-          <span className="cap" style={{ color: "var(--ac-primary)" }}>
-            ICOM
+      <Shell
+        variant={variant}
+        rid={
+          <span
+            className="cap mono"
+            style={{
+              color: radio.is_intercom ? "var(--ac-warn)" : "var(--ac-primary)",
+              letterSpacing: "0.16em",
+              flexShrink: 0,
+            }}
+          >
+            {rid}
           </span>
-        )}
-      </div>
-
-      <div className="row acenter between gap-4" onClick={(e) => e.stopPropagation()}>
-        <LcdFreq
-          value={radio.frequency}
-          onChange={(frequency) => commit({ ...radio, frequency })}
-        />
-        <div className="col gap-2" style={{ alignItems: "flex-end" }}>
-          <label className="row acenter gap-2 cap mono" style={{ color: "var(--tx-3)" }}>
-            ENABLED
+        }
+        name={
+          editing ? (
+            <input
+              className="input"
+              aria-label="radio name"
+              autoFocus
+              style={{ height: 20, fontSize: 12, padding: "0 6px", width: "100%" }}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onClick={stop}
+              onBlur={() => {
+                setEditing(false);
+                setName(radio.name);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  setEditing(false);
+                  commit({ ...radio, name });
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setName(radio.name);
+                  setEditing(false);
+                }
+              }}
+            />
+          ) : (
+            // A label, not a permanent bordered input: that input is the single
+            // largest reason the shipped card read as a settings form.
+            <span
+              title="Double-click (or press Enter / F2) to rename"
+              role="button"
+              tabIndex={0}
+              onDoubleClick={(e) => {
+                stop(e);
+                setEditing(true);
+              }}
+              // Double-click has no keyboard equivalent, so Enter / F2 opens the
+              // editor too. Keys bubbling from elsewhere are ignored.
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === "F2") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setEditing(true);
+                }
+              }}
+              style={{
+                color: disabled ? "var(--tx-4)" : "var(--tx-0)",
+                fontSize: 12,
+                display: "block",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {radio.name}
+            </span>
+          )
+        }
+        lcd={
+          <span onClick={stop} onDoubleClick={stop}>
+            <LcdFreq
+              khz={mhzToKhz(radio.frequency)}
+              digitPx={variant.lcdPx}
+              unit={variant.shows.unit}
+              onChange={(khz) => commit({ ...radio, frequency: khzToMhz(khz) })}
+            />
+          </span>
+        }
+        talker={<TalkerLine disabled={disabled} self={transmitting} />}
+        ptt={
+          <PttIndicator
+            w={variant.ptt.w}
+            h={variant.ptt.h}
+            transmitting={transmitting}
+            showLabel={variant.ptt.w === "fill" || variant.ptt.w >= 90}
+          />
+        }
+        chips={
+          <span className="row acenter gap-2" onClick={stop} style={{ flexShrink: 0 }}>
             <Toggle
               on={radio.enabled}
-              aria-label="toggle enabled"
+              aria-label="enabled"
               onChange={() => commit({ ...radio, enabled: !radio.enabled })}
             />
-          </label>
-          <label className="row acenter gap-2 cap mono" style={{ color: "var(--tx-3)" }}>
-            INTERCOM
-            <Toggle
-              on={radio.is_intercom}
-              aria-label="toggle intercom"
-              onChange={() => commit({ ...radio, is_intercom: !radio.is_intercom })}
-            />
-          </label>
-        </div>
-      </div>
-
-      <div className="row acenter gap-5" style={{ justifyContent: "space-between" }}>
-        {/* Disabled on purpose: this is a live transmit INDICATOR, not a
-            click-to-talk control -- wiring a real click handler needs new
-            backend binding surface that doesn't exist yet. A native
-            disabled <button> never dispatches `click` at all (so no
-            stopPropagation is needed to keep the card from being
-            (re)selected), while still letting React restyle/re-text it via
-            `className`/children as transmit state changes, and it gets the
-            browser's native "this control does nothing" affordance instead
-            of silently swallowing input. */}
-        <button
-          className={`ptt ${transmitting ? "keyed" : ""}`.trim()}
-          type="button"
-          style={{ flex: 1, maxWidth: 160, height: 48 }}
-          title="Push-to-talk is driven by your configured keybind, not this button"
-          disabled
-        >
-          <Icon name="mic" size={14} /> {transmitting ? "TRANSMIT" : "PUSH-TO-TALK"}
-        </button>
-      </div>
-    </div>
+            {variant.shows.chips === "full" && (
+              <Toggle
+                on={radio.is_intercom}
+                aria-label="intercom"
+                onChange={() => commit({ ...radio, is_intercom: !radio.is_intercom })}
+              />
+            )}
+          </span>
+        }
+      />
+    </RadioFrame>
   );
 }

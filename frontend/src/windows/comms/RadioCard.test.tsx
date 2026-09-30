@@ -1,168 +1,207 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
-
-vi.mock("../../shared/api/client", () => ({
-  api: {
-    updateRadioInfo: vi.fn().mockResolvedValue(undefined),
-    selectRadio: vi.fn().mockResolvedValue(undefined),
-  },
-}));
-import { api } from "../../shared/api/client";
-import { useRadios } from "../../shared/store/radios";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RadioCard } from "./RadioCard";
+import { api, type RadioDTO } from "../../shared/api/client";
+import { useRadios } from "../../shared/store/radios";
 
-describe("RadioCard", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    useRadios.setState({ radios: {}, selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 });
+const radio: RadioDTO = {
+  id: 1,
+  name: "Fleet Common",
+  frequency: 118.5,
+  enabled: true,
+  is_intercom: false,
+} as RadioDTO;
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  useRadios.setState({ selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 });
+});
+
+const show = (r: Partial<RadioDTO> = {}, variantId = "vertical") => {
+  const full = { ...radio, ...r };
+  render(<RadioCard radio={full} allRadios={[full]} muted={false} variantId={variantId} />);
+  return full;
+};
+
+describe("variant resolution", () => {
+  it("takes its box from the named variant", () => {
+    show({}, "narrow-v");
+    expect(screen.getByRole("option")).toHaveStyle({ width: "150px", height: "124px" });
   });
 
-  it("commits a name edit via api.updateRadioInfo", () => {
-    const radio = { id: 1, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    const nameInput = screen.getByLabelText(/radio name/i);
-    fireEvent.change(nameInput, { target: { value: "Wing" } });
-    fireEvent.blur(nameInput);
-    expect(api.updateRadioInfo).toHaveBeenCalledWith({
-      muted: false,
-      radios: [{ id: 1, name: "Wing", frequency: 118.5, enabled: true, is_intercom: false }],
+  // Review Focus #1, end to end.
+  it("falls back to the default variant for an id no descriptor defines", () => {
+    show({}, "dial-round");
+    expect(screen.getByRole("option")).toHaveStyle({ width: "280px", height: "166px" });
+  });
+
+  it("shows the MHZ unit and both chips only on the variants that ask", () => {
+    show({}, "vertical");
+    expect(screen.getByText("MHZ")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /enabled/i })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /intercom/i })).toBeInTheDocument();
+  });
+
+  it("shows only the enabled chip on horizontal", () => {
+    show({}, "horizontal");
+    expect(screen.getByRole("switch", { name: /enabled/i })).toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: /intercom/i })).toBeNull();
+  });
+
+  it("shows no chips and no unit on the narrow variants", () => {
+    show({}, "narrow-h");
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByText("MHZ")).toBeNull();
+  });
+});
+
+describe("the frequency boundary", () => {
+  it("renders the DTO's MHz float as integer kHz digits", () => {
+    show({ frequency: 118.5 }, "narrow-h"); // unit hidden, so the group is digits only
+    expect(screen.getByRole("group", { name: "frequency" }).textContent).toBe("118.500");
+  });
+
+  it("converts an edited kHz value back to the wire float on commit", () => {
+    const spy = vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
+    const full = show({ frequency: 118.5 });
+    const digits = screen.getAllByRole("button", { name: /digit/i });
+    fireEvent.wheel(digits[3], { deltaY: -1 }); // 100 kHz up -> 118_600 kHz
+    expect(spy).toHaveBeenCalledTimes(1);
+    const sent = spy.mock.calls[0][0].radios.find((r) => r.id === full.id)!;
+    // Exactly the expression internal/voice/freq.go uses; the server compares
+    // this with ==.
+    expect(sent.frequency).toBe(Math.fround(118_600 / 1000));
+  });
+});
+
+describe("the name", () => {
+  it("is a label, not a permanent input", () => {
+    show();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByText("Fleet Common")).toBeInTheDocument();
+  });
+
+  it("becomes an input on double-click and commits on Enter", () => {
+    const spy = vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
+    show();
+    fireEvent.doubleClick(screen.getByText("Fleet Common"));
+    const input = screen.getByRole("textbox", { name: /radio name/i });
+    fireEvent.change(input, { target: { value: "Ops" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(spy.mock.calls[0][0].radios[0].name).toBe("Ops");
+  });
+
+  it("reverts on Escape without committing", () => {
+    const spy = vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
+    show();
+    fireEvent.doubleClick(screen.getByText("Fleet Common"));
+    const input = screen.getByRole("textbox", { name: /radio name/i });
+    fireEvent.change(input, { target: { value: "Ops" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(screen.getByText("Fleet Common")).toBeInTheDocument();
+  });
+
+  it("does not select the card while the name is being edited", () => {
+    const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
+    show();
+    fireEvent.doubleClick(screen.getByText("Fleet Common"));
+    fireEvent.click(screen.getByRole("textbox", { name: /radio name/i }));
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("state", () => {
+  it("marks the card disabled when the radio is off", () => {
+    show({ enabled: false });
+    expect(screen.getByRole("option")).toHaveAttribute("data-disabled", "true");
+    expect(screen.getByText("OFF")).toBeInTheDocument();
+  });
+
+  it("marks intercom on the frame even where no chip is shown", () => {
+    show({ is_intercom: true }, "narrow-v");
+    expect(screen.getByRole("option")).toHaveAttribute("data-intercom", "true");
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("uses the frozen press-time target for global PTT, not live selection", () => {
+    useRadios.setState({
+      selectedRadioId: 2,
+      globalPttTargetId: 1,
+      heldPTT: new Set(["global.ptt"]),
     });
+    show();
+    expect(screen.getByRole("option")).toHaveAttribute("data-tx", "true");
   });
 
-  it("commits an enabled toggle", () => {
-    const radio = { id: 1, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    fireEvent.click(screen.getByLabelText(/toggle enabled/i));
-    expect(api.updateRadioInfo).toHaveBeenCalledWith({
-      muted: false,
-      radios: [{ id: 1, name: "Fleet", frequency: 118.5, enabled: false, is_intercom: false }],
-    });
+  it("marks transmit for this radio's own PTT action", () => {
+    useRadios.setState({ heldPTT: new Set(["radio.1.ptt"]), globalPttTargetId: 0 });
+    show();
+    expect(screen.getByRole("option")).toHaveAttribute("data-tx", "true");
   });
 
-  it("commits a frequency edit via the LCD through api.updateRadioInfo", () => {
-    const radio = { id: 1, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    const { container } = render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    const lcd = container.querySelector(".lcd-screen")!;
-
-    // 119251/1000 = 119.251, NOT exactly representable in float32 (unlike
-    // e.g. 119.25), so this exercises Math.fround: an implementation that
-    // dropped it would compute a different (float64) value here.
-    for (const key of "119251") fireEvent.keyDown(lcd, { key });
-    fireEvent.keyDown(lcd, { key: "Enter" });
-
-    expect(api.updateRadioInfo).toHaveBeenCalledWith({
-      muted: false,
-      radios: [
-        { id: 1, name: "Fleet", frequency: Math.fround(119251 / 1000), enabled: true, is_intercom: false },
-      ],
-    });
+  it("selects optimistically and tells the backend", () => {
+    const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
+    show();
+    fireEvent.click(screen.getByRole("option"));
+    expect(useRadios.getState().selectedRadioId).toBe(1);
+    expect(spy).toHaveBeenCalledWith(1);
   });
 
-  it("selects the card on click, marking it and calling api.selectRadio", () => {
-    const radio = { id: 3, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    const { container } = render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    const card = container.querySelector(".radio")!;
+  it("does not update the radios store optimistically on an edit", () => {
+    vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
+    const before = useRadios.getState().radios;
+    show();
+    fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
+    expect(useRadios.getState().radios).toBe(before);
+  });
+});
 
-    expect(card).toHaveAttribute("aria-selected", "false");
-    fireEvent.click(card);
-
-    expect(api.selectRadio).toHaveBeenCalledWith(3);
-    expect(useRadios.getState().selectedRadioId).toBe(3);
-    expect(card).toHaveAttribute("aria-selected", "true");
+describe("ported from the pre-redesign suite", () => {
+  it("commits an enabled toggle as a full write-through payload", () => {
+    const spy = vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
+    const full = show();
+    fireEvent.click(screen.getByRole("switch", { name: /enabled/i }));
+    expect(spy).toHaveBeenCalledWith({ muted: false, radios: [{ ...full, enabled: false }] });
   });
 
-  it("does not select the card when clicking the name input, a toggle, or the LCD", () => {
-    const radio = { id: 3, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    const { container } = render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    fireEvent.click(screen.getByLabelText(/radio name/i));
-    fireEvent.click(screen.getByLabelText(/toggle enabled/i));
-    fireEvent.click(container.querySelector(".lcd-screen")!);
-    expect(api.selectRadio).not.toHaveBeenCalled();
-    expect(useRadios.getState().selectedRadioId).toBe(0);
+  it("selects via keyboard when the card itself has focus", () => {
+    const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
+    show();
+    fireEvent.keyDown(screen.getByRole("option"), { key: "Enter" });
+    expect(spy).toHaveBeenCalledWith(1);
+    expect(useRadios.getState().selectedRadioId).toBe(1);
   });
 
-  it("selects the card via keyboard (Enter/Space) when it has focus", () => {
-    const radio = { id: 7, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    const { container } = render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    const card = container.querySelector(".radio")!;
-
-    fireEvent.keyDown(card, { key: "Enter" });
-    expect(api.selectRadio).toHaveBeenCalledWith(7);
-    expect(useRadios.getState().selectedRadioId).toBe(7);
+  it("does not select on a Space typed in the name input", () => {
+    const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
+    show();
+    fireEvent.doubleClick(screen.getByText("Fleet Common"));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: /radio name/i }), { key: " " });
+    expect(spy).not.toHaveBeenCalled();
   });
 
-  it("does not treat a Space bubbled up from the name input as a card-select", () => {
-    const radio = { id: 8, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    fireEvent.keyDown(screen.getByLabelText(/radio name/i), { key: " " });
-    expect(api.selectRadio).not.toHaveBeenCalled();
-    expect(useRadios.getState().selectedRadioId).toBe(0);
+  it("opens the name editor from the keyboard (Enter / F2)", () => {
+    show();
+    fireEvent.keyDown(screen.getByText("Fleet Common"), { key: "F2" });
+    expect(screen.getByRole("textbox", { name: /radio name/i })).toBeInTheDocument();
   });
 
-  it("PTT is a disabled live-transmit indicator, not a clickable control", () => {
-    const radio = { id: 2, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    const ptt = screen.getByRole("button", { name: /push-to-talk|transmit/i });
-    // Wiring real click-to-talk needs backend binding surface that doesn't
-    // exist yet, so the control stays disabled -- it must never look
-    // interactive without being interactive.
-    expect(ptt).toBeDisabled();
-    expect(ptt).toHaveTextContent(/push-to-talk/i);
-
-    act(() => useRadios.getState().setPTTHeld("radio.2.ptt", true));
-    expect(ptt).toHaveTextContent(/transmit/i);
-    expect(ptt.className).toContain("keyed");
-
-    act(() => useRadios.getState().setPTTHeld("radio.2.ptt", false));
-    expect(ptt).toHaveTextContent(/push-to-talk/i);
-  });
-
-  it("PTT reflects global.ptt when this radio was selected at press time (select-then-press)", () => {
-    const radio = { id: 4, name: "Fleet", frequency: 118.5, enabled: true, is_intercom: false };
-    render(<RadioCard radio={radio} allRadios={[radio]} muted={false} />);
-    const ptt = screen.getByRole("button", { name: /push-to-talk|transmit/i });
-
-    act(() => useRadios.getState().setSelectedRadioId(4));
-    expect(ptt).toHaveTextContent(/push-to-talk/i); // not pressed yet
-
-    act(() => useRadios.getState().setPTTHeld("global.ptt", true));
-    expect(ptt).toHaveTextContent(/transmit/i);
-  });
-
-  // Regression test for the "indicator lies about which radio is live" bug:
-  // the backend's resolveTXTarget (internal/app/voice.go) resolves
-  // global.ptt against the selected radio ONCE, at press time, and never
-  // re-resolves it for the life of the hold. The frontend must freeze the
-  // same way -- previously it recomputed the target live on every render,
-  // so reselecting mid-transmission made the UI show the NEW radio as
-  // transmitting while the backend kept transmitting on the OLD one.
-  it("freezes the global.ptt target at press time -- reselecting mid-transmission does not retarget the indicator (press-then-reselect)", () => {
-    const radioA = { id: 5, name: "A", frequency: 118.5, enabled: true, is_intercom: false };
-    const radioB = { id: 6, name: "B", frequency: 119.5, enabled: true, is_intercom: false };
+  it("does not retarget the indicator when another radio is selected mid-transmission", () => {
+    const a = { ...radio, id: 5, name: "A" } as RadioDTO;
+    const b = { ...radio, id: 6, name: "B" } as RadioDTO;
     render(
       <>
-        <RadioCard radio={radioA} allRadios={[radioA, radioB]} muted={false} />
-        <RadioCard radio={radioB} allRadios={[radioA, radioB]} muted={false} />
+        <RadioCard radio={a} allRadios={[a, b]} muted={false} variantId="vertical" />
+        <RadioCard radio={b} allRadios={[a, b]} muted={false} variantId="vertical" />
       </>,
     );
-    const [pttA, pttB] = screen.getAllByRole("button", { name: /push-to-talk|transmit/i });
-
+    const [ca, cb] = screen.getAllByRole("option");
     act(() => useRadios.getState().setSelectedRadioId(5));
     act(() => useRadios.getState().setPTTHeld("global.ptt", true));
-    expect(pttA).toHaveTextContent(/transmit/i);
-    expect(pttB).toHaveTextContent(/push-to-talk/i);
-
-    // Reselect B WHILE still holding global.ptt.
+    expect(ca).toHaveAttribute("data-tx", "true");
     act(() => useRadios.getState().setSelectedRadioId(6));
-    expect(pttA).toHaveTextContent(/transmit/i); // still A -- frozen at press time
-    expect(pttB).toHaveTextContent(/push-to-talk/i); // NOT B, despite now being selected
-
-    act(() => useRadios.getState().setPTTHeld("global.ptt", false));
-    expect(pttA).toHaveTextContent(/push-to-talk/i);
-
-    // A later press now targets B, since B is selected at THIS press's time.
-    act(() => useRadios.getState().setPTTHeld("global.ptt", true));
-    expect(pttB).toHaveTextContent(/transmit/i);
-    expect(pttA).toHaveTextContent(/push-to-talk/i);
+    expect(ca).toHaveAttribute("data-tx", "true");
+    expect(cb).not.toHaveAttribute("data-tx", "true");
   });
 });
