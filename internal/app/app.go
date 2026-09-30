@@ -91,6 +91,9 @@ type App struct {
 	// hist is the transmission log. Optional, the same discipline as notif
 	// and health: nil in tests and in any build where wiring failed.
 	hist *history.Log
+	// histStop/histDone belong to the ticker StartHistoryTicker starts.
+	histStop chan struct{}
+	histDone chan struct{}
 
 	// profilesDirOverride is set only by tests; empty in every shipped
 	// build. See setProfilesDirForTest.
@@ -274,6 +277,11 @@ func (a *App) ServiceShutdown() error {
 	// block the quit.
 	if err := a.flushConfig(); err != nil {
 		a.logger.Warn("config flush on shutdown failed", "err", err)
+	}
+	// Stop the history ticker and join it BEFORE the final flush -- see
+	// StartHistoryTicker. Logged, not notified, for the same reason as above.
+	if err := a.flushHistory(); err != nil {
+		a.logger.Warn("history flush on shutdown failed", "err", err)
 	}
 	// Then shut the OS key listener down. The stream is process-global and
 	// outlives every rebind (see internal/hotkeys/registrar_gohook.go), so

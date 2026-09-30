@@ -813,6 +813,33 @@ func (a *App) SetCommsLayout(l LayoutDTO) error {
 	return nil
 }
 
+// captureCommsWindowSize records a manual Comms window resize into the
+// in-memory layout and marks it pending, exactly like a block drag: no file
+// is written here, the bytes land at shutdown via flushConfig. windows.json
+// is written separately by Registry.SetGeometry, as before.
+//
+// An unchanged size is a no-op, so the resize event a profile load provokes
+// (applyProfile calls SetBounds) neither dirties the profile nor schedules a
+// write. The emit happens after sb.mu is released: emitProfileState re-enters
+// it through GetProfileState and profileDirty.
+func (a *App) captureCommsWindowSize(w, h int) {
+	sb := a.settings
+	if sb == nil || w <= 0 || h <= 0 {
+		return
+	}
+	sb.mu.Lock()
+	if sb.cfg.CommsLayout.WindowW == w && sb.cfg.CommsLayout.WindowH == h {
+		sb.mu.Unlock()
+		return
+	}
+	next := *sb.cfg
+	next.CommsLayout.WindowW, next.CommsLayout.WindowH = w, h
+	sb.cfg = &next
+	sb.layoutPending = true
+	sb.mu.Unlock()
+	a.emitProfileState()
+}
+
 // flushConfig persists the in-memory config. Called from ServiceShutdown so
 // a layout that only ever lived in memory reaches disk on quit.
 //

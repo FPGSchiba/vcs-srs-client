@@ -15,6 +15,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	vcsevents "github.com/FPGSchiba/vcs-srs-client/internal/events"
+	"github.com/FPGSchiba/vcs-srs-client/internal/history"
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
@@ -230,6 +231,25 @@ func main() {
 	// Seed the shipped default radio profiles. Best-effort: a failure notifies
 	// (the notifier is already wired above) and never blocks startup.
 	gui.SeedBuiltinProfiles()
+
+	// Transmission log. Loaded before the voice session exists so an early
+	// transmission is recorded, and given the app's notifier so a failing
+	// flush raises ONE notification rather than one per tick. Its 1s ticker
+	// is owned by gui and stopped + joined in ServiceShutdown before the
+	// final flush (both write through the same temp path).
+	histPath, histPathErr := config.HistoryFilePath()
+	if histPathErr != nil {
+		appLog.Warn("history: no app-data dir; the transmission log will not persist", "err", histPathErr)
+	}
+	histLog, histLoadErr := history.Load(histPath, history.DefaultCap)
+	if histLoadErr != nil {
+		appLog.Warn("history: could not read the existing log; starting empty", "err", histLoadErr)
+	}
+	histLog.SetPersist(histPath, 5*time.Second, time.Now, func(err error) {
+		app.NotifyHistoryFlush(gui, err)
+	})
+	app.SetHistory(gui, histLog)
+	app.StartHistoryTicker(gui)
 
 	// Joystick/gamepad input. A failure here is never fatal: the client is a
 	// voice-comms app first, and keyboard binds must keep working on a

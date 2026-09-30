@@ -21,6 +21,63 @@ func (a *App) setHistory(l *history.Log) { a.hist = l }
 // nothing.
 func SetHistory(a *App, l *history.Log) { a.setHistory(l) }
 
+// HistoryWired reports whether a transmission log is attached. Exists so
+// main's wiring test can assert the log reached App: an unwired log makes
+// every history binding early-return, leaving the Transmission Log
+// permanently empty with nothing logged to explain it.
+func HistoryWired(a *App) bool { return a.hist != nil }
+
+// StartHistoryTicker drives the log's debounced flush from a 1s ticker.
+// Package-level, like SetHistory, so it is not bound into the webview.
+//
+// The goroutine is owned by App so ServiceShutdown can stop AND JOIN it
+// before the final Flush: history.Flush writes through one fixed temp path
+// (path + ".tmp"), so a tick-driven flush racing the shutdown flush would
+// interleave on that file. A second call, or a call with no log, is a no-op.
+func StartHistoryTicker(a *App) {
+	if a.hist == nil || a.histStop != nil {
+		return
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	a.histStop, a.histDone = stop, done
+	log := a.hist
+	go func() {
+		defer close(done)
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				log.Tick()
+			}
+		}
+	}()
+}
+
+// stopHistoryTicker stops the ticker goroutine and waits for it to exit, so
+// no tick-driven Flush is in flight afterwards. Idempotent.
+func (a *App) stopHistoryTicker() {
+	if a.histStop == nil {
+		return
+	}
+	close(a.histStop)
+	<-a.histDone
+	a.histStop, a.histDone = nil, nil
+}
+
+// flushHistory stops the ticker, THEN writes the log one last time. The
+// order is the point; see StartHistoryTicker.
+func (a *App) flushHistory() error {
+	a.stopHistoryTicker()
+	if a.hist == nil {
+		return nil
+	}
+	return a.hist.Flush()
+}
+
 // resolveSender maps a voice sender id to the store's GUID key and the
 // client's callsign.
 //

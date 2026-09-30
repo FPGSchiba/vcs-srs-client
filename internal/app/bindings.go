@@ -121,7 +121,16 @@ func (a *App) GetOpenWindows() []string { return a.windows.OpenWindows() }
 func (a *App) GetWindowGeometry(id string) windowstate.Geometry { return a.windows.Geometry(id) }
 
 // SetWindowGeometry records a window's geometry (from debounced move/resize).
-func (a *App) SetWindowGeometry(id string, g windowstate.Geometry) { a.windows.SetGeometry(id, g) }
+//
+// A comms-window resize also updates the profile-visible window size, so a
+// manual drag of the window edge dirties an active profile and SAVE captures
+// it (spec decision D3).
+func (a *App) SetWindowGeometry(id string, g windowstate.Geometry) {
+	a.windows.SetGeometry(id, g)
+	if id == "comms" {
+		a.captureCommsWindowSize(g.W, g.H)
+	}
+}
 
 // GetConnectionState returns the current connection-health snapshot, for a
 // window hydrating on mount. The push counterpart is the connection:state
