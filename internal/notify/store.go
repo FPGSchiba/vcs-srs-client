@@ -1,0 +1,481 @@
+package notify
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"strconv"
+	"time"
+)
+
+// Post records a DISCRETE event -- something that happened once and is never
+// "resolved": a distress beacon, a client joining a frequency, an incoming
+// message. It always appends.
+//
+// This is the entry point Phase 7.3 and 7.4 will mostly use. It is
+// deliberately separate from Raise: dedupe, coalescing, resolution and
+// dismissal-suppression are properties of the CONDITION path (see Raise),
+// and forcing a discrete event through it would mean inventing a synthetic
+// key that never resolves.
+//
+// Returns the ID assigned to the item.
+func (n *Notifier) Post(item Item) string {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	item.Key = "" // a Post is never a condition, whatever the caller passed
+	id := n.insertLocked(item)
+	snap := n.snapshotLocked()
+	sound, wantSound := n.soundForLocked(id)
+	n.mu.Unlock()
+
+	n.publish(snap)
+	if wantSound {
+		n.playSound(sound)
+	}
+	return id
+}
+
+// insertLocked stamps, normalises and prepends one item, evicting the oldest
+// if the list is at capacity. Returns the assigned ID. Caller holds mu.
+func (n *Notifier) insertLocked(item Item) string {
+	item.ID = n.nextIDLocked()
+	item.Time = n.opt.Now()
+	item.Resolved = false
+	// Info is raised ALREADY-READ. This is the one rule that makes
+	// "informational, never a failure" structural rather than cosmetic: an
+	// info item can reach neither the badge nor the bell, because both count
+	// only unread items (TopBar.tsx, StatusBar.tsx). The TOAST is barred by a
+	// second, independent mechanism, not by this one: ToastHost.tsx filters
+	// on severity == "error" and never reads the unread count at all. Both
+	// are load-bearing -- this flag alone would not stop a toast, and the
+	// severity filter alone would not stop the badge.
+	item.Unread = item.Severity != SeverityInfo
+	if item.Context == nil {
+		item.Context = []KV{}
+	}
+	if item.Actions == nil {
+		item.Actions = []Action{}
+	}
+
+	n.items = append([]Item{item}, n.items...)
+	if len(n.items) > n.opt.Cap {
+		n.items = n.items[:n.opt.Cap]
+	}
+	return item.ID
+}
+
+// nextIDLocked returns a fresh id. A counter, not a hash of the content or
+// the clock: two byte-identical Posts under a frozen test clock must still
+// be distinguishable, since Dismiss and MarkRead address items by id.
+// Caller holds mu.
+func (n *Notifier) nextIDLocked() string {
+	n.seq++
+	return "n" + strconv.FormatUint(n.seq, 10)
+}
+
+// soundForLocked reports whether the item with this id should be audible.
+// Sound follows the toast: error severity only. Caller holds mu.
+func (n *Notifier) soundForLocked(id string) (Item, bool) {
+	for _, it := range n.items {
+		if it.ID == id {
+			return it, it.Severity == SeverityError
+		}
+	}
+	return Item{}, false
+}
+
+// publish delivers one Snapshot. Called with emitMu held and mu released.
+func (n *Notifier) publish(s Snapshot) {
+	if n.opt.OnChange == nil {
+		return
+	}
+	n.opt.OnChange(s)
+}
+
+// playSound delivers one audible item. Called with emitMu held and mu
+// released, the same discipline as publish.
+func (n *Notifier) playSound(it Item) {
+	if n.opt.OnSound == nil {
+		return
+	}
+	n.opt.OnSound(it)
+}
+
+// Raise asserts a CONDITION under a stable key.
+//
+// Unlike Post, a keyed item participates in identity dedupe: raising the
+// same key with byte-identical user-visible content is a TOTAL no-op -- no
+// publish, no timestamp bump, no re-mark-unread, no sound.
+//
+// That no-op is the whole defence against level-triggered sources. Both
+// hotkey and audio state are snapshots re-emitted far more often than they
+// change: emitHotkeyState fires from nine call sites, so a nineteen-action
+// rebind re-emits roughly 38 identical payloads, and audio:state compares a
+// struct containing monotonic xrun counters, so it fires every 2s for as
+// long as the engine is glitching. Without this, either would produce one
+// notification per emission.
+//
+// A DIFFERING fingerprint updates the item in place, refreshes its
+// timestamp, re-marks it unread and sounds. A key whose previous item was
+// resolved gets a fresh item: a recurrence is a new occurrence, not a
+// revival.
+func (n *Notifier) Raise(key string, item Item) { _ = n.raiseReport(key, item) }
+
+// raiseReport is Raise, reporting whether it actually PUBLISHED anything.
+//
+// The bool exists for coalesce: a window must only be opened on a real edge.
+// Without it a source that re-emits a level far faster than its own window
+// -- notifyAudioState calls raise-or-resolve for all four audio keys on
+// every audio:state emission, which on a healthy system is four no-op
+// Resolves every 2s -- would hold a 10s window permanently open on nothing,
+// and defer the first genuine device fault by a full window.
+//
+// Exported Raise ignores it: a caller that is not coalescing has no use for
+// it, and widening the public signature would make every call site carry a
+// value it discards.
+func (n *Notifier) raiseReport(key string, item Item) bool {
+	if key == "" {
+		// A keyless Raise is a Post; treating it as one is kinder than
+		// silently keying everything under "".
+		n.Post(item)
+		return true
+	}
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	changed, id := n.raiseLocked(key, item)
+	if !changed {
+		n.mu.Unlock()
+		return false
+	}
+	snap := n.snapshotLocked()
+	sound, wantSound := n.soundForLocked(id)
+	n.mu.Unlock()
+
+	n.publish(snap)
+	if wantSound {
+		n.playSound(sound)
+	}
+	return true
+}
+
+// raiseLocked applies one Raise. Reports whether anything changed, and the
+// affected item's id. Caller holds mu.
+func (n *Notifier) raiseLocked(key string, item Item) (bool, string) {
+	item.Key = key
+	fp := fingerprint(item)
+
+	// Dismissed at this exact fingerprint: the user has already said "I know,
+	// stop telling me". See Dismiss.
+	if got, ok := n.suppressed[key]; ok && got == fp {
+		return false, ""
+	}
+
+	idx := n.findByKeyLocked(key)
+	if idx >= 0 && !n.items[idx].Resolved {
+		if fingerprint(n.items[idx]) == fp {
+			return false, "" // identical, unresolved: total no-op
+		}
+		// Real change: update in place, keeping the id so an open UI's
+		// selection and any pending MarkRead still address the same row.
+		id := n.items[idx].ID
+		item.ID = id
+		item.Time = n.opt.Now()
+		item.Resolved = false
+		item.Unread = item.Severity != SeverityInfo
+		if item.Context == nil {
+			item.Context = []KV{}
+		}
+		if item.Actions == nil {
+			item.Actions = []Action{}
+		}
+		n.items[idx] = item
+		// There is deliberately NO delete(n.suppressed, key) here, and its
+		// absence is the documented state of affairs rather than an
+		// oversight: this branch cannot be reached while a suppression
+		// entry for key exists, so a delete would be dead code and a
+		// comment claiming it lifts a suppression would describe an
+		// invariant the branch cannot observe.
+		//
+		// The branch requires an UNRESOLVED item under key. A suppression
+		// entry can never coexist with one:
+		//
+		//   - suppressed[K] is written only by Dismiss and Clear, only for
+		//     an item that is unresolved at that moment -- and both then
+		//     REMOVE that item from the list.
+		//   - at most one unresolved item exists per key, and it is the
+		//     newest: the new-occurrence branch below inserts one only when
+		//     findByKeyLocked misses or the newest is resolved, Resolve
+		//     marks the newest, and Post cannot create a keyed item at all
+		//     (it clears Key -- that line is load-bearing for THIS argument,
+		//     not only for Post's own separation from the condition path).
+		//
+		// So on reaching here, suppressed[key] is absent: it either never
+		// existed, or the identity check above returned, or the
+		// new-occurrence branch below already deleted it. Pinned by
+		// TestSuppressionNeverCoexistsWithAnUnresolvedItem.
+		return true, id
+	}
+
+	// No item, or the previous one is resolved: this is a new occurrence, so
+	// whatever the user dismissed is news again.
+	//
+	// This is the ONLY live delete of a dismissal suppression on the Raise
+	// path (Resolve has its own). Without it a condition dismissed at
+	// content A, changed to B, and then reverted to A would match the stale
+	// fingerprint and be suppressed for the life of the process, leaving the
+	// list showing a B that is no longer true. See
+	// TestARevertedConditionIsNotSuppressedByItsOwnStaleFingerprint.
+	delete(n.suppressed, key)
+	return true, n.insertLocked(item)
+}
+
+// Resolve clears a condition. The item is RETAINED and marked resolved
+// rather than deleted, so a user who was away still learns their push-to-talk
+// was dead for ten minutes -- while the badge stops counting it immediately.
+//
+// A no-op for an unknown or already-resolved key: no publish, no churn.
+func (n *Notifier) Resolve(key string) { _ = n.resolveReport(key) }
+
+// resolveReport is Resolve, reporting whether it actually PUBLISHED
+// anything. See raiseReport for why the bool exists and why the exported
+// method drops it.
+func (n *Notifier) resolveReport(key string) bool {
+	if key == "" {
+		return false
+	}
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	// The condition genuinely cleared, so a later recurrence is news again --
+	// regardless of whether the item is still in the list. Dismiss removes
+	// the item from n.items but leaves the key in n.suppressed, so this must
+	// run even when findByKeyLocked comes back empty; otherwise a dismissed
+	// item's suppression would outlive the very Resolve that should lift it.
+	delete(n.suppressed, key)
+	idx := n.findByKeyLocked(key)
+	if idx < 0 || n.items[idx].Resolved {
+		n.mu.Unlock()
+		return false
+	}
+	n.items[idx].Resolved = true
+	n.items[idx].Unread = false
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+	return true
+}
+
+// findByKeyLocked returns the index of the NEWEST item with this key, or -1.
+// Items are newest-first, so the first match is the newest. Caller holds mu.
+func (n *Notifier) findByKeyLocked(key string) int {
+	for i, it := range n.items {
+		if it.Key == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// fingerprint hashes everything the USER CAN SEE, and nothing else.
+//
+// Deliberately excludes ID, Time, Unread and Resolved: those are the
+// store's own bookkeeping, and folding them in would make every item its
+// own fingerprint and defeat dedupe entirely. Callers project their
+// subsystem's state down to these fields before raising -- see the audio
+// adapter, which drops the xrun counters for exactly this reason.
+func fingerprint(it Item) string {
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, p := range parts {
+			_, _ = io.WriteString(h, p)
+			_, _ = h.Write([]byte{0}) // separator, so "ab"+"c" != "a"+"bc"
+		}
+	}
+	write(it.Key, it.Category, string(it.Severity), it.Icon, it.Title, it.Body)
+	for _, kv := range it.Context {
+		write(kv.Key, kv.Value)
+	}
+	for _, a := range it.Actions {
+		write(a.Label, a.Icon, a.Kind, a.Target, strconv.FormatBool(a.Primary))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// MarkRead clears one item's unread flag. Addressed by ID, not key, because
+// the UI's row is what the user clicked.
+//
+// A no-op, with no publish, for an unknown id or an item that is ALREADY
+// read -- the same rule MarkAllRead follows. This is a live path, not a
+// theoretical one: the popout calls MarkNotificationRead on every row
+// expansion, including re-expanding a row the user already read, and without
+// the precheck each of those would broadcast a redundant full Snapshot to
+// every open window.
+func (n *Notifier) MarkRead(id string) {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	changed := false
+	for i := range n.items {
+		if n.items[i].ID == id && n.items[i].Unread {
+			n.items[i].Unread = false
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		n.mu.Unlock()
+		return
+	}
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// Dismiss removes one item.
+//
+// For a KEYED item that is still UNRESOLVED it also records the key as
+// suppressed AT THAT FINGERPRINT. Without that, dismissing "Global hotkeys
+// unavailable" while hotkeys are still unavailable would put it straight
+// back on the next applyHotkeys() -- which is every trigger add, every
+// trigger removal and every capture end. Suppression is cleared by a Raise
+// whose fingerprint differs (the condition changed) or by a Resolve (it
+// cleared), both of which mean the condition is news again.
+//
+// A RESOLVED item is deliberately dismissed WITHOUT suppression. Suppression
+// exists to stop a condition that STILL HOLDS from re-announcing itself; a
+// resolved item is history, and Resolve has already ruled (see its doc, and
+// spec 4.1) that a later recurrence is a NEW OCCURRENCE. Suppressing it here
+// would invert that: tidying away the record of a microphone that failed and
+// recovered would silence the same microphone failing again -- no item, no
+// badge, no bell, no toast, no sound -- for the life of the process.
+//
+// "Resolved" here means the key's SETTLED state, not merely its committed
+// one. A coalescing window can be holding a Resolve that has not been
+// applied yet (audio's window is 10s), and cancelPendingLocked below
+// DESTROYS it, so reading it.Resolved alone would suppress a condition that
+// had in fact already cleared -- swallowing one entire later occurrence of
+// the fault, silently, on every windowed source. pendingResolveLocked is
+// consulted first for exactly that case; see pendingKind.
+//
+// An unkeyed Post needs none of this: nothing can re-raise it.
+func (n *Notifier) Dismiss(id string) {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	idx := -1
+	for i := range n.items {
+		if n.items[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		n.mu.Unlock()
+		return
+	}
+	it := n.items[idx]
+	if it.Key != "" {
+		// Read the pending intent BEFORE cancelling: cancelPendingLocked
+		// destroys it, and a deferred Resolve means this condition has
+		// already cleared however unresolved the committed item looks.
+		settledClear := n.pendingResolveLocked(it.Key)
+		n.cancelPendingLocked(it.Key)
+		if !it.Resolved && !settledClear {
+			n.suppressed[it.Key] = fingerprint(it)
+		}
+	}
+	n.items = append(n.items[:idx], n.items[idx+1:]...)
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// MarkAllRead clears every unread flag. A no-op, with no publish, when
+// nothing is unread.
+func (n *Notifier) MarkAllRead() {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	changed := false
+	for i := range n.items {
+		if n.items[i].Unread {
+			n.items[i].Unread = false
+			changed = true
+		}
+	}
+	if !changed {
+		n.mu.Unlock()
+		return
+	}
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// Clear removes every item, suppressing each keyed one that is still
+// UNRESOLVED at its current fingerprint, for the same reason Dismiss does:
+// CLEAR ALL must not be undone by the next routine re-emission of a
+// condition that still holds.
+//
+// "That still holds" is the whole rule, and a resolved item does not: it is
+// skipped, exactly as Dismiss skips it -- including when its Resolve is only
+// PENDING in an open coalescing window, which cancelPendingLocked is about
+// to destroy. Suppressing resolved items is what made CLEAR ALL a permanent
+// mute -- raiseLocked consults suppressed BEFORE it looks at Resolved, so an
+// identical recurrence of a condition that had already cleared became a
+// total no-op that nothing could ever lift.
+func (n *Notifier) Clear() {
+	n.emitMu.Lock()
+	defer n.emitMu.Unlock()
+
+	n.mu.Lock()
+	if len(n.items) == 0 {
+		n.mu.Unlock()
+		return
+	}
+	for _, it := range n.items {
+		if it.Key == "" {
+			continue
+		}
+		settledClear := n.pendingResolveLocked(it.Key) // read before cancelling
+		n.cancelPendingLocked(it.Key)
+		if !it.Resolved && !settledClear {
+			n.suppressed[it.Key] = fingerprint(it)
+		}
+	}
+	n.items = []Item{}
+	snap := n.snapshotLocked()
+	n.mu.Unlock()
+
+	n.publish(snap)
+}
+
+// RaiseWindowed is Raise with a coalescing window. See coalesce.go for why
+// the window is per-source rather than one constant.
+func (n *Notifier) RaiseWindowed(key string, item Item, window time.Duration) {
+	if key == "" {
+		n.Post(item)
+		return
+	}
+	n.coalesce(key, window, pendingRaise, func() bool { return n.raiseReport(key, item) })
+}
+
+// ResolveWindowed is Resolve with a coalescing window.
+func (n *Notifier) ResolveWindowed(key string, window time.Duration) {
+	if key == "" {
+		return
+	}
+	n.coalesce(key, window, pendingResolve, func() bool { return n.resolveReport(key) })
+}

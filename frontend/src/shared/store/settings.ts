@@ -76,6 +76,13 @@ export interface Settings {
   minimize_to_tray: boolean;
   show_transmitter_name: boolean;
   play_connection_sounds: boolean;
+  /** Gates the error-severity notification sound (Go's
+   *  `App.notificationSFXID`), exactly as `play_connection_sounds` gates the
+   *  connect/disconnect SFX. Mirrors Go's
+   *  `SettingsDTO.PlayNotificationSounds`: the value always round-tripped,
+   *  but until this line existed the type did not say so and the only way to
+   *  change it was to hand-edit `config.toml`. */
+  play_notification_sounds: boolean;
   radio_switch_as_ptt: boolean;
   audio: AudioSettings;
 }
@@ -249,15 +256,22 @@ export const useSettings = create<SettingsState>((set) => ({
   audioEffectPresets: { voice: [], clipping: [] },
   vu: { input: 0, output: 0 },
   micMuted: false,
-  // `registered: true` is the optimistic default on purpose. The Keybinds
-  // section renders "Global hotkeys unavailable" whenever this is false, so
-  // defaulting to false flashed that banner on every first paint, before
-  // getHotkeyState() had resolved -- and left it up permanently if that call
-  // ever rejected. Nothing is known to be broken until the backend says so.
-  // `permission: "unknown"` rather than an optimistic guess: the banner's
-  // permission copy only renders on the exact string "denied", so an
-  // unknown state shows nothing, and nothing claims a grant the backend has
-  // not reported.
+  // `registered: true` is the optimistic default on purpose, and it outlived
+  // the mechanism that motivated it. Phase 3's Keybinds banner rendered
+  // "Global hotkeys unavailable" whenever this was false, so defaulting to
+  // false flashed that banner on every first paint, before getHotkeyState()
+  // had resolved -- and left it up permanently if that call ever rejected.
+  // Phase 7.2 retired the banner: the announcement is a notification now
+  // (Go's App.notifyHotkeyState), raised from backend state that this
+  // default cannot reach. The default still matters, for a narrower reason:
+  // `registered: false` is half of PermissionCard's granted-but-unregistered
+  // restart hint, so an optimistic default is what keeps that hint from
+  // flashing before the backend has said anything. Nothing is known to be
+  // broken until the backend says so.
+  // `permission: "unknown"` rather than an optimistic guess: PermissionCard
+  // renders nothing except on the exact strings "denied" and "granted", so
+  // an unknown state shows nothing, and nothing claims a grant the backend
+  // has not reported.
   hotkeys: { registered: true, error: "", failed: {}, permission: "unknown" },
   // `supported: false` is the honest default, not an optimistic guess: unlike
   // hotkeys (which mostly work), a real joystick subsystem is the exception

@@ -180,16 +180,6 @@ describe("Keybinds section", () => {
     expect(screen.getAllByText(/F1 taken from R01 · GUARD \(PTT\)/i)).toHaveLength(1);
   });
 
-  it("warns when global hotkeys failed to register", () => {
-    useSettings.setState({
-      settings: null, keybinds: rows,
-      hotkeys: { registered: false, error: "permission denied", failed: {}, permission: "unknown" },
-    });
-    render(<Keybinds />);
-    expect(screen.getByText(/global hotkeys unavailable/i)).toBeInTheDocument();
-    expect(screen.getByText(/permission denied/i)).toBeInTheDocument();
-  });
-
   it("shows a per-row reason when a saved chord failed to register", () => {
     useSettings.setState({
       settings: null, keybinds: rows,
@@ -308,15 +298,16 @@ describe("Keybinds section", () => {
     // getHotkeyState ever rejected.
     useSettings.setState({ settings: null, keybinds: rows, hotkeys: initialHotkeyState() });
     render(<Keybinds />);
-    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
   });
 
-  // ---- Per-row suppression while the banner is up -------------------------
+  // ---- Per-row suppression while registration is fully down --------------
 
-  it("does not repeat the banner as a per-row warning on every binding", () => {
+  it("does not repeat a global failure reason as a per-row warning on every binding", () => {
     // registered === false means NOTHING registered, which implies `failed`
-    // names every bound action. Rendering those inline would print the
-    // banner's single message once per row -- pure duplicate noise.
+    // names every bound action. The announcement itself is a notification
+    // now (see the "Retired banners" tests below); this only guards that
+    // rendering the per-row reason for every one of those actions would be
+    // pure duplicate noise on top of it.
     useSettings.setState({
       settings: null,
       keybinds: rows,
@@ -333,11 +324,9 @@ describe("Keybinds section", () => {
     });
     render(<Keybinds />);
 
-    // The banner itself still says it, exactly once.
-    expect(screen.getByText(/global hotkeys unavailable/i)).toBeInTheDocument();
-    // ...and no row repeats it. Scoped per row so a regression that renders
-    // the reason on even one row fails here. Per-radio bindings live in a
-    // `.tbl` <tr> rather than a [data-row] div, so match either.
+    // No row repeats it. Scoped per row so a regression that renders the
+    // reason on even one row fails here. Per-radio bindings live in a `.tbl`
+    // <tr> rather than a [data-row] div, so match either.
     for (const row of rows) {
       const el = screen.getByText(row.label).closest("[data-row], tr") as HTMLElement;
       expect(el).not.toBeNull();
@@ -361,7 +350,6 @@ describe("Keybinds section", () => {
     });
     render(<Keybinds />);
 
-    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
     const failedRow = screen.getByText("Mute toggle").closest("[data-row]") as HTMLElement;
     expect(within(failedRow).getByText(/no OS key mapping for Numpad7/i)).toBeInTheDocument();
     // And only that row.
@@ -462,7 +450,6 @@ describe("Keybinds section", () => {
     });
     render(<Keybinds />);
 
-    expect(screen.getByText(/global hotkeys unavailable/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "GRANT ACCESS" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "OPEN SETTINGS" })).not.toBeInTheDocument();
     expect(screen.queryByText(/accessibility permission/i)).not.toBeInTheDocument();
@@ -502,7 +489,6 @@ describe("Keybinds section", () => {
       },
     });
     render(<Keybinds />);
-    expect(screen.queryByText(/global hotkeys unavailable/i)).not.toBeInTheDocument();
     expect(screen.getByText(/no OS key mapping for Numpad7/i)).toBeInTheDocument();
   });
 
@@ -575,16 +561,6 @@ describe("Keybinds section", () => {
     // offering a button would be a dead end.
     renderWithKeybinds([pttRow([])], { supported: false, error: "", devices: [] });
     expect(screen.queryByRole("button", { name: /grant/i })).not.toBeInTheDocument();
-  });
-
-  it("shows a joystick error without reusing the accessibility copy", () => {
-    renderWithKeybinds([pttRow([])], {
-      supported: true,
-      error: "joystick: cannot read /dev/input (add your user to the 'input' group...)",
-      devices: [],
-    });
-    expect(screen.getByText(/input' group/)).toBeInTheDocument();
-    expect(screen.queryByText(/accessibility/i)).not.toBeInTheDocument();
   });
 
   // ---- keybinds:joy_captured -- the joystick half of "one capture,
@@ -711,5 +687,39 @@ describe("Keybinds section", () => {
     // capture that replaced it.
     expect(screen.queryByRole("button", { name: /add binding/i })).not.toBeInTheDocument();
     expect(screen.getByText(/joystick button/i)).toBeInTheDocument();
+  });
+
+  // ---- Retired banners -- the announcement half moved to the notification
+  // channel (Task 8/16); only the per-row failure reason stays here. --------
+
+  it("no longer renders the global-failure banner", () => {
+    useSettings.setState((s) => ({
+      hotkeys: { ...s.hotkeys, registered: false, error: "no backend", permission: "not_applicable" },
+    }));
+    render(<Keybinds />);
+
+    // The announcement is a notification now. Only the remediation card
+    // stays, and not on this platform.
+    expect(screen.queryByText(/Global hotkeys unavailable/)).toBeNull();
+  });
+
+  it("no longer renders the joystick error banner", () => {
+    useSettings.setState((s) => ({
+      joystick: { ...s.joystick, supported: true, error: "permission denied on /dev/input", devices: [] },
+    }));
+    render(<Keybinds />);
+
+    expect(screen.queryByText(/Joystick unavailable/)).toBeNull();
+  });
+
+  it("still renders the per-row failure reason", () => {
+    useSettings.setState((s) => ({
+      hotkeys: { ...s.hotkeys, registered: true, failed: { "global.ptt": "Numpad7 cannot be registered" }, permission: "granted" },
+    }));
+    render(<Keybinds />);
+
+    // Row-contextual, not a banner. Deleting it would force the user to
+    // cross-reference a popout against a table row.
+    expect(screen.getByText("Numpad7 cannot be registered")).toBeInTheDocument();
   });
 });

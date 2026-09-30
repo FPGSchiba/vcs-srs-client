@@ -21,6 +21,10 @@ func defaultGeometry(id string) windowstate.Geometry {
 	switch id {
 	case "comms":
 		return windowstate.Geometry{X: 1190, Y: 70, W: 540, H: 720}
+	case "notifications":
+		// Narrower and shorter than Comms: this is a reading list, not a
+		// live control surface, and it is opened transiently.
+		return windowstate.Geometry{X: 1150, Y: 120, W: 520, H: 640}
 	default:
 		return windowstate.Geometry{X: 160, Y: 90, W: 1440, H: 900}
 	}
@@ -31,6 +35,8 @@ func windowURL(id string) string {
 	switch id {
 	case "comms":
 		return "/comms.html"
+	case "notifications":
+		return "/notifications.html"
 	default:
 		return "/main.html"
 	}

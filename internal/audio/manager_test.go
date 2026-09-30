@@ -2,6 +2,7 @@ package audio
 
 import (
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1720,5 +1721,230 @@ func TestDSPLoopPullsTheSourceOncePerTick(t *testing.T) {
 
 	if got := src.calls.Load(); got != 1 {
 		t.Fatalf("ReadInto was called %d times on one catch-up tick, want exactly 1 -- received audio is paced by the tick, not by capture backlog", got)
+	}
+}
+
+// TestPlayNotificationOnStoppedManagerDrops is the only guard on spec 10 /
+// DoD 13's "PlayNotification on a stopped Manager drops rather than
+// lingering".
+//
+// Reaching that rule takes deliberate setup, and the earlier version of this
+// test did not do it: PlayNotification returns at its FIRST line when
+// !m.notif.Available(id), and the pack ships silent (notify_alert has no
+// sample), so the running/pool gate was never executed at all and the
+// assertion held on a Manager with an empty body. A sample is injected
+// straight into the map here instead -- same package, so the unexported
+// field is reachable -- because notify_alert.wav must NOT exist (spec 9: the
+// sound ships silent and the pack is not something to substitute).
+func TestPlayNotificationOnStoppedManagerDrops(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+	m.notif.samples[NotifyAlert] = make([]float32, FrameSamples)
+	if !m.notif.Available(NotifyAlert) {
+		t.Fatal("the injected sample did not make NotifyAlert available; this test would be vacuous")
+	}
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Held across Stop(), which nils m.notifVoices: the queue has to stay
+	// observable after the generation it belonged to is gone.
+	m.mu.Lock()
+	pool := m.notifVoices
+	m.mu.Unlock()
+	if pool == nil {
+		t.Fatal("notifVoices is nil after Start -- nothing to observe")
+	}
+	m.Stop()
+
+	// Stopped. A queued id surviving until some later, unrelated Start()
+	// drained it would play an alert for an event minutes past -- the same
+	// reasoning PlayEffect's doc gives for dropping.
+	m.PlayNotification(NotifyAlert)
+
+	pool.mu.Lock()
+	pending := len(pool.pending)
+	pool.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending = %d after PlayNotification on a stopped Manager, want 0 -- the id lingered into the dead generation's pool", pending)
+	}
+	m.mu.Lock()
+	v := m.notifVoices
+	m.mu.Unlock()
+	if v != nil {
+		t.Fatal("notifVoices is non-nil after Stop -- the generation's pool must not outlive it")
+	}
+}
+
+func TestPlayNotificationUnavailableIDIsANoop(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	// notify_alert has no sample, so this must not queue anything.
+	m.PlayNotification(NotifyAlert)
+	m.PlayNotification("no-such-slot")
+
+	m.mu.Lock()
+	pool := m.notifVoices
+	m.mu.Unlock()
+	if pool == nil {
+		t.Fatal("notifVoices is nil after Start")
+	}
+	pool.mu.Lock()
+	pending := len(pool.pending)
+	pool.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending = %d, want 0 -- an unavailable id must be filtered before it reaches the pool", pending)
+	}
+}
+
+func TestNotificationVoicePoolIsPerGeneration(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	m.mu.Lock()
+	first := m.notifVoices
+	m.mu.Unlock()
+	m.Stop()
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+	m.mu.Lock()
+	second := m.notifVoices
+	m.mu.Unlock()
+	defer m.Stop()
+
+	if first == second {
+		t.Fatal("both generations share one notification voice pool; Stop's bounded joins can leave two dspLoops live, and -race has already caught that for sfxVoices")
+	}
+}
+
+func TestStopClearsTheNotificationVoicePool(t *testing.T) {
+	m := NewManager(NewFakeBackend(), ManagerOptions{Log: slog.Default()})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	m.Stop()
+
+	m.mu.Lock()
+	pool := m.notifVoices
+	m.mu.Unlock()
+	if pool != nil {
+		t.Fatal("notifVoices survived Stop; it must not hold a reference to a possibly-zombie generation")
+	}
+}
+
+func TestNotificationVoicePoolMixesIntoItsBuffer(t *testing.T) {
+	// The engine's contract, proven without a sample: a pool fed a known
+	// sample mixes it into the destination. This is what notifBuf gets.
+	n := NewNotifSFX(slog.Default())
+	pool := n.NewVoicePool()
+
+	lookup := func(id string) []float32 {
+		if id == NotifyAlert {
+			return []float32{0.5, 0.5, 0.5}
+		}
+		return nil
+	}
+	pool.play(NotifyAlert)
+	dst := make([]float32, FrameSamples)
+	pool.mixInto(dst, lookup)
+
+	if dst[0] != 0.5 {
+		t.Fatalf("dst[0] = %v, want 0.5 -- the pool must mix a present sample into the notification buffer", dst[0])
+	}
+}
+
+// TestDSPLoopMixesNotificationsIntoPlayback is the ONLY guard on the audio
+// half of the seam this phase exists to build: dspLoop filling notifBuf from
+// this generation's notification voice pool.
+//
+// Deleting `clear(notifBuf); notifVoices.mixInto(...)` from dspLoop used to
+// leave the entire suite green. PlayNotification still queued, Available
+// still answered true, and the pool's own unit test still passed -- it
+// drives the pool directly and never the loop -- so the alert would have
+// gone permanently inaudible with nothing failing. Nobody could catch it by
+// ear either: notify_alert.wav does not exist (spec 9), so the slot is
+// silent in production until the pack lands.
+//
+// It is the notification-bus sibling of TestDSPLoopMixesTheRegisteredSource,
+// and belongs to the same family as TestAudioBackendIsWired and
+// TestVoiceBridgeIsWiredAsBothSinkAndSource: prove the wire, not the part.
+//
+// The sample is injected straight into m.notif.samples (same package, so the
+// unexported map is reachable) BEFORE Start, exactly as
+// TestPlayNotificationOnStoppedManagerDrops does. No WAV may be created:
+// the pack is the project's to supply and must not be substituted.
+func TestDSPLoopMixesNotificationsIntoPlayback(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	m.notif.samples[NotifyAlert] = dcFrame(0.5)
+	if !m.notif.Available(NotifyAlert) {
+		t.Fatal("the injected sample did not make NotifyAlert available; this test would be vacuous")
+	}
+	// Master and Notification both at 1, and taper(1) is 1, so the sample
+	// must arrive at the output unchanged. Voice and SFX stay at 0 so
+	// nothing else can account for a non-silent frame.
+	m.SetConfig(Config{Levels: Levels{Master: 1, Notification: 1}})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	m.PlayNotification(NotifyAlert)
+	tick <- time.Now()
+	tick <- time.Now() // returns only once the first iteration finished
+	out := readPlayback(t, m)
+
+	for i, v := range out {
+		if v < 0.49 || v > 0.51 {
+			t.Fatalf("playback sample %d = %v, want ~0.5 -- a queued notification must reach the output through dspLoop's notifBuf fill", i, v)
+		}
+	}
+}
+
+// TestDSPLoopClearsTheNotificationBufferBetweenTicks is the notification
+// bus's counterpart to TestDSPLoopClearsTheSourceBufferWhenTheSourceGoesAway.
+// notifBuf is allocated once per generation and reused, so a loop that mixed
+// without clearing would hold the last alert's final frame under everything
+// forever -- a permanent tone on the output.
+func TestDSPLoopClearsTheNotificationBufferBetweenTicks(t *testing.T) {
+	be := NewFakeBackend()
+	be.SetDevices(
+		[]DeviceInfo{{ID: "mic-1", Name: "Mic One", IsDefault: true}},
+		[]DeviceInfo{{ID: "out-1", Name: "Out One", IsDefault: true}},
+	)
+	m := NewManager(be, ManagerOptions{VUInterval: time.Hour, PollInterval: time.Hour})
+	tick := make(chan time.Time)
+	m.dspTick = tick
+	m.notif.samples[NotifyAlert] = dcFrame(0.5)
+	m.SetConfig(Config{Levels: Levels{Master: 1, Notification: 1}})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Stop()
+
+	m.PlayNotification(NotifyAlert)
+	tick <- time.Now()
+	tick <- time.Now()
+	tick <- time.Now() // returns only once the second iteration finished
+
+	readPlayback(t, m) // the alert frame
+	out := readPlayback(t, m)
+	for i, v := range out {
+		if v < -0.001 || v > 0.001 {
+			t.Fatalf("playback sample %d = %v after the one-shot ended, want silence -- notifBuf must be cleared each tick", i, v)
+		}
 	}
 }

@@ -33,7 +33,7 @@ function seed() {
   useSettings.setState({
     settings: {
       start_minimized: false, minimize_to_tray: true, show_transmitter_name: true,
-      play_connection_sounds: true, radio_switch_as_ptt: false,
+      play_connection_sounds: true, play_notification_sounds: true, radio_switch_as_ptt: false,
       audio: {
         input_device: "", output_device: "", input_device_name: "", output_device_name: "",
         mic_passthrough: false, agc: true, noise_suppression: true,

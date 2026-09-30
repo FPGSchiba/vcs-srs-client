@@ -180,6 +180,33 @@ func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
 	}
 }
 
+// deferOffset returns the offset of a `defer` statement in main.go, and
+// FAILS if the literal does not appear exactly once.
+//
+// The count is the load-bearing half. strings.Index returns the FIRST
+// occurrence, so a comment in main.go that merely SPELLS OUT one of these
+// statements above the real one would make an ordering assertion compare the
+// wrong offset -- and for TestNotifierStopTimersIsRegisteredBeforeTheSources
+// that yields a false PASS on a genuinely inverted shutdown order, which is
+// the one direction these grep-style tests must never fail in. (Everything
+// else about the pattern degrades to a false FAILURE, which is noisy but
+// safe.) Measured: a decoy comment plus a real registration moved after
+// `defer am.Stop()` passed the unguarded test.
+//
+// A duplicate is therefore an explicit failure rather than a silently wrong
+// answer -- which also enforces main.go's standing rule that its prose must
+// not spell out these three literals.
+func deferOffset(t *testing.T, text, lit string) int {
+	t.Helper()
+	switch n := strings.Count(text, lit); {
+	case n == 0:
+		t.Fatalf("main.go no longer contains `%s`; update this test deliberately, not reflexively", lit)
+	case n > 1:
+		t.Fatalf("main.go contains `%s` %d times, want exactly 1 -- an ordering assertion indexes the FIRST occurrence, so a second one (a comment spelling out the statement, say) would silently compare the wrong offset; keep main.go's prose from naming these literals", lit, n)
+	}
+	return strings.Index(text, lit)
+}
+
 // TestMainWiringClosesBackendAfterManagerStop pins the shutdown ordering
 // main.go depends on. Stop()'s joins are bounded, so dspLoop can still be
 // running when Stop() returns; closing the backend before Stop() would let
@@ -193,18 +220,43 @@ func TestAudioManagerStopIsRegisteredForShutdown(t *testing.T) {
 // real GUI.
 func TestMainWiringClosesBackendAfterManagerStop(t *testing.T) {
 	text := readMainGo(t)
-	stopIdx := strings.Index(text, "defer am.Stop()")
-	closeIdx := strings.Index(text, "defer backend.Close()")
-	if stopIdx < 0 {
-		t.Fatal("main.go no longer contains `defer am.Stop()`; update this test deliberately, not reflexively")
-	}
-	if closeIdx < 0 {
-		t.Fatal("main.go no longer contains `defer backend.Close()`; update this test deliberately, not reflexively")
-	}
+	stopIdx := deferOffset(t, text, "defer am.Stop()")
+	closeIdx := deferOffset(t, text, "defer backend.Close()")
 	// defers run LIFO, so the one registered FIRST runs LAST.
 	// backend.Close() must run last, so it must be registered first.
 	if closeIdx > stopIdx {
 		t.Fatalf("`defer backend.Close()` (offset %d) must be registered BEFORE `defer am.Stop()` (offset %d) so it runs after it; see Stop()'s doc on bounded joins", closeIdx, stopIdx)
+	}
+}
+
+// TestNotifierStopTimersIsRegisteredBeforeTheSources pins the other half of
+// main.go's shutdown ordering, the half notify.StopTimers' own doc used to
+// get wrong. It claimed "StopTimers runs before the event bus is torn down";
+// it does not -- every defer in main() runs only after wailsApp.Run() has
+// returned.
+//
+// What IS true, and what actually makes "cancels every armed timer" a final
+// statement rather than a racy one, is defer LIFO: `defer notifier.StopTimers()`
+// is registered BEFORE `defer jm.Close()` and `defer am.Stop()`, so those two
+// run FIRST and the joystick and audio poll goroutines -- the sources that
+// raise into the notifier and therefore arm its windows -- are already
+// stopped by the time StopTimers runs. Registered the other way round, a poll
+// tick landing between StopTimers and the source's own shutdown would arm a
+// fresh window that nothing would ever cancel.
+//
+// That ordering was load-bearing, undocumented and unguarded. This is the
+// guard; see TestMainWiringClosesBackendAfterManagerStop, which does the same
+// job for the backend/manager pair, for why it reads the source.
+func TestNotifierStopTimersIsRegisteredBeforeTheSources(t *testing.T) {
+	text := readMainGo(t)
+	stopTimersIdx := deferOffset(t, text, "defer notifier.StopTimers()")
+	// defers run LIFO, so the one registered FIRST runs LAST. StopTimers
+	// must run last of the three, so it must be registered first.
+	for _, source := range []string{"defer jm.Close()", "defer am.Stop()"} {
+		idx := deferOffset(t, text, source)
+		if idx < stopTimersIdx {
+			t.Errorf("`%s` (offset %d) is registered BEFORE `defer notifier.StopTimers()` (offset %d), so LIFO runs StopTimers first -- a poll tick from that source could then arm a coalescing window nothing will ever cancel", source, idx, stopTimersIdx)
+		}
 	}
 }
 
@@ -270,5 +322,126 @@ func TestSFXGateIsWiredIntoTheObserver(t *testing.T) {
 	text := readMainGo(t)
 	if !strings.Contains(text, "sfxGate.shouldPlay(") {
 		t.Error("main.go does not call sfxGate.shouldPlay(...) -- PlayConnectionSFX would be ungated again")
+	}
+}
+
+// TestNotificationChannelIsWired guards the same failure mode as its
+// neighbours above -- TestJoystickBackendIsWired and TestAudioBackendIsWired
+// in particular: a fully-tested notification store (internal/notify, Task 2)
+// with a live App wiring point (app.SetNotifier, Task 6) that nothing in the
+// shipped binary ever constructs, leaving the whole channel inert while
+// every unit test in both packages passes.
+//
+// This is a source-text assertion, not a behavioural one, because no test
+// inside internal/notify or internal/app can observe whether main.go
+// actually builds a *notify.Notifier and hands it to the App -- exactly the
+// reasoning documented on TestJoystickBackendIsWired and readMainGo above.
+func TestNotificationChannelIsWired(t *testing.T) {
+	text := readMainGo(t)
+	for _, want := range []string{
+		"notify.New(",
+		"app.SetNotifier(gui, ",
+		"notifEvents.Notifications(",
+		"OnSound:",
+		"defer notifier.StopTimers()",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("main.go does not call %s -- the notification channel would be inert", want)
+		}
+	}
+}
+
+// TestAudioNotificationAdapterIsWiredAtBothEmitSites guards DoD 9, which
+// rests on the audio adapter being reached from BOTH of main.go's audio emit
+// sites. app.NotifyAudioState -- a package-level function, deliberately NOT
+// a method on *App, so it stays off the webview-bound service surface --
+// exists for no other reason.
+//
+// The two sites are not interchangeable and neither is redundant:
+//
+//   - the NewMalgoBackend failure branch, where NO Manager exists at all.
+//     This is the most severe audio failure there is and an adapter hung
+//     only off OnState can never see it.
+//   - the Manager's OnState callback, which carries every later fault: a
+//     device that will not open, a substitution, a recovery.
+//
+// Deleting either call leaves every unit test in internal/app and
+// internal/notify green -- the exact failure mode TestJoystickBackendIsWired
+// and TestAudioBackendIsWired exist to catch -- so, like them, this is a
+// source-text assertion.
+func TestAudioNotificationAdapterIsWiredAtBothEmitSites(t *testing.T) {
+	text := readMainGo(t)
+	const call = "app.NotifyAudioState(gui, "
+	if got := strings.Count(text, call); got != 2 {
+		t.Fatalf("main.go contains %d %s calls, want exactly 2 -- one for the no-backend DTO and one inside the Manager's OnState callback", got, call)
+	}
+
+	mgrIdx := strings.Index(text, "audio.NewManager(")
+	if mgrIdx < 0 {
+		t.Fatal("main.go no longer calls audio.NewManager(; update this test deliberately, not reflexively")
+	}
+	onStateIdx := strings.Index(text, "OnState: func(st audio.State)")
+	if onStateIdx < 0 {
+		t.Fatal("main.go no longer registers OnState: func(st audio.State); update this test deliberately, not reflexively")
+	}
+
+	noBackend := strings.Index(text, call)
+	onState := strings.Index(text[noBackend+len(call):], call) + noBackend + len(call)
+	if noBackend > mgrIdx {
+		t.Error("the first app.NotifyAudioState(gui, ...) call is not in the NewMalgoBackend failure branch -- " +
+			"the no-Manager case, the most severe audio failure there is, would go unnotified")
+	}
+	if onState < onStateIdx {
+		t.Error("the second app.NotifyAudioState(gui, ...) call is not inside the Manager's OnState callback -- " +
+			"every audio fault after startup would go unnotified")
+	}
+}
+
+// TestNotificationAdaptersStayOffTheBoundServiceSurface pins the M-9 fix.
+//
+// main.go registers gui with application.NewService, so EVERY exported
+// method on *App is callable from the webview. The two notification adapters
+// main.go drives -- the audio projection and the notification sound -- were
+// exported only so main.go could reach them, which contradicted the branch's
+// own rule (ruling R13, and setCaptureTimeout / setNotifyWindows' doc
+// comments): "an exported method on the service is bound and reachable from
+// the webview, and <this> is not the frontend's business".
+//
+// Concretely, a bound NotifyAudioState lets the renderer fabricate an
+// error-severity "Microphone unavailable" notification with arbitrary body
+// text, or -- by passing a clean DTO -- silently RESOLVE a genuine
+// microphone fault out of the user's list. The renderer is first-party, so
+// the impact is low; the inconsistency was the finding.
+//
+// Fix wave 6 extended the rule to SetNotifier, which was worse than either
+// adapter: a bound SetNotifier(null) sets a.notif to nil and silences the
+// ENTIRE channel for the session. The dead Notifier() accessor beside it was
+// deleted outright.
+//
+// A source-text assertion for the reason all its siblings here are: the
+// CALL SITES live in main.go, and no test inside internal/app can see
+// whether one went back to the method form. The complementary invariant --
+// that no such method exists on *App to call in the first place -- is
+// asserted directly, by reflection over the exported method set, in
+// internal/app's TestNotificationSeamsAreNotOnTheExportedMethodSet. Both are
+// needed: this one catches a call site regressing, that one catches the
+// method being re-added.
+func TestNotificationAdaptersStayOffTheBoundServiceSurface(t *testing.T) {
+	text := readMainGo(t)
+	for _, banned := range []string{
+		"gui.NotifyAudioState(",
+		"gui.PlayNotificationSFX(",
+		"gui.SetNotifier(",
+		"gui.Notifier(",
+	} {
+		if strings.Contains(text, banned) {
+			t.Errorf("main.go calls %s -- that method form is bound into the webview by "+
+				"application.NewService(gui). Use the package-level app.NotifyAudioState / "+
+				"app.PlayNotificationSFX seam instead", banned)
+		}
+	}
+	if !strings.Contains(text, "app.PlayNotificationSFX(gui, ") {
+		t.Error("main.go does not route notify.Options.OnSound through " +
+			"app.PlayNotificationSFX(gui, ...) -- the notification sound would never play")
 	}
 }

@@ -178,6 +178,9 @@ func (a *App) emitJoystickState() {
 		devices = append(devices, events.JoystickDevicePayload{ID: d.ID, Name: d.Name})
 	}
 	sb.em.JoystickState(dto.Supported, dto.Error, devices)
+	// The notification channel's joystick source -- same reasoning as
+	// emitHotkeyState's.
+	a.notifyJoystickState(dto)
 }
 
 // GetJoystickState reports the joystick subsystem's health for the UI.
@@ -219,12 +222,13 @@ func (a *App) GetSettings() SettingsDTO {
 	// audioManager's own doc: never call a Manager method while holding
 	// sb.mu, Manager has its own independent locking.
 	return SettingsDTO{
-		StartMinimized:       g.StartMinimized,
-		MinimizeToTray:       g.MinimizeToTray,
-		ShowTransmitterName:  g.ShowTransmitterName,
-		PlayConnectionSounds: g.PlayConnectionSounds,
-		RadioSwitchAsPTT:     g.RadioSwitchAsPTT,
-		Audio:                audioSettingsDTO(ac, m),
+		StartMinimized:         g.StartMinimized,
+		MinimizeToTray:         g.MinimizeToTray,
+		ShowTransmitterName:    g.ShowTransmitterName,
+		PlayConnectionSounds:   g.PlayConnectionSounds,
+		PlayNotificationSounds: g.PlayNotificationSounds,
+		RadioSwitchAsPTT:       g.RadioSwitchAsPTT,
+		Audio:                  audioSettingsDTO(ac, m),
 	}
 }
 
@@ -245,11 +249,12 @@ func (a *App) SetSettings(s SettingsDTO) error {
 	// but this path never touches Keybinds, so that sharing is harmless.
 	next := *sb.cfg
 	next.General = config.General{
-		StartMinimized:       s.StartMinimized,
-		MinimizeToTray:       s.MinimizeToTray,
-		ShowTransmitterName:  s.ShowTransmitterName,
-		PlayConnectionSounds: s.PlayConnectionSounds,
-		RadioSwitchAsPTT:     s.RadioSwitchAsPTT,
+		StartMinimized:         s.StartMinimized,
+		MinimizeToTray:         s.MinimizeToTray,
+		ShowTransmitterName:    s.ShowTransmitterName,
+		PlayConnectionSounds:   s.PlayConnectionSounds,
+		PlayNotificationSounds: s.PlayNotificationSounds,
+		RadioSwitchAsPTT:       s.RadioSwitchAsPTT,
 	}
 	next.Audio = configAudioFromDTO(s.Audio)
 	audioCfg := next.Audio
@@ -995,6 +1000,10 @@ func (a *App) emitHotkeyState() {
 	sb := a.settings
 	dto := hotkeyStateDTO(sb.hk.State(), a.permissionStatus())
 	sb.em.HotkeysState(dto.Registered, dto.Error, dto.Failed, dto.Permission)
+	// The notification channel's hotkey source. Hung off this funnel rather
+	// than off the event bus because this is the SOLE caller of
+	// HotkeysState, so nothing can emit the state without also notifying.
+	a.notifyHotkeyState(dto)
 }
 
 // Pressed implements hotkeys.Handler.

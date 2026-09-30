@@ -49,8 +49,12 @@ const (
 	// second to every open window is pure bus noise.
 	EventAudioVU = "audio:vu"
 	// EventAudioState is the audio subsystem's health, the sibling of
-	// EventHotkeysState and EventJoystickState. Phase 7's notification
-	// channel absorbs all three uniformly, so the shape stays parallel.
+	// EventHotkeysState and EventJoystickState. Phase 7.2's notification
+	// channel absorbs all three uniformly -- see internal/app's
+	// notify_keybinds.go and notify_audio.go -- so the shape stays
+	// parallel. The audio adapter is called from main.go rather than from
+	// internal/app, because audio has TWO emit sites and only one is a
+	// Manager callback: a failed NewMalgoBackend has no Manager at all.
 	EventAudioState = "audio:state"
 	// EventAudioMicMuted reports the push-to-mute / mute-toggle state.
 	EventAudioMicMuted = "audio:mic_muted"
@@ -96,6 +100,17 @@ const (
 	// exactly why doing it costs almost nothing on top: at 0.2 Hz across a
 	// handful of windows, the traffic either way is negligible.
 	EventConnectionState = "connection:state"
+	// EventNotifications carries the FULL notification Snapshot, not a
+	// delta -- same reasoning as EventKeybindsChanged: the list is capped
+	// (notify.DefaultCap) and a replacement removes a class of
+	// frontend/backend divergence bug.
+	//
+	// Broadcast to every window, because the notification store is
+	// Go-owned. A popout is a separate webview with its own JS heap, so a
+	// list held in the main window's Zustand store would be invisible to
+	// the Notifications window -- the same reason connection:state and
+	// window:state are Go-owned.
+	EventNotifications = "notifications:changed"
 )
 
 // ConnectionState is the payload value used with EventControlConnection.
@@ -382,3 +397,9 @@ func (t *Tagged) VoiceState(state, errMsg string) {
 func (t *Tagged) ConnectionHealth(payload any) {
 	t.em.Emit(EventConnectionState, payload)
 }
+
+// Notifications emits EventNotifications with the full snapshot. The payload
+// is typed as any for the same reason KeybindsChanged's is: the concrete
+// shape is notify.Snapshot, and naming it here would make this package
+// depend on one of its own consumers' collaborators for no benefit.
+func (t *Tagged) Notifications(payload any) { t.em.Emit(EventNotifications, payload) }

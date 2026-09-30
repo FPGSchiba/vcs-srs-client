@@ -14,12 +14,21 @@ import (
 // Reconnecting deliberately gets nothing: it is a transient the user already
 // sees in the status bar's pill, and a sound on every retry rung would be
 // noise during exactly the period the user is already annoyed.
+// sb.cfg is nil-checked INSIDE sb.mu -- see notificationSFXID, whose
+// identical out-of-lock check -race flagged as a write/read race against
+// SetSettings repointing cfg. This gate is reached from the connhealth
+// callback while the Wails binding goroutine can be writing, so it has the
+// same exposure and takes the same fix.
 func (a *App) connectionSFXID(state string) string {
 	sb := a.settings
-	if sb == nil || sb.cfg == nil {
+	if sb == nil {
 		return ""
 	}
 	sb.mu.Lock()
+	if sb.cfg == nil {
+		sb.mu.Unlock()
+		return ""
+	}
 	enabled := sb.cfg.General.PlayConnectionSounds
 	sb.mu.Unlock()
 	if !enabled {

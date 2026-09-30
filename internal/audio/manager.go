@@ -196,11 +196,16 @@ type Manager struct {
 	// the one shared pool concurrently).
 	sfx *SFX
 
+	// notif is the notification sample set. Immutable after NewManager, the
+	// same ownership as sfx.
+	notif *NotifSFX
+
 	mu                            sync.Mutex
 	running                       bool
 	starting                      bool       // claimed inside the same critical section as the running check, so a second concurrent Start() returns immediately instead of racing the first (Fix 2).
 	epoch                         uint64     // GENERATION IDENTITY, not "a Start happened": incremented in Start's mu-guarded publish AND in Stop's first mu section (Fix A round 4 -- Stop alone, with no subsequent Start, must also invalidate the generation it's tearing down, or a reopen it abandoned and gives up waiting on can still publish after Stop returns). Round 2 parameterised the READ side of the poll goroutine (the rings); it missed that maybeReopenCapture/maybeReopenPlayback/pollOnce also WRITE BACK into Manager fields after a Backend call that can itself be the thing blocked when Stop() abandons this goroutine. mu makes those writes race-free, not current: a late write-back is checked against the CURRENT m.epoch before being published, and discarded (with the freshly-opened stream stopped) if this goroutine's generation is no longer it (Fix A round 3). Every stamped goroutine now carries one uniform invariant -- "my epoch must still be the live one" -- that covers being superseded by a later Start() and being torn down by a Stop() with no successor, via the same check, with no special-casing.
 	sfxVoices                     *voicePool // current generation's mixing state; read fresh under mu by PlayEffect (Fix A round 2). Published under mu in Start alongside the rings, for the same reason.
+	notifVoices                   *voicePool // current generation's notification mixing state; published under mu in Start alongside sfxVoices and the rings, for the same reason.
 	captureStream, playbackStream Stream
 	inputErr, outputErr           string
 	inputID, outputID             string
@@ -298,6 +303,7 @@ func NewManager(b Backend, opts ManagerOptions) *Manager {
 		opts:    opts,
 		log:     opts.Log,
 		sfx:     NewSFX(),
+		notif:   NewNotifSFX(opts.Log),
 	}
 	m.sinks.Store(&[]Sink{})
 	// Mirrors config's own Default() (design spec §10) so a Manager that
@@ -427,6 +433,29 @@ func (m *Manager) EffectLabel(id string) string { return m.sfx.Label(id) }
 // lands (internal/audio/assets/README.md), which is the true, unfaked
 // answer today.
 func (m *Manager) EffectAvailable(id string) bool { return m.sfx.Available(id) }
+
+// PlayNotification starts a notification one-shot. Unknown or absent ids are
+// ignored, so this is a silent no-op until notify_alert.wav lands.
+//
+// Also a no-op when the manager isn't running: there is no current
+// generation's voice pool to queue into, and letting a request linger until
+// some later, unrelated Start() drained it would play an alert for an event
+// minutes past. Identical discipline to PlayEffect.
+func (m *Manager) PlayNotification(id string) {
+	if !m.notif.Available(id) {
+		return
+	}
+	m.mu.Lock()
+	v, running := m.notifVoices, m.running
+	m.mu.Unlock()
+	if running && v != nil {
+		v.play(id)
+	}
+}
+
+// NotificationAvailable reports whether a decoded sample backs the slot.
+// False for every slot until the pack lands.
+func (m *Manager) NotificationAvailable(id string) bool { return m.notif.Available(id) }
 
 // State returns a snapshot of the manager's health.
 func (m *Manager) State() State {
@@ -666,10 +695,12 @@ func (m *Manager) Start() error {
 	// an abandoned generation's dspLoop must never be able to mix into the
 	// same pool a later generation's dspLoop is using.
 	sfxVoices := m.sfx.NewVoicePool()
+	notifVoices := m.notif.NewVoicePool()
 
 	m.mu.Lock()
 	m.captureRing, m.playbackRing = captureRing, playbackRing
 	m.sfxVoices = sfxVoices
+	m.notifVoices = notifVoices
 	m.lastInputs, m.lastOutputs = inputs, outputs
 	m.captureStream, m.playbackStream = capStream, playStream
 	m.inputID, m.outputID = inID, outID
@@ -714,7 +745,7 @@ func (m *Manager) Start() error {
 	// See Manager.dspTick: nil in production, and only ever set before
 	// Start, so reading it here (and never inside dspLoop) keeps the
 	// "per-generation state is a parameter" rule exceptionless.
-	go m.dspLoop(denoiser, stopDSP, dspDone, captureRing, playbackRing, sfxVoices, m.dspTick)
+	go m.dspLoop(denoiser, stopDSP, dspDone, captureRing, playbackRing, sfxVoices, notifVoices, m.dspTick)
 	go m.pollLoop(stopPoll, pollDone, captureRing, playbackRing, epoch)
 
 	m.emitState()
@@ -802,7 +833,8 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	capStream, playStream := m.captureStream, m.playbackStream
 	m.captureStream, m.playbackStream = nil, nil
-	m.sfxVoices = nil // PlayEffect also gates on m.running, so this is belt-and-suspenders: don't hold a reference to a generation that may still be a zombie any longer than necessary.
+	m.sfxVoices = nil   // PlayEffect also gates on m.running, so this is belt-and-suspenders: don't hold a reference to a generation that may still be a zombie any longer than necessary.
+	m.notifVoices = nil // same reasoning as sfxVoices above
 	m.mu.Unlock()
 
 	if capStream != nil {
@@ -903,7 +935,7 @@ func peak(frame []float32) float32 {
 // was launched for: even if it never returns, it can only ever touch its
 // OWN orphaned state, never the next generation's. See dspLoop's call site
 // in Start for how the OS callbacks already used this pattern.
-func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, captureRing, playbackRing *Ring, sfxVoices *voicePool, dspTick <-chan time.Time) {
+func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, captureRing, playbackRing *Ring, sfxVoices, notifVoices *voicePool, dspTick <-chan time.Time) {
 	defer close(dspDone)
 	defer denoiser.Close()
 
@@ -935,7 +967,11 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 	// a catch-up tick would run every talker fast.
 	rxBuf := make([]float32, FrameSamples)
 	sfxBuf := make([]float32, FrameSamples)
-	notifBuf := make([]float32, FrameSamples) // no notification engine yet (Phase 4 scope); always silent.
+	// notifBuf is the notification bus. Filled by this generation's own
+	// notification voice pool, exactly as sfxBuf is by sfxVoices -- see
+	// the mix below. (Before Phase 7.2 this was declared and left at zero:
+	// mixer.Mix already took it, but nothing ever wrote to it.)
+	notifBuf := make([]float32, FrameSamples)
 
 	var lastCaptureDropped uint64
 	var vuIn, vuOut float32
@@ -1114,6 +1150,8 @@ func (m *Manager) dspLoop(denoiser *Denoiser, stopDSP, dspDone chan struct{}, ca
 
 		clear(sfxBuf)
 		sfxVoices.mixInto(sfxBuf, m.sfx.sampleFor)
+		clear(notifBuf)
+		notifVoices.mixInto(notifBuf, m.notif.sampleFor)
 
 		mixer.Mix(outFrame, monitorBuf, rxBuf, sfxBuf, notifBuf)
 		playbackRing.Write(outFrame)

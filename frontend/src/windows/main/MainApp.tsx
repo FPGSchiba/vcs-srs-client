@@ -9,10 +9,12 @@ import { useRadios } from "../../shared/store/radios";
 import { useWindows } from "../../shared/store/windows";
 import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { useConnectionSync } from "../../shared/store/useConnectionSync";
+import { useNotificationsSync } from "../../shared/store/useNotificationsSync";
 import { TopBar } from "../../shared/components/TopBar";
 import { NavRail } from "../../shared/components/NavRail";
 import { StatusBar } from "../../shared/components/StatusBar";
 import { ConnBanner } from "../../shared/components/ConnBanner";
+import { ToastHost } from "../../shared/components/ToastHost";
 import { Welcome } from "./screens/Welcome";
 import { Home } from "./screens/Home";
 import { Players } from "./screens/Players";
@@ -52,6 +54,9 @@ export function MainApp() {
   // Same discipline for connection health: the status bar and the banner
   // both read it, and both are part of the window shell.
   useConnectionSync();
+  // And again for notifications: the badge, the bell and ToastHost all read
+  // this store, and all are part of the window shell.
+  useNotificationsSync();
 
   useEffect(() => {
     // Pull the full snapshot (clients, radios, self) and replace the stores.
@@ -128,6 +133,7 @@ export function MainApp() {
         <main className="main">{screen}</main>
       </div>
       <StatusBar onNavigate={setView} />
+      <ToastHost />
     </div>
   );
 }

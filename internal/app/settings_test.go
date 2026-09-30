@@ -588,7 +588,23 @@ func TestCaptureTimeoutTellsTheFrontendItsCaptureDied(t *testing.T) {
 	a.setCaptureTimeout(30 * time.Millisecond)
 	a.BeginCapture("global.push_to_mute")
 	// Never call EndCapture: the user is still hunting for the button.
-	waitUntil(t, time.Second, func() bool { return a.hotkeysResumed() })
+	//
+	// Wait on the LAST observable effect of the auto-resume, not the first.
+	// resumeCapture resumes the hotkey registrar, then the joystick manager,
+	// and only THEN emits keybinds:capture_expired. a.hotkeysResumed() flips
+	// true at step one, so waiting on it and asserting on the event left a
+	// real window in which the assert fired before the emit -- observed once
+	// in three -race -count=5 runs of this package, and load-dependent rather
+	// than deterministic. The production ordering is deliberate (the row must
+	// stop listening only once the backend is already in the state it is
+	// about to reflect), so the TEST is what synchronises differently.
+	waitUntil(t, time.Second, func() bool {
+		return len(em.payloadsFor(events.EventCaptureExpired)) == 1
+	})
+	if !a.hotkeysResumed() {
+		t.Fatal("hotkeys are still suspended after the capture expired -- the emit " +
+			"is documented to come after both managers are back")
+	}
 
 	// The row must have been told, and told WHICH row.
 	expired := em.payloadsFor(events.EventCaptureExpired)

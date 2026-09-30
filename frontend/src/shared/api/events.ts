@@ -33,6 +33,7 @@ export const EV = {
   // to voice:state directly.
   voiceState: "voice:state",
   voiceAddressUpdate: "voice:address_update",
+  notifications: "notifications:changed",
 } as const;
 
 // HotkeyEventPayload is the payload shape for EV.hotkeyPressed /

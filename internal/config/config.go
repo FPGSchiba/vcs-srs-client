@@ -10,14 +10,19 @@ import (
 )
 
 // General holds the user-facing toggles from the Settings > General section.
-// ShowTransmitterName, PlayConnectionSounds and RadioSwitchAsPTT are stored and
-// exposed now; their consumers arrive in Phases 4/5.
+// ShowTransmitterName, PlayConnectionSounds, PlayNotificationSounds and
+// RadioSwitchAsPTT are stored and exposed now; their consumers arrive in
+// Phases 4/5/7.
 type General struct {
 	StartMinimized       bool `toml:"start_minimized"`
 	MinimizeToTray       bool `toml:"minimize_to_tray"`
 	ShowTransmitterName  bool `toml:"show_transmitter_name"`
 	PlayConnectionSounds bool `toml:"play_connection_sounds"`
-	RadioSwitchAsPTT     bool `toml:"radio_switch_as_ptt"`
+	// PlayNotificationSounds gates notify.SeverityError's sound (see
+	// app.notificationSFXID) the same way PlayConnectionSounds gates
+	// connectionSFXID.
+	PlayNotificationSounds bool `toml:"play_notification_sounds"`
+	RadioSwitchAsPTT       bool `toml:"radio_switch_as_ptt"`
 }
 
 // Config holds the persisted user/app settings. New fields MUST get a default
@@ -290,11 +295,12 @@ func Default() *Config {
 		TLSCAFile:           "",
 		PingIntervalSeconds: 5,
 		General: General{
-			StartMinimized:       false,
-			MinimizeToTray:       true,
-			ShowTransmitterName:  true,
-			PlayConnectionSounds: true,
-			RadioSwitchAsPTT:     false,
+			StartMinimized:         false,
+			MinimizeToTray:         true,
+			ShowTransmitterName:    true,
+			PlayConnectionSounds:   true,
+			PlayNotificationSounds: true,
+			RadioSwitchAsPTT:       false,
 		},
 		Keybinds: map[string]KeybindValue{},
 		// KeybindDevices is deliberately left NIL, not an empty map. The

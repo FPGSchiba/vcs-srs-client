@@ -1,7 +1,8 @@
-import type React from "react";
-
 import { Icon } from "./Icon";
+import { activatable } from "./activatable";
+import { api } from "../api/client";
 import { useBuildInfo } from "../hooks/useBuildInfo";
+import { useNotifications } from "../store/notifications";
 import {
   useConnection,
   controlDot,
@@ -63,29 +64,10 @@ function Segment({
  *
  * classNames are byte-identical to the design so the ported CSS applies.
  */
-/** Makes a non-button element activate like one from the keyboard.
- *  The design prototype uses plain `div`/`span` with `onClick` and the
- *  ported CSS keys off those classNames, so the elements stay as they are
- *  and gain the semantics instead: focusable, announced as a button, and
- *  activated by Enter or Space like a real one. */
-function activatable(onActivate: () => void) {
-  return {
-    role: "button",
-    tabIndex: 0,
-    onClick: onActivate,
-    onKeyDown: (e: React.KeyboardEvent) => {
-      if (e.key === "Enter" || e.key === " ") {
-        // Space would otherwise scroll the page.
-        e.preventDefault();
-        onActivate();
-      }
-    },
-  };
-}
-
 export function StatusBar({ onNavigate }: StatusBarProps) {
   const conn = useConnection((s) => s.conn);
   const build = useBuildInfo();
+  const unread = useNotifications((s) => s.snap.unread);
   const goServer = () => onNavigate?.("server");
 
   return (
@@ -118,9 +100,15 @@ export function StatusBar({ onNavigate }: StatusBarProps) {
       <span className="sb-btn">
         <Icon name="help" size={11} /> HELP
       </span>
-      <span className="sb-btn">
+      <span
+        data-bell="alerts"
+        className={`sb-btn${unread > 0 ? " has-unread" : ""}`}
+        {...activatable(() => void api.toggleWindow("notifications"))}
+        title="Open Notifications"
+      >
         <Icon name="bell" size={11} />
         ALERTS
+        {unread > 0 && <span className="sb-bell-count">{unread}</span>}
       </span>
     </div>
   );

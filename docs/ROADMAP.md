@@ -212,27 +212,71 @@ The original nine deliverables below are redistributed under the sub-phase that 
 
 ### Phase 7.2 — Notification channel
 
-**Status:** `[ ]` not started — spec not yet written.
+**Status:** `[x]` complete 2026-09-28 — a general, Go-owned notification
+channel (`internal/notify`), the Notifications popout, and unread surfacing
+through the TopBar badge, the status-bar bell, and an error-severity toast
+stack. **Design doc:** [`2026-09-28-vcs-client-phase-7-2-notification-channel-design.md`](./superpowers/specs/2026-09-28-vcs-client-phase-7-2-notification-channel-design.md)
 
 **Headline deliverables**
-- Notifications popout (local + future server-pushed alert channel)
-- Route hotkey-registration failures through the notification channel,
+- Notifications popout (local today; the channel is designed for a future
+  server-pushed alert stream, see PROTO_GAPS #8).
+- Hotkey-registration failures routed through the notification channel,
   replacing Phase 3's inline banner in the Keybinds section. Two distinct
-  cases, and they must stay distinct: a GLOBAL failure (nothing registered at
-  all -- a denied macOS Accessibility grant, a missing backend) notifies
-  **once**, carrying the permission state and its remedial action; a
-  PER-BINDING failure (a chord `internal/chord` accepts but the OS cannot
-  register, e.g. `Numpad7`) notifies **per action**, naming the action. The
-  banner exists today because there is nowhere else to put this; once the
-  notification channel lands it is the right home, since a registration
-  failure is exactly the kind of thing the user must learn about without
-  having Settings open. See the Phase 3 spec's R12 for the origin.
-  **This covers joystick failures too** (Phase 3.5): the same two cases, plus
-  a third global state that is informational rather than an error —
-  "joystick input is unsupported on this platform" on macOS, which must never
-  render as a failure.
+  cases, kept distinct: a GLOBAL failure (nothing registered at all -- a
+  denied macOS Accessibility grant, a missing backend) notifies **once**,
+  carrying the permission state and its remedial action; a PER-BINDING
+  failure (a chord `internal/chord` accepts but the OS cannot register, e.g.
+  `Numpad7`) notifies **per action**, naming the action.
+- Joystick failures routed the same way (Phase 3.5): the same two-case shape,
+  plus a third, informational-only global state -- "joystick input is
+  unsupported on this platform" on macOS -- which never renders as a
+  failure, never reaches the badge/bell/toast (info items are raised
+  already-read).
 
-**Blocking deps:** Phase 7.1 (dependency order — 7.1 makes remote verification possible at all; not a hard technical block).
+**Beyond the ROADMAP's original deliverables above — both added during
+design, at the user's request, and recorded here plainly rather than as if
+they had always been planned:**
+- **Audio device faults as a third notification source.** Not in this row's
+  original text. Added because `internal/events/events.go`'s
+  `EventAudioState` comment already claimed the channel "absorbs all three
+  uniformly" and that claim was honoured rather than quietly walked back.
+  Microphone/output errors and device substitution now raise/resolve through
+  the same channel, with `Overruns`/`Underruns` deliberately excluded from
+  the notification so a glitching engine (`audio:state` fires every ~2s
+  during a glitch) collapses to one notification instead of ~1800/hour.
+- **The notification sound engine** — a second voice pool mixed into the
+  mixer's notification bus, `Manager.PlayNotification`, and a
+  `play_notification_sounds` setting. **This ships silent.** The required
+  sample, `notify_alert.wav`, does not exist; `internal/audio/assets/README.md`
+  records the pack as a dependency on the user that must not be substituted
+  with a placeholder tone. **The outstanding WAV pack is now ten files, not
+  nine** (Phase 4's original nine SFX slots plus this one). The playback path
+  is unit-tested end to end and becomes audible the day the sample lands,
+  with no further code change.
+
+**Known gap, recorded not closed:** the popout offers MARK ALL READ and
+CLEAR ALL only — there is **no per-item dismiss control**, matching the
+design prototype and the spec's §6.1 table. So `notify.Notifier.Dismiss`
+and the whole per-item suppression apparatus around it are unreachable from
+the running application; today only `Clear()` can write a suppression entry.
+The Go binding is deliberate groundwork for 7.3/7.4's popouts. Whether to
+add the control is a **product decision**, not an outstanding bug. See the
+design spec's §6.1 and §8.
+
+**Verification status:** automated suite green (`go build`/`go vet`/`go test
+-race ./...` with `-tags purego`, frontend `vitest`/`tsc --noEmit`/build);
+**not field-verified.** This is the **seventh** manual checklist to sit
+unrun in `docs/superpowers/plans/`, joining Phases 3, 3.5, 4, 5, 6 and 7.1 —
+see `docs/superpowers/plans/2026-09-28-phase-7-2-manual-verification.md`.
+Remaining unknowns per the design spec's §7: the joystick flap and its 2s
+coalescing window have never been observed on real Windows/Linux hardware;
+the exact malgo error text for a real device failure, and whether a
+hot-unplug transitions cleanly, are unknown; macOS Accessibility denial has
+never been exercised on hardware; and the notification sound cannot be
+verified by anyone until `notify_alert.wav` exists — not merely untested,
+unverifiable today.
+
+**Blocking deps:** none remaining.
 
 ---
 

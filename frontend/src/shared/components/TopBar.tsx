@@ -1,10 +1,12 @@
 import { Window, Application } from "@wailsio/runtime";
 import { Icon } from "./Icon";
+import { activatable } from "./activatable";
 import { api } from "../api/client";
 import { useBuildInfo } from "../hooks/useBuildInfo";
 import { useSession } from "../store/session";
 import type { Conn } from "../store/session";
 import { useWindows } from "../store/windows";
+import { useNotifications } from "../store/notifications";
 
 interface TopBarProps {
   view: string;
@@ -40,12 +42,14 @@ const POPOUT_LAUNCHERS: Launcher[] = [
 
 /**
  * TopBar is the post-login application title bar, ported from the design
- * prototype's `shell.jsx` TopBar. The launcher strip currently wires only the
- * Comms pop-out (`api.openWindow("comms")`); the remaining launchers render but
- * are disabled placeholders for later phases. The user/callsign identity store
- * is not wired yet, so the user-menu trigger shows placeholder text. The
- * `.topbar` className carries the drag region from the ported CSS. classNames
- * are kept byte-identical to the design so the ported CSS applies unchanged.
+ * prototype's `shell.jsx` TopBar. The launcher strip wires `comms` and
+ * `notifications` through `api.toggleWindow`; `fleet`, `ship` and `messages`
+ * remain disabled placeholders for later phases. The `notifications`
+ * launcher additionally carries an unread badge. The user/callsign identity
+ * store is not wired yet, so the user-menu trigger shows placeholder text.
+ * The `.topbar` className carries the drag region from the ported CSS.
+ * classNames are kept byte-identical to the design so the ported CSS
+ * applies unchanged.
  */
 const CONN_PILL: Record<Conn, { cls: string; label: string }> = {
   connected: { cls: "conn-pill", label: "CONNECTED" },
@@ -59,6 +63,7 @@ export function TopBar({ view }: TopBarProps) {
   const pill = CONN_PILL[conn];
   const self = useSession((s) => s.self);
   const openWindows = useWindows((s) => s.open);
+  const unread = useNotifications((s) => s.snap.unread);
   const callsign = self?.callsign || "GUEST";
   const initials = self?.callsign ? self.callsign.slice(0, 2).toUpperCase() : "—";
   return (
@@ -86,25 +91,34 @@ export function TopBar({ view }: TopBarProps) {
         {/* Panel launcher strip */}
         <div className="launcher">
           {POPOUT_LAUNCHERS.map((l) => {
-            const isComms = l.key === "comms";
-            const isOpen = isComms && openWindows.includes("comms");
+            const wired = l.key === "comms" || l.key === "notifications";
+            const isOpen = openWindows.includes(l.key);
+            const badge = l.key === "notifications" ? unread : 0;
             return (
               <span
                 key={l.key}
+                data-launcher={l.key}
                 className={`launcher-btn${isOpen ? " open" : ""}`}
-                onClick={isComms ? () => void api.toggleWindow("comms") : undefined}
+                // The prototype's CSS keys off this className, so the
+                // element stays a span and gains button semantics instead.
+                // Touching this line makes it new code for SonarCloud's
+                // gate (typescript:S1082), so the keyboard path is not
+                // optional -- and adding it here also fixes a pre-existing
+                // gap for the Comms launcher.
+                {...(wired ? activatable(() => void api.toggleWindow(l.key)) : {})}
                 title={
-                  isComms
+                  wired
                     ? `${l.label} · ${isOpen ? "Open — click to close" : "Closed — click to open"}`
                     : "Arrives in a later phase"
                 }
-                aria-disabled={isComms ? undefined : true}
-                aria-pressed={isComms ? isOpen : undefined}
-                style={isComms ? undefined : { opacity: 0.45, pointerEvents: "none" }}
+                aria-disabled={wired ? undefined : true}
+                aria-pressed={wired ? isOpen : undefined}
+                style={wired ? undefined : { opacity: 0.45, pointerEvents: "none" }}
               >
                 <Icon name={l.icon} size={11} />
                 {l.label}
                 <span className="dot" />
+                {badge > 0 && <span className="badge">{badge}</span>}
               </span>
             );
           })}

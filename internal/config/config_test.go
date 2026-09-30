@@ -199,11 +199,12 @@ func TestGeneralRoundTripAllFields(t *testing.T) {
 	// encoding/decoding (not tag verification — symmetric round trips cannot catch
 	// tag typos since Save and Load use the same struct tags).
 	cfg.General = config.General{
-		StartMinimized:       true,
-		MinimizeToTray:       false,
-		ShowTransmitterName:  false,
-		PlayConnectionSounds: false,
-		RadioSwitchAsPTT:     true,
+		StartMinimized:         true,
+		MinimizeToTray:         false,
+		ShowTransmitterName:    false,
+		PlayConnectionSounds:   false,
+		PlayNotificationSounds: false,
+		RadioSwitchAsPTT:       true,
 	}
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -229,6 +230,7 @@ start_minimized = true
 minimize_to_tray = false
 show_transmitter_name = false
 play_connection_sounds = false
+play_notification_sounds = false
 radio_switch_as_ptt = true
 `
 	dir := t.TempDir()
@@ -241,11 +243,12 @@ radio_switch_as_ptt = true
 		t.Fatalf("Load: %v", err)
 	}
 	want := config.General{
-		StartMinimized:       true,
-		MinimizeToTray:       false,
-		ShowTransmitterName:  false,
-		PlayConnectionSounds: false,
-		RadioSwitchAsPTT:     true,
+		StartMinimized:         true,
+		MinimizeToTray:         false,
+		ShowTransmitterName:    false,
+		PlayConnectionSounds:   false,
+		PlayNotificationSounds: false,
+		RadioSwitchAsPTT:       true,
 	}
 	if got.General != want {
 		t.Errorf("General from literal TOML = %+v, want %+v", got.General, want)
@@ -723,4 +726,25 @@ func TestConfig_TLSCAFile(t *testing.T) {
 			t.Fatalf("expected empty, got %q", loaded.TLSCAFile)
 		}
 	})
+}
+
+func TestPlayNotificationSoundsDefaultsTrueAndRoundTrips(t *testing.T) {
+	if !config.Default().General.PlayNotificationSounds {
+		t.Error("PlayNotificationSounds should default true")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	cfg := config.Default()
+	cfg.General.PlayNotificationSounds = false
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.General.PlayNotificationSounds {
+		t.Error("PlayNotificationSounds lost in round trip: want false, got true")
+	}
 }

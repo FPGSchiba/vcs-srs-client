@@ -106,11 +106,12 @@ func SnapshotFromProto(clients map[string]*srspb.ClientInfo, radios map[string]*
 // audio.go's package doc for why Audio does not get its own
 // Get/SetAudioSettings pair.
 type SettingsDTO struct {
-	StartMinimized       bool `json:"start_minimized"`
-	MinimizeToTray       bool `json:"minimize_to_tray"`
-	ShowTransmitterName  bool `json:"show_transmitter_name"`
-	PlayConnectionSounds bool `json:"play_connection_sounds"`
-	RadioSwitchAsPTT     bool `json:"radio_switch_as_ptt"`
+	StartMinimized         bool `json:"start_minimized"`
+	MinimizeToTray         bool `json:"minimize_to_tray"`
+	ShowTransmitterName    bool `json:"show_transmitter_name"`
+	PlayConnectionSounds   bool `json:"play_connection_sounds"`
+	PlayNotificationSounds bool `json:"play_notification_sounds"`
+	RadioSwitchAsPTT       bool `json:"radio_switch_as_ptt"`
 
 	Audio AudioSettingsDTO `json:"audio"`
 }

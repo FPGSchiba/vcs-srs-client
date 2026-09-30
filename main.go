@@ -18,6 +18,7 @@ import (
 	"github.com/FPGSchiba/vcs-srs-client/internal/hotkeys"
 	"github.com/FPGSchiba/vcs-srs-client/internal/joystick"
 	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
 	"github.com/FPGSchiba/vcs-srs-client/internal/session"
 	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 	"github.com/FPGSchiba/vcs-srs-client/pkg/logger"
@@ -159,6 +160,41 @@ func main() {
 	monitor.Start()
 	defer monitor.Stop()
 
+	// The notification channel. Constructed before the settings, joystick
+	// and audio backends because all three raise into it during their own
+	// wiring -- applyHotkeys runs inside SetSettingsBackend, and the
+	// joystick manager's first enumeration fires as soon as Start is called.
+	//
+	// OnSound is routed through gui rather than straight to the audio
+	// Manager: the Manager does not exist yet at this point, and the gate
+	// also has to consult general.play_notification_sounds, which lives in
+	// the settings backend. Both hooks go through package-level functions in
+	// internal/app rather than methods on gui, because every exported method
+	// on the service is bound into the webview (see app.NotifyAudioState).
+	notifEvents := vcsevents.New(emitter)
+	notifier := notify.New(notify.Options{
+		OnChange: func(s notify.Snapshot) { notifEvents.Notifications(s) },
+		OnSound:  func(it notify.Item) { app.PlayNotificationSFX(gui, string(it.Severity)) },
+	})
+	app.SetNotifier(gui, notifier)
+	// Cancels every armed trailing timer on shutdown.
+	//
+	// Registered HERE, before the joystick manager's Close and the audio
+	// manager's Stop are deferred further down, and that order is
+	// load-bearing: defers run LIFO, so those two poll goroutines -- the
+	// things that raise into the notifier -- are stopped FIRST and this runs
+	// last, with nothing left that could arm a new window while or after it
+	// cancels. Moving this registration below either of them would let a poll
+	// tick arm a window after StopTimers had already run. Pinned by
+	// TestNotifierStopTimersIsRegisteredBeforeTheSources, which greps for the
+	// literal defer statements -- do not spell them out in prose here, or
+	// that test and its two siblings will match the comment instead.
+	//
+	// It does NOT run before the event bus is torn down -- every defer in
+	// this function runs only after wailsApp.Run() has returned. See
+	// notify.StopTimers' doc for what that does and does not cover.
+	defer notifier.StopTimers()
+
 	// session.New's construction above is unchanged. The observer is
 	// installed after the monitor exists, because the two halves need each
 	// other -- the monitor probes through sess.PingOnce, the session reports
@@ -222,10 +258,15 @@ func main() {
 	audioEvents := vcsevents.New(emitter)
 	if backend, err := audio.NewMalgoBackend(); err != nil {
 		appLog.Warn("audio backend unavailable; audio features are disabled", "err", err)
-		audioEvents.AudioState(app.AudioStateDTO{
+		noBackend := app.AudioStateDTO{
 			InputError:  err.Error(),
 			OutputError: err.Error(),
-		})
+		}
+		audioEvents.AudioState(noBackend)
+		// The notification channel's audio source, for the case with NO
+		// Manager at all. This is the most severe audio failure there is,
+		// and the OnState hook below can never see it.
+		app.NotifyAudioState(gui, noBackend)
 	} else {
 		am := audio.NewManager(backend, audio.ManagerOptions{
 			Log: appLog,
@@ -248,7 +289,9 @@ func main() {
 				// app.AudioStateDTOFrom): a hand-written mapping here is
 				// what silently dropped the device/substitution fields
 				// from the event path while State carried them.
-				audioEvents.AudioState(app.AudioStateDTOFrom(st))
+				dto := app.AudioStateDTOFrom(st)
+				audioEvents.AudioState(dto)
+				app.NotifyAudioState(gui, dto)
 			},
 			OnVU: func(v audio.VU) {
 				audioEvents.AudioVU(audioVUPayload{Input: v.Input, Output: v.Output})

@@ -28,7 +28,7 @@ vi.mock("../../../../shared/api/client", () => ({
   api: {
     getSettings: vi.fn().mockResolvedValue({
       start_minimized: false, minimize_to_tray: true, show_transmitter_name: true,
-      play_connection_sounds: true, radio_switch_as_ptt: false, audio,
+      play_connection_sounds: true, play_notification_sounds: true, radio_switch_as_ptt: false, audio,
     }),
     setSettings: vi.fn().mockResolvedValue(undefined),
     getKeybinds: vi.fn().mockResolvedValue([]),
@@ -46,7 +46,7 @@ describe("SettingsScreen", () => {
     useSettings.setState({
       settings: {
         start_minimized: false, minimize_to_tray: true, show_transmitter_name: true,
-        play_connection_sounds: true, radio_switch_as_ptt: false, audio,
+        play_connection_sounds: true, play_notification_sounds: true, radio_switch_as_ptt: false, audio,
       },
       keybinds: [],
       hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
