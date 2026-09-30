@@ -13,9 +13,9 @@
   "layout": {
     "window": { "w": 540, "h": 720 },
     "blocks": [
-      { "radio_id": 1, "w": 516, "h": 180 },
-      { "radio_id": 2, "w": 516, "h": 180 },
-      { "radio_id": 3, "w": 516, "h": 180 }
+      { "radio_id": 1, "variant": "vertical" },
+      { "radio_id": 2, "variant": "vertical" },
+      { "radio_id": 3, "variant": "vertical" }
     ]
   }
 }

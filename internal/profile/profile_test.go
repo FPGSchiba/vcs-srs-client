@@ -13,7 +13,7 @@ func TestDecodeRoundTrip(t *testing.T) {
 		Radios:        []Radio{{ID: 1, Name: "Fleet", FrequencyKHz: 118500, Enabled: true}},
 		Layout: Layout{
 			Window: WindowSize{W: 540, H: 720},
-			Blocks: []Block{{RadioID: 1, W: 516, H: 180}},
+			Blocks: []Block{{RadioID: 1, Variant: "horizontal"}},
 		},
 	}
 	b, err := Encode(src)
@@ -30,8 +30,8 @@ func TestDecodeRoundTrip(t *testing.T) {
 	if got.Radios[0].FrequencyKHz != 118500 {
 		t.Fatalf("FrequencyKHz = %d, want 118500", got.Radios[0].FrequencyKHz)
 	}
-	if got.Layout.Blocks[0].W != 516 {
-		t.Fatalf("block W = %d, want 516", got.Layout.Blocks[0].W)
+	if got.Layout.Blocks[0].Variant != "horizontal" {
+		t.Fatalf("block Variant = %q, want horizontal", got.Layout.Blocks[0].Variant)
 	}
 }
 
@@ -106,7 +106,7 @@ func TestValidateAcceptsEmptyRadios(t *testing.T) {
 	}
 }
 
-func TestReconcileAppendsMissingBlock(t *testing.T) {
+func TestReconcileAppendsMissingBlockWithDefaultVariant(t *testing.T) {
 	d := &Document{
 		SchemaVersion: SchemaVersion,
 		Name:          "x",
@@ -114,14 +114,47 @@ func TestReconcileAppendsMissingBlock(t *testing.T) {
 			{ID: 1, Name: "a", FrequencyKHz: 118500},
 			{ID: 2, Name: "b", FrequencyKHz: 122750},
 		},
-		Layout: Layout{Blocks: []Block{{RadioID: 1, W: 300, H: 100}}},
+		Layout: Layout{Blocks: []Block{{RadioID: 1, Variant: "narrow-v"}}},
 	}
 	d.Reconcile()
 	if len(d.Layout.Blocks) != 2 {
 		t.Fatalf("blocks = %+v, want one appended for radio 2", d.Layout.Blocks)
 	}
-	if last := d.Layout.Blocks[1]; last.RadioID != 2 || last.W != DefaultBlockW || last.H != DefaultBlockH {
-		t.Fatalf("appended block = %+v, want radio 2 at default size", last)
+	if got := d.Layout.Blocks[0]; got.Variant != "narrow-v" {
+		t.Fatalf("existing block's variant must be preserved, got %+v", got)
+	}
+	if got := d.Layout.Blocks[1]; got.RadioID != 2 || got.Variant != DefaultVariant {
+		t.Fatalf("appended block = %+v, want radio 2 at %q", got, DefaultVariant)
+	}
+}
+
+func TestReconcileFillsEmptyVariant(t *testing.T) {
+	// A hand-edited profile, or one written before a descriptor existed.
+	d := &Document{
+		SchemaVersion: SchemaVersion,
+		Name:          "x",
+		Radios:        []Radio{{ID: 1, Name: "a", FrequencyKHz: 118500}},
+		Layout:        Layout{Blocks: []Block{{RadioID: 1, Variant: ""}}},
+	}
+	d.Reconcile()
+	if got := d.Layout.Blocks[0].Variant; got != DefaultVariant {
+		t.Fatalf("Variant = %q, want %q — an empty variant is a missing field, not an error", got, DefaultVariant)
+	}
+}
+
+func TestReconcilePreservesAnUnknownVariant(t *testing.T) {
+	// Go does not know the registry. A variant this build has never heard of
+	// must survive a load/save cycle so a profile written by a NEWER client is
+	// not silently downgraded — the frontend falls back at render time.
+	d := &Document{
+		SchemaVersion: SchemaVersion,
+		Name:          "x",
+		Radios:        []Radio{{ID: 1, Name: "a", FrequencyKHz: 118500}},
+		Layout:        Layout{Blocks: []Block{{RadioID: 1, Variant: "dial-round"}}},
+	}
+	d.Reconcile()
+	if got := d.Layout.Blocks[0].Variant; got != "dial-round" {
+		t.Fatalf("Variant = %q, want the unknown id preserved", got)
 	}
 }
 
@@ -130,7 +163,7 @@ func TestReconcileDropsOrphanBlock(t *testing.T) {
 		SchemaVersion: SchemaVersion,
 		Name:          "x",
 		Radios:        []Radio{{ID: 1, Name: "a", FrequencyKHz: 118500}},
-		Layout:        Layout{Blocks: []Block{{RadioID: 1, W: 300, H: 100}, {RadioID: 9, W: 300, H: 100}}},
+		Layout:        Layout{Blocks: []Block{{RadioID: 1, Variant: "vertical"}, {RadioID: 9, Variant: "vertical"}}},
 	}
 	d.Reconcile()
 	if len(d.Layout.Blocks) != 1 || d.Layout.Blocks[0].RadioID != 1 {
@@ -138,18 +171,29 @@ func TestReconcileDropsOrphanBlock(t *testing.T) {
 	}
 }
 
-// Review Focus #2.
-func TestReconcileClampsDegenerateBlockSizes(t *testing.T) {
-	d := &Document{
+func TestBlockRoundTripsVariant(t *testing.T) {
+	src := &Document{
 		SchemaVersion: SchemaVersion,
 		Name:          "x",
-		Radios:        []Radio{{ID: 1, Name: "a", FrequencyKHz: 118500}},
-		Layout:        Layout{Blocks: []Block{{RadioID: 1, W: 0, H: -40}}},
+		Radios:        []Radio{{ID: 1, Name: "a", FrequencyKHz: 118500, Enabled: true}},
+		Layout: Layout{
+			Window: WindowSize{W: 540, H: 720},
+			Blocks: []Block{{RadioID: 1, Variant: "narrow-h"}},
+		},
 	}
-	d.Reconcile()
-	if got := d.Layout.Blocks[0]; got.W != MinBlockW || got.H != MinBlockH {
-		t.Fatalf("block = %+v, want clamped to %dx%d -- an invisible block cannot be grabbed to resize it back",
-			got, MinBlockW, MinBlockH)
+	b, err := Encode(src)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !strings.Contains(string(b), `"variant": "narrow-h"`) {
+		t.Fatalf("block must serialise its variant:\n%s", b)
+	}
+	got, err := Decode(b)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Layout.Blocks[0].Variant != "narrow-h" {
+		t.Fatalf("blocks = %+v", got.Layout.Blocks)
 	}
 }
 

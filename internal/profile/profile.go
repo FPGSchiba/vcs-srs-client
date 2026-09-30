@@ -27,18 +27,7 @@ const SchemaVersion = 1
 // not import internal/voice, so the bound is restated rather than shared.
 const MaxFrequencyKHz = 1<<24 - 1
 
-// Block-geometry bounds. MinBlockW/MinBlockH are both the floor a resize
-// handle enforces and the value Reconcile clamps a degenerate stored block
-// up to: a zero-size block renders as nothing, and nothing is not
-// draggable, so without the clamp a hand-edited file could only be escaped
-// with RESET.
 const (
-	MinBlockW = 240
-	MinBlockH = 96
-
-	DefaultBlockW = 516
-	DefaultBlockH = 180
-
 	// DefaultWindowW/H match internal/app.defaultGeometry("comms").
 	DefaultWindowW = 540
 	DefaultWindowH = 720
@@ -68,12 +57,25 @@ type WindowSize struct {
 	H int `json:"h"`
 }
 
-// Block is one radio's tile in the Comms flow grid.
+// Block is one radio's tile in the Comms grid.
+//
+// It stores a VARIANT ID, not a size. The frontend's variant registry
+// (frontend/src/windows/comms/variants.ts) owns the dimensions, so a variant
+// can change its own size without invalidating saved profiles, and there is no
+// in-between size a card could be stretched into.
+//
+// Go deliberately does not know the registry: an id this build has never seen
+// is preserved through a load/save cycle so a profile written by a newer client
+// is not silently downgraded. The frontend falls back to its default at render
+// time.
 type Block struct {
 	RadioID uint32 `json:"radio_id"`
-	W       int    `json:"w"`
-	H       int    `json:"h"`
+	Variant string `json:"variant"`
 }
+
+// DefaultVariant is what a block with no variant gets. It must match
+// DEFAULT_VARIANT_ID in the frontend registry.
+const DefaultVariant = "vertical"
 
 // Layout is the whole Comms arrangement. Blocks is ORDERED and that order
 // IS the flow order -- there is deliberately no separate index field to
@@ -150,10 +152,9 @@ func (d *Document) Validate() error {
 	return nil
 }
 
-// Reconcile makes the layout consistent with the radio set and clamps
-// degenerate geometry. It never fails: every case has a defined repair, and
-// refusing to load a profile over a bad block size would be worse than
-// fixing it.
+// Reconcile makes the layout consistent with the radio set and fills missing
+// block variants. It never fails: every case has a defined repair, and
+// refusing to load a profile over a bad block would be worse than fixing it.
 //
 // Call it after Validate on every read AND before every write, so a
 // hand-edited file is normalised the first time it is touched.
@@ -175,18 +176,15 @@ func (d *Document) Reconcile() {
 		if !known[b.RadioID] || have[b.RadioID] {
 			continue // an orphan, or a second block for one radio
 		}
-		if b.W < MinBlockW {
-			b.W = MinBlockW
-		}
-		if b.H < MinBlockH {
-			b.H = MinBlockH
+		if b.Variant == "" {
+			b.Variant = DefaultVariant
 		}
 		have[b.RadioID] = true
 		kept = append(kept, b)
 	}
 	for _, r := range d.Radios {
 		if !have[r.ID] {
-			kept = append(kept, Block{RadioID: r.ID, W: DefaultBlockW, H: DefaultBlockH})
+			kept = append(kept, Block{RadioID: r.ID, Variant: DefaultVariant})
 		}
 	}
 	d.Layout.Blocks = kept
