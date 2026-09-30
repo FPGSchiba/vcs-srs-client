@@ -86,6 +86,32 @@ describe("snap resizing", () => {
     expect(onResize).not.toHaveBeenCalled();
   });
 
+  it("measures the drag from where the pointer went down, not from screen zero", () => {
+    // Origin (400,150): move to (270,108) is delta (-130,-42), so
+    // 280-130=150 by 166-42=124 -> narrow-v exactly. Without subtracting the
+    // origin the size would be 550x274, which is nowhere near narrow-v.
+    const onResize = vi.fn();
+    renderBlock({ variantId: "vertical", onResize });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150 });
+    fireEvent.pointerMove(window, { clientX: 270, clientY: 108 });
+    fireEvent.pointerUp(window);
+    expect(onResize).toHaveBeenCalledTimes(1);
+    expect(onResize).toHaveBeenCalledWith(1, "narrow-v");
+  });
+
+  it("a tiny drag from a non-zero origin is still no change", () => {
+    // Delta (+3,+2) -> 283x168 -> vertical. Without subtracting the origin it
+    // would be 683x318 and commit a different variant.
+    const onResize = vi.fn();
+    renderBlock({ variantId: "vertical", onResize });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.pointerDown(handle, { clientX: 400, clientY: 150 });
+    fireEvent.pointerMove(window, { clientX: 403, clientY: 152 });
+    fireEvent.pointerUp(window);
+    expect(onResize).not.toHaveBeenCalled();
+  });
+
   it("sits the handle on the card's own corner, inside the block", () => {
     renderBlock({ variantId: "vertical", onResize: vi.fn() });
     const handle = screen.getByRole("button", { name: /resize/i });
@@ -136,6 +162,32 @@ describe("keyboard resizing", () => {
     const onResize = vi.fn();
     renderBlock({ variantId: "narrow-v", onResize });
     fireEvent.keyDown(screen.getByRole("button", { name: /resize/i }), { key: "ArrowLeft" });
+    expect(onResize).not.toHaveBeenCalled();
+  });
+
+  it("does not wrap at the top end", () => {
+    const onResize = vi.fn();
+    renderBlock({ variantId: "vertical", onResize });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    fireEvent.keyDown(handle, { key: "ArrowDown" });
+    expect(onResize).not.toHaveBeenCalled();
+  });
+
+  it("ArrowDown steps up and ArrowUp steps down, like Right and Left", () => {
+    const onResize = vi.fn();
+    renderBlock({ variantId: "horizontal", onResize });
+    const handle = screen.getByRole("button", { name: /resize/i });
+    fireEvent.keyDown(handle, { key: "ArrowDown" });
+    expect(onResize).toHaveBeenLastCalledWith(1, "vertical");
+    fireEvent.keyDown(handle, { key: "ArrowUp" });
+    expect(onResize).toHaveBeenLastCalledWith(1, "narrow-h");
+  });
+
+  it("ArrowUp does not wrap below the smallest", () => {
+    const onResize = vi.fn();
+    renderBlock({ variantId: "narrow-v", onResize });
+    fireEvent.keyDown(screen.getByRole("button", { name: /resize/i }), { key: "ArrowUp" });
     expect(onResize).not.toHaveBeenCalled();
   });
 
