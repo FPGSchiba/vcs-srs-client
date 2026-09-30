@@ -28,9 +28,19 @@ export function NotificationsApp() {
 
   // Only categories actually PRESENT. The shared table has seven; offering
   // all of them here would be a dropdown of six empty options.
+  //
+  // The comparator is explicit rather than relying on the default. These are
+  // strings, so the default sort would already order them identically -- but
+  // SonarCloud's typescript:S2871 flags every comparator-less `.sort()` as a
+  // reliability bug, because that default coerces to string and silently
+  // mis-orders NUMBERS ([10, 9] stays [10, 9]). Spelling out code-unit order
+  // keeps the behaviour byte-for-byte and the quality gate green. Do NOT
+  // "simplify" this to localeCompare: that swaps code-unit ordering for
+  // locale-aware collation, a real behaviour change for no benefit on
+  // internal ASCII category keys.
   const present = useMemo(() => {
     const keys = new Set(snap.items.map((i) => i.category));
-    return Array.from(keys).sort();
+    return Array.from(keys).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }, [snap.items]);
 
   const filtered = useMemo(
