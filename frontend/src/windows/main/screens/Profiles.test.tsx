@@ -84,8 +84,8 @@ const summary = (o: Partial<ProfileSummary> = {}): ProfileSummary => ({
   radio_count: 3,
   window: { w: 540, h: 720 },
   blocks: [
-    { radio_id: 1, w: 516, h: 180 },
-    { radio_id: 2, w: 253, h: 120 },
+    { radio_id: 1, variant: "vertical" },
+    { radio_id: 2, variant: "narrow-v" },
   ],
   ...o,
 });
@@ -241,6 +241,39 @@ describe("Profiles screen", () => {
     await act(async () => {});
     expect(useProfile.getState().state.dir).toBe("/sentinel");
     expect(listProfiles.mock.calls.length).toBe(listed);
+  });
+});
+
+describe("Profiles layout preview", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    eventHandlers.clear();
+  });
+
+  // Review Focus #5.
+  it("draws a profile with no blocks without NaN geometry", async () => {
+    seed([summary({ blocks: [] })]);
+    render(<Profiles />);
+    await act(async () => {});
+    const svg = document.querySelector("svg")!;
+    expect(svg.querySelectorAll("rect")).toHaveLength(0);
+    expect(svg.outerHTML).not.toContain("NaN");
+  });
+
+  it("draws one rect per block, sized from the variant", async () => {
+    seed([summary({
+      blocks: [
+        { radio_id: 1, variant: "vertical" },
+        { radio_id: 2, variant: "narrow-v" },
+      ],
+    })]);
+    render(<Profiles />);
+    await act(async () => {});
+    const rects = document.querySelectorAll("svg rect");
+    expect(rects).toHaveLength(2);
+    expect(Number(rects[0].getAttribute("width"))).toBeGreaterThan(
+      Number(rects[1].getAttribute("width")),
+    );
   });
 });
 

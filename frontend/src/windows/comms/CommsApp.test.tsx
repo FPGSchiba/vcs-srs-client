@@ -62,6 +62,8 @@ import { useRadios } from "../../shared/store/radios";
 import { useSession } from "../../shared/store/session";
 import { useProfile } from "../../shared/store/profile";
 import { CommsApp } from "./CommsApp";
+import { VARIANTS } from "./variants";
+import { GRID_PAD } from "../../shared/layout";
 
 const settings = {
   start_minimized: false, minimize_to_tray: true, show_transmitter_name: true,
@@ -179,8 +181,8 @@ describe("CommsApp radio selection", () => {
 
     render(<CommsApp />);
 
-    expect(await screen.findByDisplayValue("Mine")).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("Not Mine")).not.toBeInTheDocument();
+    expect(await screen.findByText("Mine")).toBeInTheDocument();
+    expect(screen.queryByText("Not Mine")).not.toBeInTheDocument();
   });
 
   it("shows the empty state when the local client has no radios yet", async () => {
@@ -336,12 +338,12 @@ const twoRadios = {
 
 /** The sized RadioBlock wrappers, in DOM order. */
 function blockEls() {
-  return screen.getAllByRole("option").map((o) => o.parentElement!.parentElement as HTMLElement);
+  return screen.getAllByTestId("radio-block");
 }
 
-/** The radio name input inside a block. */
+/** The radio name label inside a block (a label now, not a permanent input). */
 function nameIn(block: HTMLElement): string {
-  return (block.querySelector('input[aria-label="radio name"]') as HTMLInputElement).value;
+  return block.querySelector('[title^="Double-click"]')!.textContent ?? "";
 }
 
 describe("CommsApp layout grid", () => {
@@ -351,8 +353,8 @@ describe("CommsApp layout grid", () => {
     getCommsLayout.mockReset().mockResolvedValue({
       window: { w: 600, h: 800 },
       blocks: [
-        { radio_id: 2, w: 300, h: 120 },
-        { radio_id: 1, w: 400, h: 150 },
+        { radio_id: 2, variant: "narrow-v" },
+        { radio_id: 1, variant: "vertical" },
       ],
     });
   });
@@ -360,15 +362,15 @@ describe("CommsApp layout grid", () => {
     vi.useRealTimers();
   });
 
-  it("renders blocks in layout order at their stored sizes, in a wrapping flow", async () => {
+  it("renders blocks in layout order at their variants' sizes, in a wrapping flow", async () => {
     render(<CommsApp />);
-    await screen.findByDisplayValue("Alpha");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("300px"));
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
     const els = blockEls();
-    expect(els[0].style.height).toBe("120px");
+    expect(els[0].style.height).toBe("124px");
     expect(nameIn(els[0])).toBe("Bravo");
-    expect(els[1].style.width).toBe("400px");
-    expect(els[1].style.height).toBe("150px");
+    expect(els[1].style.width).toBe("280px");
+    expect(els[1].style.height).toBe("166px");
     const flow = els[0].parentElement as HTMLElement;
     expect(flow.style.flexWrap).toBe("wrap");
     expect(flow.style.padding).toBe("12px");
@@ -376,51 +378,66 @@ describe("CommsApp layout grid", () => {
     expect(els[0].style.flexShrink).toBe("0");
   });
 
-  it("gives a radio with no stored block the default size", async () => {
+  it("gives a radio with no stored block the default variant", async () => {
     getCommsLayout.mockReset().mockResolvedValue({
       window: { w: 600, h: 800 },
-      blocks: [{ radio_id: 1, w: 400, h: 150 }],
+      blocks: [{ radio_id: 1, variant: "narrow-v" }],
     });
     render(<CommsApp />);
-    await screen.findByDisplayValue("Bravo");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("400px"));
-    expect(blockEls()[1].style.width).toBe("516px");
-    expect(blockEls()[1].style.height).toBe("180px");
+    await screen.findByText("Bravo");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
+    expect(blockEls()[1].style.width).toBe("280px");
+    expect(blockEls()[1].style.height).toBe("166px");
     // Hydration alone is not a user edit: nothing may be written back, even
     // once the debounce window has long passed.
     await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
     expect(setCommsLayout).not.toHaveBeenCalled();
   });
 
-  it("debounces resize into ONE setCommsLayout carrying the whole layout", async () => {
+  it("renders a stored variant rather than the default", async () => {
     render(<CommsApp />);
-    await screen.findByDisplayValue("Alpha");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("300px"));
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
+    expect(blockEls()[0].style.height).toBe("124px");
+  });
+
+  it("keeps every variant inside the popout's content width", () => {
+    // GRID_PAD is 12 a side, so a 540-wide popout has 516 of content. No
+    // variant may be wider, or the card sits flush against the clip edge and
+    // its border is cut -- this was bug 2.
+    for (const v of VARIANTS) expect(v.w).toBeLessThanOrEqual(540 - 2 * GRID_PAD);
+  });
+
+  it("persists a resize as a variant id, debounced into ONE setCommsLayout", async () => {
+    render(<CommsApp />);
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
     vi.useFakeTimers();
     const handles = screen.getAllByRole("button", { name: /resize/i });
-    fireEvent.keyDown(handles[0], { key: "ArrowRight" });
-    fireEvent.keyDown(handles[0], { key: "ArrowRight" });
+    fireEvent.keyDown(handles[1], { key: "ArrowLeft" });
     // Local state follows immediately...
-    expect(blockEls()[0].style.width).toBe("332px");
+    expect(blockEls()[1].style.width).not.toBe("280px");
     // ...the IPC call does not.
     expect(setCommsLayout).not.toHaveBeenCalled();
     act(() => { vi.advanceTimersByTime(299); });
     expect(setCommsLayout).not.toHaveBeenCalled();
     act(() => { vi.advanceTimersByTime(2); });
     expect(setCommsLayout).toHaveBeenCalledTimes(1);
-    expect(setCommsLayout).toHaveBeenCalledWith({
-      window: { w: 600, h: 800 },
-      blocks: [
-        { radio_id: 2, w: 332, h: 120 },
-        { radio_id: 1, w: 400, h: 150 },
-      ],
-    });
+    const sent = setCommsLayout.mock.calls.at(-1)![0];
+    expect(sent.window).toEqual({ w: 600, h: 800 });
+    expect(sent.blocks[0]).toEqual({ radio_id: 2, variant: "narrow-v" });
+    expect(sent.blocks[1]).toMatchObject({ radio_id: 1, variant: expect.any(String) });
+    expect(sent.blocks[1].variant).not.toBe("vertical");
+    for (const b of sent.blocks) {
+      expect(b).not.toHaveProperty("w");
+      expect(b).not.toHaveProperty("h");
+    }
   });
 
   it("reorders blocks and saves the new order", async () => {
     render(<CommsApp />);
-    await screen.findByDisplayValue("Alpha");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("300px"));
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
     vi.useFakeTimers();
     const store: Record<string, string> = { "text/plain": "0" };
     const dataTransfer = {
@@ -434,8 +451,8 @@ describe("CommsApp layout grid", () => {
     expect(setCommsLayout).toHaveBeenCalledWith({
       window: { w: 600, h: 800 },
       blocks: [
-        { radio_id: 1, w: 400, h: 150 },
-        { radio_id: 2, w: 300, h: 120 },
+        { radio_id: 1, variant: "vertical" },
+        { radio_id: 2, variant: "narrow-v" },
       ],
     });
   });
@@ -444,32 +461,28 @@ describe("CommsApp layout grid", () => {
     getCommsLayout.mockReset().mockResolvedValue({
       window: { w: 600, h: 800 },
       blocks: [
-        { radio_id: 7, w: 333, h: 111 },
-        { radio_id: 1, w: 400, h: 150 },
-        { radio_id: 2, w: 300, h: 120 },
+        { radio_id: 7, variant: "horizontal" },
+        { radio_id: 1, variant: "vertical" },
+        { radio_id: 2, variant: "narrow-v" },
       ],
     });
     render(<CommsApp />);
-    await screen.findByDisplayValue("Alpha");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("400px"));
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("280px"));
     vi.useFakeTimers();
-    fireEvent.keyDown(screen.getAllByRole("button", { name: /resize/i })[0], { key: "ArrowRight" });
+    fireEvent.keyDown(screen.getAllByRole("button", { name: /resize/i })[0], { key: "ArrowLeft" });
     act(() => { vi.advanceTimersByTime(301); });
-    expect(setCommsLayout).toHaveBeenCalledWith({
-      window: { w: 600, h: 800 },
-      blocks: [
-        { radio_id: 1, w: 416, h: 150 },
-        { radio_id: 2, w: 300, h: 120 },
-        { radio_id: 7, w: 333, h: 111 },
-      ],
-    });
+    const sent = setCommsLayout.mock.calls.at(-1)![0];
+    expect(sent.blocks.map((b: { radio_id: number }) => b.radio_id)).toEqual([1, 2, 7]);
+    expect(sent.blocks[0].variant).not.toBe("vertical");
+    expect(sent.blocks[2]).toEqual({ radio_id: 7, variant: "horizontal" });
   });
 
   it("flushes a pending layout on unmount instead of dropping it", async () => {
     const { unmount } = render(<CommsApp />);
-    await screen.findByDisplayValue("Alpha");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("300px"));
-    fireEvent.keyDown(screen.getAllByRole("button", { name: /resize/i })[0], { key: "ArrowRight" });
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
+    fireEvent.keyDown(screen.getAllByRole("button", { name: /resize/i })[1], { key: "ArrowLeft" });
     expect(setCommsLayout).not.toHaveBeenCalled();
     unmount();
     expect(setCommsLayout).toHaveBeenCalledTimes(1);
@@ -477,29 +490,55 @@ describe("CommsApp layout grid", () => {
 
   it("re-reads the layout when the backend changes it (revert/reset/profile load)", async () => {
     render(<CommsApp />);
-    await screen.findByDisplayValue("Alpha");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("300px"));
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
     getCommsLayout.mockReset().mockResolvedValue({
       window: { w: 600, h: 800 },
       blocks: [
-        { radio_id: 1, w: 500, h: 200 },
-        { radio_id: 2, w: 260, h: 100 },
+        { radio_id: 1, variant: "horizontal" },
+        { radio_id: 2, variant: "vertical" },
       ],
     });
     act(() => emit(EV.profileState, { active_path: "", active_name: "", dirty: false, dir: "/p" }));
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("500px"));
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("360px"));
     expect(nameIn(blockEls()[0])).toBe("Alpha");
-    expect(blockEls()[1].style.height).toBe("100px");
+    expect(blockEls()[1].style.height).toBe("166px");
   });
 
   it("does not let a profile:state echo clobber an edit that is still pending", async () => {
     render(<CommsApp />);
-    await screen.findByDisplayValue("Alpha");
-    await waitFor(() => expect(blockEls()[0].style.width).toBe("300px"));
-    fireEvent.keyDown(screen.getAllByRole("button", { name: /resize/i })[0], { key: "ArrowRight" });
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(blockEls()[0].style.width).toBe("150px"));
+    fireEvent.keyDown(screen.getAllByRole("button", { name: /resize/i })[1], { key: "ArrowLeft" });
+    const edited = blockEls()[1].style.width;
+    expect(edited).not.toBe("280px");
     // The backend has not seen the edit yet, so a re-read returns the old layout.
     act(() => emit(EV.profileState, { active_path: "", active_name: "", dirty: true, dir: "/p" }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(blockEls()[0].style.width).toBe("316px");
+    expect(blockEls()[1].style.width).toBe(edited);
+  });
+});
+
+describe("CommsApp chrome", () => {
+  beforeEach(() => {
+    setupBackend();
+    getClientState.mockReset().mockResolvedValue(twoRadios);
+    setProfile({ active_path: "/p/x.vcs.json", active_name: "Fleet Op", dirty: true, dir: "/p" });
+  });
+
+  it("gives the three-column grid exactly three children", async () => {
+    render(<CommsApp />);
+    await screen.findByTitle(/unsaved/i);
+    const chrome = document.querySelector(".popout-chrome")!;
+    expect(chrome.children).toHaveLength(3);
+  });
+
+  it("keeps every control present in the chrome", async () => {
+    render(<CommsApp />);
+    await screen.findByTitle(/unsaved/i);
+    for (const label of ["SAVE", "REVERT", "RESET"]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("button", { name: /close/i })).toBeInTheDocument();
   });
 });

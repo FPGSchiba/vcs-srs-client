@@ -6,15 +6,11 @@ import type { HotkeyEventPayload } from "../../shared/api/events";
 import { useRadios } from "../../shared/store/radios";
 import { useSession } from "../../shared/store/session";
 import { useProfile } from "../../shared/store/profile";
-import {
-  DEFAULT_BLOCK_H,
-  DEFAULT_BLOCK_W,
-  GRID_GAP,
-  GRID_PAD,
-} from "../../shared/layout";
+import { GRID_GAP, GRID_PAD } from "../../shared/layout";
 import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { Icon } from "../../shared/components/Icon";
 import { RadioBlock } from "./RadioBlock";
+import { DEFAULT_VARIANT_ID } from "./variants";
 
 /**
  * Renderer-side debounce for setCommsLayout. It writes no file (the bytes land
@@ -165,7 +161,7 @@ export function CommsApp() {
   const entry = selfGuid ? radios[selfGuid] : undefined;
 
   // Display order: stored blocks that have a radio, in stored order, then any
-  // radio without a block at the default size.
+  // radio without a block in the default variant.
   const shown: LayoutBlock[] = [];
   if (entry) {
     const present = new Set(entry.radios.map((r) => r.id));
@@ -174,7 +170,7 @@ export function CommsApp() {
     }
     for (const r of entry.radios) {
       if (!shown.some((x) => x.radio_id === r.id)) {
-        shown.push({ radio_id: r.id, w: DEFAULT_BLOCK_W, h: DEFAULT_BLOCK_H });
+        shown.push({ radio_id: r.id, variant: DEFAULT_VARIANT_ID });
       }
     }
   }
@@ -187,8 +183,8 @@ export function CommsApp() {
     return { window: layoutRef.current.window, blocks: [...next, ...absent] };
   }
 
-  function resize(radioId: number, w: number, h: number) {
-    commit(withShown(shown.map((b) => (b.radio_id === radioId ? { ...b, w, h } : b))));
+  function resize(radioId: number, variant: string) {
+    commit(withShown(shown.map((b) => (b.radio_id === radioId ? { ...b, variant } : b))));
   }
 
   function reorder(from: number, to: number) {
@@ -214,18 +210,30 @@ export function CommsApp() {
       }}
     >
       <div className="popout-chrome">
-        <Icon name="broadcast" size={14} />
-        <span className="ttl">Communications</span>
-        {profile.active_name && (
-          <span className="cap mono" style={{ color: "var(--tx-3)" }}>
-            {profile.active_name}
-          </span>
-        )}
-        {profile.dirty && (
-          <span title="Unsaved layout changes" style={{ color: "var(--ac-primary)" }}>
-            ●
-          </span>
-        )}
+        <div className="row acenter gap-3" style={{ minWidth: 0 }}>
+          <Icon name="broadcast" size={14} />
+          <span className="ttl">Communications</span>
+          {profile.active_name && (
+            <span
+              className="cap mono"
+              style={{
+                color: "var(--tx-3)",
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {profile.active_name}
+            </span>
+          )}
+          {profile.dirty && (
+            <span title="Unsaved layout changes" style={{ color: "var(--ac-primary)" }}>
+              ●
+            </span>
+          )}
+        </div>
+        <span />
         <div className="ctrl">
           {profile.dirty && profile.active_path && (
             <button
@@ -302,8 +310,7 @@ export function CommsApp() {
                   radio={r}
                   allRadios={entry.radios}
                   muted={entry.muted}
-                  width={b.w}
-                  height={b.h}
+                  variantId={b.variant}
                   index={i}
                   onResize={resize}
                   onReorder={reorder}

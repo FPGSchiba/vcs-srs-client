@@ -77,6 +77,18 @@
   border-radius: 2px;
   cursor: pointer;
 }
+/* The 24px square above is for icon controls. A text button in the chrome
+   (SAVE / REVERT / RESET) needs its own width, or the label is clipped to a
+   24px box and the controls read as overlapping. */
+.popout-chrome .ctrl button.btn {
+  width: auto;
+  height: 22px;
+  padding: 0 8px;
+}
+.popout-chrome .ctrl {
+  gap: 4px;
+  align-items: center;
+}
 .popout-chrome .ctrl button:hover { background: var(--bg-3); color: var(--tx-0); }
 .popout-chrome .ctrl button.close:hover { background: var(--ac-alert); color: #fff; }
 .popout-body { flex: 1; overflow: auto; position: relative; min-height: 0; }
