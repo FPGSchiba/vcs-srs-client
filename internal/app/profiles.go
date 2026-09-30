@@ -813,14 +813,29 @@ func (a *App) SetCommsLayout(l LayoutDTO) error {
 	return nil
 }
 
+// windowEchoTolerancePx absorbs the size a window reports back after
+// applyProfile's SetBounds: DPI rounding, a minimum size or frame chrome can
+// make it differ from what was set by a pixel or two, and that echo must not
+// dirty a freshly loaded profile. A genuine 1-2px manual resize is ignored
+// too; the next larger drag is compared against the unchanged stored value,
+// so nothing accumulates.
+const windowEchoTolerancePx = 2
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 // captureCommsWindowSize records a manual Comms window resize into the
 // in-memory layout and marks it pending, exactly like a block drag: no file
 // is written here, the bytes land at shutdown via flushConfig. windows.json
 // is written separately by Registry.SetGeometry, as before.
 //
-// An unchanged size is a no-op, so the resize event a profile load provokes
-// (applyProfile calls SetBounds) neither dirties the profile nor schedules a
-// write. The emit happens after sb.mu is released: emitProfileState re-enters
+// A size within windowEchoTolerancePx of the stored one is a no-op, so the
+// resize event a profile load provokes (applyProfile calls SetBounds) neither
+// dirties the profile nor schedules a write. The emit happens after sb.mu is released: emitProfileState re-enters
 // it through GetProfileState and profileDirty.
 func (a *App) captureCommsWindowSize(w, h int) {
 	sb := a.settings
@@ -828,7 +843,8 @@ func (a *App) captureCommsWindowSize(w, h int) {
 		return
 	}
 	sb.mu.Lock()
-	if sb.cfg.CommsLayout.WindowW == w && sb.cfg.CommsLayout.WindowH == h {
+	if absInt(sb.cfg.CommsLayout.WindowW-w) <= windowEchoTolerancePx &&
+		absInt(sb.cfg.CommsLayout.WindowH-h) <= windowEchoTolerancePx {
 		sb.mu.Unlock()
 		return
 	}

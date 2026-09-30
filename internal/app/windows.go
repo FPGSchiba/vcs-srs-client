@@ -3,6 +3,7 @@ package app
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
@@ -19,6 +20,56 @@ type Registry struct {
 	mu   sync.Mutex
 	open map[string]WindowHandle
 	geom map[string]windowstate.Geometry
+
+	// debounce coalesces the continuous resize/move events of a drag into one
+	// geometry record; zero means defaultBoundsDebounce. timers is per window
+	// id. observer, if set, is told each settled geometry (outside r.mu).
+	debounce time.Duration
+	timers   map[string]*time.Timer
+	observer func(id string, g windowstate.Geometry)
+}
+
+const defaultBoundsDebounce = 300 * time.Millisecond
+
+// SetGeometryObserver registers fn to be called with a window's geometry
+// after a user move/resize settles. It is called without r.mu held.
+func (r *Registry) SetGeometryObserver(fn func(id string, g windowstate.Geometry)) {
+	r.mu.Lock()
+	r.observer = fn
+	r.mu.Unlock()
+}
+
+// scheduleBounds (re)arms the debounce timer for id.
+func (r *Registry) scheduleBounds(id string, h WindowHandle) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d := r.debounce
+	if d <= 0 {
+		d = defaultBoundsDebounce
+	}
+	if t := r.timers[id]; t != nil {
+		t.Stop()
+	}
+	r.timers[id] = time.AfterFunc(d, func() { r.settleBounds(id, h) })
+}
+
+// settleBounds records the window's current bounds and persists windows.json
+// ONCE per drag. It deliberately does not go through SetGeometry, which
+// pushes the bounds back into the window and would echo another resize event.
+func (r *Registry) settleBounds(id string, h WindowHandle) {
+	r.mu.Lock()
+	if r.open[id] != h { // closed or replaced since the event
+		r.mu.Unlock()
+		return
+	}
+	g := h.Bounds()
+	r.geom[id] = g
+	_ = windowstate.Save(r.path, r.geom)
+	obs := r.observer
+	r.mu.Unlock()
+	if obs != nil {
+		obs(id, g)
+	}
 }
 
 // NewRegistry builds a Registry that persists to path and broadcasts open-state
@@ -28,7 +79,7 @@ func NewRegistry(factory WindowFactory, path string, emitter events.Emitter) *Re
 	if geom == nil {
 		geom = map[string]windowstate.Geometry{}
 	}
-	return &Registry{factory: factory, path: path, emitter: emitter, open: map[string]WindowHandle{}, geom: geom}
+	return &Registry{factory: factory, path: path, emitter: emitter, open: map[string]WindowHandle{}, geom: geom, timers: map[string]*time.Timer{}}
 }
 
 // Open creates the window (at persisted or default geometry) or focuses it if open.
@@ -43,7 +94,11 @@ func (r *Registry) Open(id string) {
 	if !ok {
 		g = defaultGeometry(id)
 	}
-	r.open[id] = r.factory.Create(id, windowURL(id), g)
+	h := r.factory.Create(id, windowURL(id), g)
+	r.open[id] = h
+	if bn, ok := h.(boundsNotifier); ok {
+		bn.OnBoundsChanged(func() { r.scheduleBounds(id, h) })
+	}
 	r.mu.Unlock()
 	r.broadcast()
 }
@@ -55,6 +110,10 @@ func (r *Registry) Close(id string) {
 	if !ok {
 		r.mu.Unlock()
 		return
+	}
+	if t := r.timers[id]; t != nil {
+		t.Stop()
+		delete(r.timers, id)
 	}
 	r.geom[id] = h.Bounds()
 	h.Close()

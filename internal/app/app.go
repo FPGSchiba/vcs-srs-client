@@ -154,6 +154,21 @@ func (a *App) Store() *state.Store { return a.st }
 func (a *App) SetBackend(sess sessionAPI, windows windowsAPI) {
 	a.sess = sess
 	a.windows = windows
+	// A user resize of the Comms window must reach the profile (spec D3). The
+	// registry reports settled geometry; it is the only path by which a window
+	// edge drag is observed at all.
+	if o, ok := windows.(interface {
+		SetGeometryObserver(func(string, windowstate.Geometry))
+	}); ok {
+		o.SetGeometryObserver(a.onWindowGeometry)
+	}
+}
+
+// onWindowGeometry receives settled window geometry from the registry.
+func (a *App) onWindowGeometry(id string, g windowstate.Geometry) {
+	if id == "comms" {
+		a.captureCommsWindowSize(g.W, g.H)
+	}
 }
 
 // SetApp injects the Wails application reference. Must be called before Run().
@@ -278,11 +293,6 @@ func (a *App) ServiceShutdown() error {
 	if err := a.flushConfig(); err != nil {
 		a.logger.Warn("config flush on shutdown failed", "err", err)
 	}
-	// Stop the history ticker and join it BEFORE the final flush -- see
-	// StartHistoryTicker. Logged, not notified, for the same reason as above.
-	if err := a.flushHistory(); err != nil {
-		a.logger.Warn("history flush on shutdown failed", "err", err)
-	}
 	// Then shut the OS key listener down. The stream is process-global and
 	// outlives every rebind (see internal/hotkeys/registrar_gohook.go), so
 	// this is its one closing bracket. It also releases a hotkey still being
@@ -298,6 +308,13 @@ func (a *App) ServiceShutdown() error {
 	// or a voice session outlives the control connection it was dialed
 	// against, sending BYE nowhere and leaking its goroutines past quit.
 	a.stopVoiceSession()
+	// The final history flush comes AFTER the voice stop: Session.Close
+	// emits a row for every RX stream still open, and that row must be in
+	// the log when it is written. flushHistory stops and joins the ticker
+	// first -- see StartHistoryTicker. Logged, not notified: no window is left.
+	if err := a.flushHistory(); err != nil {
+		a.logger.Warn("history flush on shutdown failed", "err", err)
+	}
 	if a.sess != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownDisconnectTimeout)
 		defer cancel()

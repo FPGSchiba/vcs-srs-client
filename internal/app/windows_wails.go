@@ -2,6 +2,7 @@ package app
 
 import (
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 )
@@ -29,6 +30,14 @@ func (f *wailsFactory) Create(id, url string, g windowstate.Geometry) WindowHand
 		BackgroundColour: application.NewRGBA(3, 7, 13, 255), // --bg-0, opaque (no click-through)
 	})
 	return &wailsHandle{win: win}
+}
+
+// OnBoundsChanged hooks the native resize and move events. Registered here,
+// at window creation, because this is the one place that holds the native
+// window: a drag of the window edge is otherwise invisible to Go.
+func (h *wailsHandle) OnBoundsChanged(fn func()) {
+	h.win.RegisterHook(events.Common.WindowDidResize, func(*application.WindowEvent) { fn() })
+	h.win.RegisterHook(events.Common.WindowDidMove, func(*application.WindowEvent) { fn() })
 }
 
 func (h *wailsHandle) Focus() { h.win.Focus() }

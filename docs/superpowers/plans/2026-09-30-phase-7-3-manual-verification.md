@@ -6,14 +6,38 @@
 
 **Item 1 (the 500 ms RX idle threshold) is the most important open question in Phase 7.3.** The value was chosen by reasoning about speech cadence, never measured. If it is too low, one sentence becomes several Transmission Log rows; if too high, two separate exchanges merge into one. Everything else below is conventional verification. Run item 1 first.
 
+## Reference: where things are
+
+| Thing | Location |
+|---|---|
+| App-data dir (`<AppData>`) | Windows `%APPDATA%\VCS`; macOS `~/Library/Application Support/VCS`; Linux `${XDG_CONFIG_HOME:-~/.config}/VCS` |
+| `config.toml` | `<AppData>/config.toml` (edit with the client **quit**; it rewrites the file on exit) |
+| Transmission history | `<AppData>/history.json` |
+| Profiles | `<AppData>/profiles/*.vcs.json` unless `profiles_dir` is set |
+| Client log | `<AppData>/log/vcs-client.log` (JSON lines) |
+| `windows.json` | in `<AppData>` |
+| Transmission Log screen | main window, left nav rail, **Transmission Log** (history icon); one row per transmission; **EXPORT CSV** button on that screen |
+| Radio Profiles screen | main window, left nav rail, **Radio Profiles** (BROWSE, OPEN, IMPORT FROM FILE, SAVE, SAVE CURRENT AS NEW; each profile row has Export and Delete buttons) |
+| Comms window | opened from the main window's Comms launcher; title bar reads "Communications" |
+| **Dirty dot** | in the Comms title bar, a filled `●` in the accent colour next to the profile name, tooltip "Unsaved layout changes". **Clean = no dot and no REVERT button.** Dirty = dot **and** a REVERT button. |
+
+To set `history_idle_ms`, add to `config.toml`:
+
+```toml
+[voice]
+history_idle_ms = 500
+```
+
 ---
 
 ## 1. Measure the RX idle threshold
 
 Setup: two client instances on one server (second on another machine, or a second OS user), both on the same frequency. Client B talks in natural sentences, with normal pauses between words and clauses. Client A is the observer with the Transmission Log open.
 
-1. Read a paragraph of roughly 5 sentences, at a normal pace, as one continuous PTT hold.
-2. Then make two distinct exchanges: a short call, a clear 3-second gap, a short reply.
+Definitions. **A paragraph** = about 5 sentences (roughly 40 to 60 words) read aloud at a normal pace in ONE continuous PTT hold, with ordinary pauses between sentences (0.3 to 1 s) and no deliberate gap. **Two exchanges** = a short call ("Alpha, radio check"), release PTT, a deliberate 3-second silence, press PTT again and give a short reply; the two presses are separate transmissions. **Counting rows**: open Transmission Log, clear it (or note the row count), run the test, wait 5 s after releasing, then count the new **RX** rows from client B's callsign.
+
+1. Read one paragraph as defined above.
+2. Then do the two-exchange test as defined above.
 3. Repeat for each `[voice] history_idle_ms` value **200, 350, 500, 800, 1200** in `config.toml` (restart client A between values). Record rows produced per paragraph and per two-exchange test.
 
 | history_idle_ms | rows for one paragraph | rows for two exchanges |
@@ -26,13 +50,13 @@ Setup: two client instances on one server (second on another machine, or a secon
 
 **Expected:** a value exists where one paragraph is exactly one row and two exchanges are exactly two rows. **Report that value**, and change the default if it is not 500.
 
-Clamp check: set `history_idle_ms = 9000`. Expected: behaves as 4000 ms (values above 4000 are clamped so the threshold stays below the 5 s stream reap).
+Clamp check: set `history_idle_ms = 9000`, restart, connect and receive one short transmission. **Expected:** (a) `<AppData>/log/vcs-client.log` contains `voice: history_idle_ms is not below the stream reap timeout; clamping` with `requested_ms` 9000 and `effective_ms` 4000; (b) the row appears about 4 s after the talker releases PTT, not 9 s and never missing. Also confirm `history_idle_ms = 4000` exactly logs no clamp warning.
 
 ## 2. Native dialogs (repeat on Windows, macOS, Linux)
 
-For each of BROWSE (folder picker), IMPORT, EXPORT and OPEN (reveal in file manager): open the dialog and **cancel** it.
+Where each appears: BROWSE (Radio Profiles) is a native folder picker (Windows folder dialog; macOS open panel, folders only; Linux GTK/portal folder chooser). IMPORT FROM FILE is a native open-file dialog for `.vcs.json`. EXPORT (a profile row's Export button, and EXPORT CSV on the Transmission Log) is a native save-file dialog. OPEN has no dialog: it reveals the profiles folder in Explorer / Finder / the default file manager. For BROWSE, IMPORT and both EXPORTs, open the dialog and **cancel** it. For OPEN, confirm the file manager opens on the right folder and nothing is notified.
 
-**Expected:** no notification is raised, no error toast, nothing changes. Then complete each once: BROWSE sets the folder, IMPORT adds the profile, EXPORT writes the file, OPEN reveals the right folder.
+**Expected:** no notification is raised (TopBar bell badge and status-bar bell unchanged, no toast), nothing changes. Then complete each once: BROWSE sets the folder, IMPORT adds the profile, EXPORT writes the file, OPEN reveals the right folder.
 
 ## 3. Builtin profile seeding
 
@@ -47,10 +71,12 @@ For each of BROWSE (folder picker), IMPORT, EXPORT and OPEN (reveal in file mana
 
 ## 5. Comms window resize reaches the profile (decision D3)
 
-1. Load a profile. **Expected:** the dirty dot is off and the Comms window takes the profile's size.
-2. Drag the Comms **window** edge to a new size. **Expected:** the dirty dot lights.
+Prerequisite: this depends on the native resize hook (`WindowDidResize`/`WindowDidMove`, debounced 300 ms in `Registry`), which has never been seen firing on a real OS window. If the dot never lights, that is the bug to report.
+
+1. Load a profile whose saved window size differs from the current one. **Expected:** the Comms window takes the profile's size and the dirty dot stays **off** (a size that comes back within 2 px of what was set is deliberately ignored). If the dot lights right after a load, the echo tolerance is too small for this OS/DPI: record the pixel difference.
+2. Drag the Comms **window** edge by at least 20 px, release, wait half a second. **Expected:** the dirty dot lights and REVERT appears.
 3. SAVE, close the Comms window, reopen, reload the profile. **Expected:** the new size is applied.
-4. Quit and relaunch. **Expected:** the new size is in effect.
+4. Quit and relaunch. **Expected:** the new size is in effect. Also confirm `windows.json` is written once after the drag settles, not continuously during it.
 
 ## 6. Profile whose radios differ from the live set
 
@@ -61,6 +87,8 @@ Connect, then load a profile with a different radio set than the one currently l
 With a profile loaded: click a different radio. **Expected:** the dirty dot does **not** light. Resize a block. **Expected:** it **does** light.
 
 ## 8. RX rows from a second client
+
+Also once: quit client A while a transmission is still arriving (talker holding PTT), relaunch A. **Expected:** that partial transmission is in the log (the final history flush runs after the voice session closes).
 
 A second client transmits. **Expected:** RX rows appear on client A with the sender's callsign resolved (not a GUID), on the right frequency, with a plausible duration.
 

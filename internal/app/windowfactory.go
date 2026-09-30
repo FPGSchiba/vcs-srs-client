@@ -10,6 +10,14 @@ type WindowHandle interface {
 	SetBounds(windowstate.Geometry)
 }
 
+// boundsNotifier is implemented by handles that can report a user move or
+// resize. Optional (a type assertion in Registry.Open) so fakes that never
+// resize need not implement it. The callback runs on the window system's
+// event thread and must not block or call back into the window.
+type boundsNotifier interface {
+	OnBoundsChanged(fn func())
+}
+
 // WindowFactory creates real windows. The Wails-backed implementation lives in
 // windows_wails.go; tests pass a fake.
 type WindowFactory interface {
