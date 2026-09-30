@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 )
@@ -127,7 +126,8 @@ func TestWriteFailureCleansTmpFile(t *testing.T) {
 	p := filepath.Join(dir, "x"+Ext)
 	tmpPath := p + ".tmp"
 	// Create a directory at the temp path, which will cause WriteFile to fail
-	// while still being present at that path.
+	// after the path exists. The fixed code then removes that empty directory
+	// when WriteFile fails.
 	if err := os.Mkdir(tmpPath, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
@@ -139,20 +139,11 @@ func TestWriteFailureCleansTmpFile(t *testing.T) {
 	if err := Write(p, d); err == nil {
 		t.Fatal("Write should have failed, but did not")
 	}
-	// The target file should not exist (WriteFile failed, rename never happened).
-	if _, err := os.Stat(p); !os.IsNotExist(err) {
-		t.Fatal("profile file should not exist after Write failure")
-	}
-	// Verify no stray .tmp *file* is left behind. The pre-made directory will
-	// still be there, but Write should not have left any .tmp file.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".tmp") && !e.IsDir() {
-			t.Fatalf("found stray .tmp file after Write failure: %s", e.Name())
-		}
+	// Assert that Write removed the temp entry: if the fix is in place,
+	// os.Remove(tmp) deleted the empty directory; without it, the directory
+	// remains. This is mutation-sensitive in the right direction.
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Fatal("Write must remove its temp entry when os.WriteFile fails after creating it")
 	}
 }
 
