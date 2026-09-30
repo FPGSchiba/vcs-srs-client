@@ -217,7 +217,6 @@ func TestCSVEmptyStillHasHeader(t *testing.T) {
 	}
 }
 
-
 // TestFlushDoesNotLoseAppendDuringWrite pins the lost-write race: an Append
 // that lands while Flush is writing (Flush does its I/O outside the lock)
 // must leave the log dirty, so the next Flush writes it. afterSnapshot runs
@@ -268,5 +267,56 @@ func TestFlushWriteFailureLeavesNoTempFile(t *testing.T) {
 	}
 	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("temp file must be removed on failure, stat err = %v", err)
+	}
+}
+
+func TestFlushWriteFileFailureLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "h.json")
+	tmp := p + ".tmp"
+	// A directory at the temp path makes os.WriteFile fail at open. The
+	// cleanup must remove it; os.Remove deletes an empty directory.
+	if err := os.Mkdir(tmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	l := New(10)
+	l.SetPersist(p, time.Second, time.Now, nil)
+	l.Append(mk(1))
+	if err := l.Flush(); err == nil {
+		t.Fatal("want an error when the temp path cannot be written")
+	}
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Fatalf("temp path must be cleaned up after a WriteFile failure, stat err = %v", err)
+	}
+}
+
+func TestLoadLeavesLogNotDirty(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "h.json")
+	seed := New(10)
+	seed.SetPersist(p, time.Second, time.Now, nil)
+	seed.Append(mk(1))
+	if err := seed.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"schema_version":1,"entries":[{"at":"2026-09-30T21:00:00Z","sender":"x","guid":"","freq_khz":1,"radio":"","dur_ms":1,"own":false}]} `), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := Load(p, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Len() != 1 {
+		t.Fatalf("Len = %d, want 1", l.Len())
+	}
+	l.SetPersist(p, time.Second, time.Now, nil)
+	if err := l.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(got), "} ") {
+		t.Fatal("a freshly loaded log must not be dirty: Flush rewrote the file")
 	}
 }
