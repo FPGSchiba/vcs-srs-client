@@ -68,8 +68,13 @@ export function RadioFrame({
   disabled,
 }: Props) {
   const accent = frameAccent({ selected, receiving, transmitting, intercom, disabled });
+  // A disabled radio must stay selectable (clicking it is how it is turned back
+  // on), so selection has to stay visible: keep the blue, muted into the
+  // background. The brackets still drain to --bd-1 via frameAccent.
   const border = disabled
-    ? "var(--bd-1)"
+    ? selected
+      ? "color-mix(in srgb, var(--ac-primary) 45%, var(--bg-1))"
+      : "var(--bd-1)"
     : selected || transmitting
       ? "var(--ac-primary)"
       : "var(--bd-2)";
