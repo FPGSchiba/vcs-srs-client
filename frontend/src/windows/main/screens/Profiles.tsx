@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { api } from "../../../shared/api/client";
 import type {
@@ -28,8 +28,10 @@ interface Placed {
 
 /**
  * Flows blocks left to right inside the window's content width, wrapping to a
- * new line when the next block would overflow -- the same rule the Comms grid
- * uses. Pure so the geometry is testable without rendering.
+ * new line when the next block would overflow. This rule is local to the
+ * preview: there is no Comms grid yet, so it must be reconciled with (or
+ * reused by) the real grid when that lands. Pure so the geometry is testable
+ * without rendering.
  */
 function place(blocks: LayoutBlock[], win: LayoutWindow): { rects: Placed[]; w: number; h: number } {
   const inner = Math.max(win.w - 2 * PAD, ...blocks.map((b) => b.w), 1);
@@ -78,6 +80,11 @@ function LayoutPreview({ blocks, window: win }: { blocks: LayoutBlock[]; window:
   );
 }
 
+// A second DELETE click within this window of arming is ignored, so a stray
+// double-click cannot arm-and-fire; the armed state also times out.
+const DELETE_COOLDOWN_MS = 350;
+const DELETE_ARM_TIMEOUT_MS = 3000;
+
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 /**
@@ -106,6 +113,28 @@ export function Profiles() {
   const [renaming, setRenaming] = useState<{ path: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const armedAt = useRef(0);
+  const armTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => () => clearTimeout(armTimer.current), []);
+
+  const disarm = (path?: string) => {
+    clearTimeout(armTimer.current);
+    setConfirmDelete((c) => (path === undefined || c === path ? null : c));
+  };
+
+  const onDelete = (path: string) => {
+    if (confirmDelete !== path) {
+      armedAt.current = Date.now();
+      clearTimeout(armTimer.current);
+      armTimer.current = setTimeout(() => setConfirmDelete(null), DELETE_ARM_TIMEOUT_MS);
+      setConfirmDelete(path);
+      return;
+    }
+    if (Date.now() - armedAt.current < DELETE_COOLDOWN_MS) return;
+    disarm();
+    void run(() => api.deleteProfile(path));
+  };
 
   useEffect(() => {
     const refresh = () =>
@@ -234,7 +263,7 @@ export function Profiles() {
               )}
             </div>
             {error && (
-              <div role="alert" className="cap" style={{ color: "var(--ac-danger, #f87171)", marginBottom: 8 }}>
+              <div role="alert" className="cap" style={{ color: "var(--ac-alert)", marginBottom: 8 }}>
                 {error}
               </div>
             )}
@@ -340,14 +369,9 @@ export function Profiles() {
                             }
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (confirmDelete !== p.path) {
-                                setConfirmDelete(p.path);
-                                return;
-                              }
-                              setConfirmDelete(null);
-                              void run(() => api.deleteProfile(p.path));
+                              onDelete(p.path);
                             }}
-                            onBlur={() => setConfirmDelete((c) => (c === p.path ? null : c))}
+                            onBlur={() => disarm(p.path)}
                           >
                             {confirmDelete === p.path ? "CONFIRM?" : <Icon name="trash" size={10} />}
                           </button>

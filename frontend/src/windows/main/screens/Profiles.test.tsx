@@ -1,5 +1,5 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { Profiles } from "./Profiles";
 import { useProfile } from "../../../shared/store/profile";
 import type { ProfileSummary } from "../../../shared/api/client";
@@ -10,6 +10,7 @@ const {
   getProfileState,
   loadProfile,
   deleteProfile,
+  renameProfile,
   saveProfileAs,
   browseProfilesDir,
   openProfilesDir,
@@ -20,12 +21,36 @@ const {
   getProfileState: vi.fn(async () => ({ active_path: "", active_name: "", dirty: false, dir: "/p" })),
   loadProfile: vi.fn(async (_path: string) => {}),
   deleteProfile: vi.fn(async (_path: string) => {}),
+  renameProfile: vi.fn(async (_path: string, _name: string, _desc: string) => {}),
   saveProfileAs: vi.fn(async (_name: string, _desc: string) => {}),
   browseProfilesDir: vi.fn(async () => {}),
   openProfilesDir: vi.fn(async () => {}),
   importProfile: vi.fn(async () => {}),
   exportProfile: vi.fn(async (_path: string) => {}),
 }));
+
+// Captures profile:state subscriptions so a test can fire the handler and
+// observe unsubscription behaviourally (a dead handler must not reach the store).
+const { eventHandlers } = vi.hoisted(() => ({
+  eventHandlers: new Map<string, Array<{ fire: (data: unknown) => void }>>(),
+}));
+
+vi.mock("@wailsio/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@wailsio/runtime")>();
+  return {
+    ...actual,
+    Events: {
+      On: vi.fn((name: string, cb: (e: { data: unknown }) => void) => {
+        let live = true;
+        const entry = { fire: (data: unknown) => live && cb({ data }) };
+        eventHandlers.set(name, [...(eventHandlers.get(name) ?? []), entry]);
+        return () => {
+          live = false;
+        };
+      }),
+    },
+  };
+});
 
 vi.mock("../../../shared/api/client", async (orig) => {
   const actual = await orig<typeof import("../../../shared/api/client")>();
@@ -37,6 +62,7 @@ vi.mock("../../../shared/api/client", async (orig) => {
       getProfileState,
       loadProfile,
       deleteProfile,
+      renameProfile,
       saveProfileAs,
       browseProfilesDir,
       openProfilesDir,
@@ -74,6 +100,7 @@ const EMPTY_STATE = { active_path: "", active_name: "", dirty: false, dir: "/p" 
 describe("Profiles screen", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    eventHandlers.clear();
     seed([]);
   });
 
@@ -138,8 +165,167 @@ describe("Profiles screen", () => {
     // element needs role, tabIndex and Enter/Space in the same commit.
     seed([summary()]);
     render(<Profiles />);
-    const row = screen.getByText("Fleet Op").closest("tr");
+    const row = screen.getByText("Fleet Op").closest("tr")!;
     expect(row).toHaveAttribute("tabindex", "0");
     expect(row).toHaveAttribute("role", "button");
+  });
+
+  it.each([
+    ["Enter", "Enter"],
+    ["Space", " "],
+  ])("selects the row and shows its detail on %s", (_label, key) => {
+    seed([summary()]);
+    render(<Profiles />);
+    expect(screen.queryByText("3 configured")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByText("Fleet Op").closest("tr")!, { key });
+    expect(screen.getByText("3 configured")).toBeInTheDocument();
+    expect(screen.getByText("notes")).toBeInTheDocument();
+    expect(screen.getByText("FPGSchiba")).toBeInTheDocument();
+  });
+
+  it("selects the row on click and shows its detail", () => {
+    seed([summary()]);
+    render(<Profiles />);
+    fireEvent.click(screen.getByText("Fleet Op"));
+    expect(screen.getByText("3 configured")).toBeInTheDocument();
+  });
+
+  it("does not select the row when Enter is pressed on a nested button", () => {
+    seed([summary()]);
+    render(<Profiles />);
+    fireEvent.keyDown(screen.getByRole("button", { name: /^load$/i }), { key: "Enter" });
+    expect(screen.queryByText("3 configured")).not.toBeInTheDocument();
+  });
+
+  it("stops following profile:state after unmount", async () => {
+    seed([summary()]);
+    const { unmount } = render(<Profiles />);
+    await act(async () => {});
+    const live = eventHandlers.get("profile:state") ?? [];
+    expect(live).toHaveLength(1);
+
+    // Before unmount the handler reaches the store synchronously.
+    live[0].fire({ active_path: "", active_name: "", dirty: false, dir: "/pushed" });
+    expect(useProfile.getState().state.dir).toBe("/pushed");
+    // let the refresh that handler kicked off settle before the dead-handler check
+    await act(async () => {});
+
+    unmount();
+    useProfile.setState({ state: { active_path: "", active_name: "", dirty: false, dir: "/sentinel" } });
+    const listed = listProfiles.mock.calls.length;
+    live[0].fire({ active_path: "", active_name: "", dirty: false, dir: "/after" });
+    await act(async () => {});
+    expect(useProfile.getState().state.dir).toBe("/sentinel");
+    expect(listProfiles.mock.calls.length).toBe(listed);
+  });
+});
+
+describe("Profiles delete", () => {
+  const A = "/p/fleet-op.vcs.json";
+  const B = "/p/solo.vcs.json";
+  const advance = (ms: number) => act(async () => void vi.advanceTimersByTime(ms));
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    eventHandlers.clear();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    seed([summary(), summary({ name: "Solo Patrol", path: B })]);
+    render(<Profiles />);
+    await act(async () => {});
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const del = (name: string) => screen.getByRole("button", { name: `Delete ${name}` });
+  const confirm = (name: string) => screen.getByRole("button", { name: `Confirm delete ${name}` });
+
+  it("first click arms without deleting and shows CONFIRM", () => {
+    fireEvent.click(del("Fleet Op"));
+    expect(deleteProfile).not.toHaveBeenCalled();
+    expect(confirm("Fleet Op")).toHaveTextContent("CONFIRM?");
+  });
+
+  it("second click after the cooling window deletes that exact path", async () => {
+    fireEvent.click(del("Fleet Op"));
+    await advance(400);
+    fireEvent.click(confirm("Fleet Op"));
+    expect(deleteProfile).toHaveBeenCalledTimes(1);
+    expect(deleteProfile).toHaveBeenCalledWith(A);
+  });
+
+  it("arming A then clicking the other row's delete arms only that row and deletes nothing", async () => {
+    fireEvent.click(del("Fleet Op"));
+    await advance(400);
+    fireEvent.click(del("Solo Patrol"));
+    expect(deleteProfile).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Delete Fleet Op" })).toBeInTheDocument();
+    expect(confirm("Solo Patrol")).toBeInTheDocument();
+  });
+
+  it("blur disarms, and the next click re-arms instead of deleting", async () => {
+    fireEvent.click(del("Fleet Op"));
+    await advance(400);
+    fireEvent.blur(confirm("Fleet Op"));
+    expect(screen.getByRole("button", { name: "Delete Fleet Op" })).toBeInTheDocument();
+    fireEvent.click(del("Fleet Op"));
+    expect(deleteProfile).not.toHaveBeenCalled();
+    expect(confirm("Fleet Op")).toBeInTheDocument();
+  });
+
+  it("ignores a second click inside the cooling window (double-click)", async () => {
+    fireEvent.click(del("Fleet Op"));
+    await advance(100);
+    fireEvent.click(confirm("Fleet Op"));
+    expect(deleteProfile).not.toHaveBeenCalled();
+    // still armed: a deliberate click after the window deletes
+    await advance(300);
+    fireEvent.click(confirm("Fleet Op"));
+    expect(deleteProfile).toHaveBeenCalledWith(A);
+  });
+
+  it("disarms by itself after the arm timeout", async () => {
+    fireEvent.click(del("Fleet Op"));
+    await advance(3100);
+    expect(screen.getByRole("button", { name: "Delete Fleet Op" })).toBeInTheDocument();
+    fireEvent.click(del("Fleet Op"));
+    expect(deleteProfile).not.toHaveBeenCalled();
+  });
+});
+
+describe("Profiles rename", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    eventHandlers.clear();
+  });
+
+  const openRename = () => {
+    seed([summary()]);
+    render(<Profiles />);
+    fireEvent.click(screen.getByRole("button", { name: "Rename Fleet Op" }));
+    return screen.getByLabelText("Profile name");
+  };
+
+  it("does not rename to an empty or whitespace name", () => {
+    const input = openRename();
+    fireEvent.change(input, { target: { value: "   " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(renameProfile).not.toHaveBeenCalled();
+  });
+
+  it("renames with path, trimmed name and the existing description", async () => {
+    const input = openRename();
+    fireEvent.change(input, { target: { value: " Wing Op " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(renameProfile).toHaveBeenCalledWith("/p/fleet-op.vcs.json", "Wing Op", "notes"),
+    );
+    await waitFor(() => expect(screen.queryByLabelText("Profile name")).not.toBeInTheDocument());
+  });
+
+  it("Escape cancels without calling rename", () => {
+    const input = openRename();
+    fireEvent.change(input, { target: { value: "Other" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(renameProfile).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Profile name")).not.toBeInTheDocument();
   });
 });
