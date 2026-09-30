@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
@@ -592,5 +593,58 @@ func TestProfileBindingsEmitProfileState(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no %s emitted: %v", events.EventProfileState, rec.names())
+	}
+}
+
+// Regression: DeleteProfile used to raise its save-failure notification while
+// holding sb.mu. notify's error-severity OnSound reaches audioManager, which
+// takes sb.mu -- a permanent self-deadlock. The notifier here has an OnSound
+// that takes sb.mu exactly as audioManager does.
+func TestDeleteProfileSaveFailureDoesNotDeadlockOnNotify(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	dir := t.TempDir()
+	a.setProfilesDirForTest(dir)
+	sb := a.settings
+	a.setNotifier(notify.New(notify.Options{OnSound: func(notify.Item) {
+		sb.mu.Lock()
+		defer sb.mu.Unlock()
+	}}))
+	if err := a.SaveProfileAs("X", ""); err != nil {
+		t.Fatal(err)
+	}
+	active := a.GetProfileState().ActivePath
+
+	// Make config.Save fail: its parent "directory" is a regular file.
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sb.mu.Lock()
+	sb.cfgPath = filepath.Join(blocker, "config.toml")
+	sb.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- a.DeleteProfile(active) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("DeleteProfile deadlocked: notification raised while holding sb.mu")
+	}
+	if a.notif.Snapshot().Items[0].Title != "Could not clear the active profile" {
+		t.Fatalf("the save failure must still be reported: %+v", a.notif.Snapshot().Items)
+	}
+}
+
+func TestDeleteProfileRefusesNonProfileFiles(t *testing.T) {
+	a, _ := newProfileTestApp(t)
+	victim := filepath.Join(t.TempDir(), "precious.txt")
+	if err := os.WriteFile(victim, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.DeleteProfile(victim); err == nil {
+		t.Fatal("want an error for a path that is not a profile file")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("file must survive: %v", err)
 	}
 }

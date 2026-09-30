@@ -440,29 +440,42 @@ func (a *App) RenameProfile(path, name, desc string) error {
 // LEFT UNTOUCHED -- deleting a saved copy must not wipe the radios you are
 // currently using.
 func (a *App) DeleteProfile(path string) error {
+	// Refuse anything that is not a profile file: the path comes from the
+	// frontend and profile.Delete is an os.Remove.
+	if !strings.HasSuffix(path, profile.Ext) {
+		err := fmt.Errorf("refusing to delete %q: not a %s profile file", path, profile.Ext)
+		a.notifyProfileError("Could not delete profile", err)
+		return err
+	}
 	if err := profile.Delete(path); err != nil {
 		a.notifyProfileError("Could not delete profile", err)
 		return err
 	}
-	sb := a.settings
-	if sb != nil {
-		sb.writeMu.Lock()
-		sb.mu.Lock()
-		if sb.cfg.ActiveProfile == path {
+	// The save error is captured under the locks and raised AFTER they are
+	// released: notify's error-severity OnSound path reaches audioManager,
+	// which takes sb.mu, and sync.Mutex is not reentrant.
+	var clearErr error
+	if sb := a.settings; sb != nil {
+		func() {
+			sb.writeMu.Lock()
+			defer sb.writeMu.Unlock()
+			sb.mu.Lock()
+			defer sb.mu.Unlock()
+			if sb.cfg.ActiveProfile != path {
+				return
+			}
 			next := *sb.cfg
 			next.ActiveProfile = ""
 			if sb.cfgPath != "" {
-				if err := config.Save(sb.cfgPath, &next); err == nil {
-					sb.cfg = &next
-				} else {
-					a.notifyProfileError("Could not clear the active profile", err)
+				if clearErr = config.Save(sb.cfgPath, &next); clearErr != nil {
+					return
 				}
-			} else {
-				sb.cfg = &next
 			}
-		}
-		sb.mu.Unlock()
-		sb.writeMu.Unlock()
+			sb.cfg = &next
+		}()
+	}
+	if clearErr != nil {
+		a.notifyProfileError("Could not clear the active profile", clearErr)
 	}
 	a.emitProfileState()
 	return nil
@@ -494,30 +507,34 @@ func (a *App) ResetLayout() error {
 	if sb == nil {
 		return nil
 	}
-	sb.writeMu.Lock()
-	defer sb.writeMu.Unlock()
-
-	sb.mu.Lock()
-	next := *sb.cfg
-	blocks := make([]config.LayoutBlock, 0, len(next.Radios))
-	for _, r := range next.Radios {
-		blocks = append(blocks, config.LayoutBlock{
-			RadioID: r.ID, W: profile.DefaultBlockW, H: profile.DefaultBlockH,
-		})
-	}
-	next.CommsLayout = config.CommsLayout{
-		WindowW: profile.DefaultWindowW,
-		WindowH: profile.DefaultWindowH,
-		Blocks:  blocks,
-	}
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
-	if saveErr == nil {
+	// writeMu covers snapshot -> mutate -> persist only; the geometry change
+	// and the emit (two file reads plus a dispatch) run after release, as in
+	// applyProfile.
+	saveErr := func() error {
+		sb.writeMu.Lock()
+		defer sb.writeMu.Unlock()
+		sb.mu.Lock()
+		defer sb.mu.Unlock()
+		next := *sb.cfg
+		blocks := make([]config.LayoutBlock, 0, len(next.Radios))
+		for _, r := range next.Radios {
+			blocks = append(blocks, config.LayoutBlock{
+				RadioID: r.ID, W: profile.DefaultBlockW, H: profile.DefaultBlockH,
+			})
+		}
+		next.CommsLayout = config.CommsLayout{
+			WindowW: profile.DefaultWindowW,
+			WindowH: profile.DefaultWindowH,
+			Blocks:  blocks,
+		}
+		if sb.cfgPath != "" {
+			if err := config.Save(sb.cfgPath, &next); err != nil {
+				return err
+			}
+		}
 		sb.cfg = &next
-	}
-	sb.mu.Unlock()
+		return nil
+	}()
 	if saveErr != nil {
 		return fmt.Errorf("reset layout: %w", saveErr)
 	}
@@ -682,19 +699,27 @@ func (a *App) SeedBuiltinProfiles() {
 		return
 	}
 
-	sb.writeMu.Lock()
-	sb.mu.Lock()
-	next := *sb.cfg
-	next.BuiltinProfiles = updated
-	if sb.cfgPath != "" {
-		if err := config.Save(sb.cfgPath, &next); err == nil {
-			sb.cfg = &next
+	// Locks released before any notify: see DeleteProfile.
+	saveErr := func() error {
+		sb.writeMu.Lock()
+		defer sb.writeMu.Unlock()
+		sb.mu.Lock()
+		defer sb.mu.Unlock()
+		next := *sb.cfg
+		next.BuiltinProfiles = updated
+		if sb.cfgPath != "" {
+			if err := config.Save(sb.cfgPath, &next); err != nil {
+				return err
+			}
 		}
-	} else {
 		sb.cfg = &next
+		return nil
+	}()
+	if saveErr != nil {
+		// Files are on disk but unrecorded: next startup will treat them as
+		// user-owned and never update them.
+		a.notifyProfileError("Could not record default profiles", saveErr)
 	}
-	sb.mu.Unlock()
-	sb.writeMu.Unlock()
 }
 
 // emitProfileState broadcasts the active-profile snapshot to every window.
