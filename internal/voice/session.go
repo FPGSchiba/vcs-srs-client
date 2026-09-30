@@ -11,6 +11,30 @@ import (
 	"github.com/google/uuid"
 )
 
+// RXEvent is one completed received transmission.
+//
+// End is the time of the LAST accepted packet, not the time the idle
+// threshold noticed -- a duration inflated by the detection delay would be
+// a worse number than no number.
+type RXEvent struct {
+	Sender uuid.UUID
+	Freq   KHz
+	Start  time.Time
+	End    time.Time
+}
+
+// defaultHistoryIdleMS is Options.HistoryIdleMS's fallback. See that
+// field's doc for why this number is a guess rather than a measurement.
+const defaultHistoryIdleMS = 500
+
+// historyIdleFor resolves the configured override to a duration.
+func historyIdleFor(ms int) time.Duration {
+	if ms <= 0 {
+		return defaultHistoryIdleMS * time.Millisecond
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 // State is the voice session's lifecycle state, as drawn in the phase design
 // doc, section 7.
 type State int
@@ -130,6 +154,39 @@ type Options struct {
 	// delays later callbacks but never the state machine itself.
 	OnState func(State, error)
 
+	// OnRX reports one COMPLETED received transmission, for the history
+	// log. Delivered from a goroutine of its own, one at a time, in order.
+	//
+	// It deliberately does NOT reuse the OnState delivery path: deliverLoop
+	// drains a queue typed to state changes and returns PERMANENTLY on
+	// StateClosed, so an RX event queued behind a close would never be
+	// delivered.
+	//
+	// A slow callback costs dropped log rows, never dropped audio: the
+	// queue is bounded and a full one drops with a counter, the same
+	// discipline Session.emit uses for control events.
+	//
+	// Unlike OnState's goroutine, this one IS joined by Close, so the final
+	// rows are flushed before Close returns. OnRX must therefore not call
+	// Close.
+	OnRX func(RXEvent)
+
+	// HistoryIdleMS is how long a stream may go without an accepted packet
+	// before its transmission is considered over, FOR THE HISTORY LOG ONLY.
+	// 0 (or negative) means defaultHistoryIdleMS.
+	//
+	// It is deliberately separate from rxIdleTimeout, which governs when a
+	// decoder and jitter buffer are RELEASED. Re-tuning that to suit a log
+	// would change voice behaviour to serve a view.
+	//
+	// The default is a GUESS. It has to sit above a real talker's worst
+	// inter-packet gap (nominally 20ms) and below a natural speech pause,
+	// and nobody has ever received voice from a real peer on this client,
+	// so the distribution it needs to clear is unmeasured. Exposed here,
+	// and through [voice] history_idle_ms, so it can be swept on real
+	// hardware without a rebuild.
+	HistoryIdleMS int
+
 	Clock     func() time.Time // nil means time.Now
 	Keepalive time.Duration    // 0 means 5s
 	JitterMS  int              // 0 means 60
@@ -201,6 +258,16 @@ type Session struct {
 	log       *slog.Logger
 	onState   func(State, error)
 	clock     func() time.Time
+
+	onRX        func(RXEvent)
+	historyIdle time.Duration
+
+	// rxEvents carries completed transmissions to the OnRX delivery
+	// goroutine. Buffered and never blocked on: rxService runs on the
+	// decode goroutine, and a consumer that stalls must cost log rows, not
+	// audio. nil when no OnRX was supplied.
+	rxEvents chan RXEvent
+
 	keepalive time.Duration
 	poll      time.Duration
 
@@ -289,10 +356,13 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 		secret:    secret,
 		log:       opt.Log,
 		onState:   opt.OnState,
+		onRX:      opt.OnRX,
 		clock:     opt.Clock,
 		keepalive: opt.Keepalive,
 		poll:      opt.poll,
 		jitterMS:  opt.JitterMS,
+
+		historyIdle: historyIdleFor(opt.HistoryIdleMS),
 		events:    make(chan event, eventBuffer),
 		done:      make(chan struct{}),
 		cbSignal:  make(chan struct{}, 1),
@@ -332,6 +402,13 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 		s.jitterMS = maxBufferMS
 	}
 
+	// Created here, before any goroutine exists, so decodeLoop never races
+	// the field's initialisation; the delivery goroutine itself is started
+	// with the others once the socket is open.
+	if s.onRX != nil {
+		s.rxEvents = make(chan RXEvent, rxEventBuffer)
+	}
+
 	s.tx.init(opt.txEncode, s.log)
 	s.rx.init(opt.rxNewDecoder, s.jitterMS, maxBufferMS)
 
@@ -355,6 +432,10 @@ func Dial(src Sources, self uuid.UUID, secret string, opt Options) (*Session, er
 	go s.lifecycleLoop()
 	go s.txLoop()
 	go s.decodeLoop()
+	if s.onRX != nil {
+		s.wg.Add(1)
+		go s.rxDeliverLoop()
+	}
 	return s, nil
 }
 
@@ -403,6 +484,10 @@ func (s *Session) Close() error {
 		if byeErr != nil && !errors.Is(byeErr, errSessionClosed) {
 			s.log.Debug("voice: BYE not sent", "err", byeErr)
 		}
+
+		// Before close(s.done), so the events are queued while the delivery
+		// goroutine is still running and its drain-on-done picks them up.
+		s.endOpenRXStreams()
 
 		close(s.done)
 

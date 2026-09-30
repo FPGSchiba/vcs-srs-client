@@ -51,6 +51,11 @@ const (
 	maxRXStreams = 32
 )
 
+// rxEventBuffer is the depth of the OnRX delivery queue. A transmission row
+// is produced at most once per talker per press, so 64 outlasts any burst a
+// consumer that is merely slow -- as opposed to stuck -- would see.
+const rxEventBuffer = 64
+
 // rxDecoder is the decode half of the codec, as the RX path uses it.
 // *opus.Decoder satisfies it directly; it exists as an interface only so
 // tests can substitute a deterministic stub on builds with no cgo, exactly
@@ -137,6 +142,11 @@ type RXStats struct {
 	Reaped uint64
 	Byes   uint64
 
+	// HistoryDropped counts transmission rows dropped because the history
+	// delivery queue was full. Non-zero means the log is incomplete; audio
+	// is unaffected.
+	HistoryDropped uint64
+
 	// Active is a gauge, not a counter: the number of streams alive right
 	// now.
 	Active int
@@ -174,6 +184,23 @@ type rxStream struct {
 	pcm    []float32 // decode scratch, one Opus frame long
 
 	lastSeen atomic.Int64 // UnixNano of the most recent accepted packet
+
+	// started is when this transmission's FIRST accepted packet arrived,
+	// and ended records that the history threshold has already fired for
+	// it. Both are WRITTEN only under rxState.mu, by the receive goroutine
+	// (a packet restarting an ended transmission), the decode goroutine
+	// (rxService) and Close (endOpenRXStreams). started is read only under
+	// mu; ended is an atomic so the receive and decode goroutines can test
+	// it without taking the lock on the common path.
+	//
+	// ended is what makes "one row per transmission" true: without it every
+	// rxService sweep between the 500ms threshold and the 5s reap would
+	// emit the same transmission again. Clearing it when a packet arrives
+	// is also what makes two sentences 600ms apart two rows rather than
+	// one, and it falls out of the same flag rather than needing its own
+	// mechanism.
+	started time.Time
+	ended   atomic.Bool
 }
 
 // rxState is everything the receive path owns. Like txState it lives inside
@@ -250,6 +277,9 @@ type rxState struct {
 	ringFrames   int
 
 	received atomic.Uint64
+
+	historyDropped atomic.Uint64
+	historyDropLog sync.Once
 
 	// processed counts datagrams rxVoice has FINISHED with, on every path
 	// including the early drops. received is bumped on entry and so says
@@ -432,6 +462,7 @@ func (s *Session) RXStats() RXStats {
 		Opened:           r.opened.Load(),
 		Reaped:           r.reaped.Load(),
 		Byes:             r.byes.Load(),
+		HistoryDropped:   r.historyDropped.Load(),
 	}
 	if p := r.snapshot.Load(); p != nil {
 		st.Active = len(*p)
@@ -539,6 +570,18 @@ func (s *Session) rxVoice(pkt *Packet, at time.Time) {
 		return
 	}
 	st.lastSeen.Store(at.UnixNano())
+	// A packet on a stream the history threshold already closed starts a
+	// NEW transmission. The unlocked atomic test keeps the common path
+	// lock-free; the flag is re-checked under rx.mu because rxService
+	// (decode goroutine) writes the same two fields.
+	if st.ended.Load() {
+		r.mu.Lock()
+		if st.ended.Load() {
+			st.started = at
+			st.ended.Store(false)
+		}
+		r.mu.Unlock()
+	}
 	if !st.jit.push(pkt.Sequence, pkt.Payload, at) {
 		r.dropJitter.Add(1)
 	}
@@ -584,12 +627,13 @@ func (s *Session) rxStreamFor(key streamKey, global bool, at time.Time) *rxStrea
 	}
 
 	st := &rxStream{
-		key:    key,
-		global: global,
-		jit:    newJitter(r.jitterTarget, r.jitterMax, rxFrameDuration),
-		ring:   audio.NewRing(r.ringFrames),
-		dec:    dec,
-		pcm:    make([]float32, opus.FrameSamples),
+		key:     key,
+		global:  global,
+		started: at,
+		jit:     newJitter(r.jitterTarget, r.jitterMax, rxFrameDuration),
+		ring:    audio.NewRing(r.ringFrames),
+		dec:     dec,
+		pcm:     make([]float32, opus.FrameSamples),
 	}
 	st.lastSeen.Store(at.UnixNano())
 
@@ -640,12 +684,113 @@ func (s *Session) rxService(now time.Time) {
 	for _, st := range *streams {
 		st.retune(want)
 		st.topUp(now, r, s.log)
-		if now.Sub(time.Unix(0, st.lastSeen.Load())) >= rxIdleTimeout {
+		last := time.Unix(0, st.lastSeen.Load())
+		if !st.ended.Load() && s.historyIdle > 0 && now.Sub(last) >= s.historyIdle {
+			if ev, ok := st.endTransmission(r, now, s.historyIdle); ok {
+				s.queueRXEvent(ev)
+			}
+		}
+		if now.Sub(last) >= rxIdleTimeout {
 			idle = append(idle, st.key)
 		}
 	}
 	for _, key := range idle {
 		r.reap(key, now)
+	}
+}
+
+// endTransmission marks this stream's current transmission as reported and
+// returns the row to deliver. ok is false when it was already reported, or
+// when a packet landed between the caller's unlocked idle check and taking
+// the lock: lastSeen is re-read HERE, under mu, so a transmission that had
+// just resumed is not closed on a stale timestamp.
+//
+// The event is RETURNED rather than queued so the caller sends it after mu
+// is released: the queue send is non-blocking, but nothing about the stream
+// map's lock should depend on that.
+func (st *rxStream) endTransmission(r *rxState, now time.Time, idle time.Duration) (RXEvent, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	last := time.Unix(0, st.lastSeen.Load())
+	if st.ended.Load() || now.Sub(last) < idle {
+		return RXEvent{}, false
+	}
+	st.ended.Store(true)
+	return RXEvent{Sender: st.key.sender, Freq: st.key.freq, Start: st.started, End: last}, true
+}
+
+// rxDeliverLoop is the sole caller of OnRX. It runs on a goroutine of its
+// own so a slow consumer delays only later log rows -- never the decode
+// goroutine, which is the one that must keep up with the network.
+func (s *Session) rxDeliverLoop() {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.done:
+			// Drain whatever is already queued so a transmission that ended
+			// as the session closed still reaches the log.
+			for {
+				select {
+				case ev := <-s.rxEvents:
+					s.onRX(ev)
+				default:
+					return
+				}
+			}
+		case ev := <-s.rxEvents:
+			s.onRX(ev)
+		}
+	}
+}
+
+// queueRXEvent hands one completed transmission to the delivery goroutine
+// without ever blocking the caller, and without taking any lock. A full
+// queue drops the row and counts it: the alternative is stalling the decode
+// goroutine behind a consumer, which would turn a logging problem into an
+// audio problem.
+func (s *Session) queueRXEvent(ev RXEvent) {
+	if s.rxEvents == nil {
+		return
+	}
+	select {
+	case s.rxEvents <- ev:
+	default:
+		s.rx.historyDropped.Add(1)
+		s.rx.historyDropLog.Do(func() {
+			s.log.Warn("voice: history event queue full, dropping transmission rows",
+				"sender", ev.Sender, "freq", uint32(ev.Freq))
+		})
+	}
+}
+
+// endOpenRXStreams reports every stream still open as a completed
+// transmission. Called from Close so a transmission in flight during a
+// reconnect produces one truthful row instead of vanishing.
+//
+// End is each stream's lastSeen, not now: the talker stopped being heard
+// when their last packet arrived, not when this client tore the socket
+// down.
+func (s *Session) endOpenRXStreams() {
+	r := &s.rx
+	r.mu.Lock()
+	pending := make([]RXEvent, 0, len(r.streams))
+	for _, st := range r.streams {
+		if st.ended.Load() {
+			continue
+		}
+		st.ended.Store(true)
+		pending = append(pending, RXEvent{
+			Sender: st.key.sender,
+			Freq:   st.key.freq,
+			Start:  st.started,
+			End:    time.Unix(0, st.lastSeen.Load()),
+		})
+	}
+	r.mu.Unlock()
+
+	// Queued only after mu is released.
+	for _, ev := range pending {
+		s.queueRXEvent(ev)
 	}
 }
 
