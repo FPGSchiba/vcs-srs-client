@@ -1,8 +1,5 @@
 import type { RadioShellProps } from "./shells";
 
-/** Below this LCD size a column is the narrow variant: tighter, no divider. */
-const NARROW_LCD_PX = 24;
-
 /**
  * The column shell: header, LCD, then status, stacked.
  *
@@ -13,9 +10,24 @@ const NARROW_LCD_PX = 24;
  * design/vcs/radio-variants.md §3.
  */
 export function RadioColumn({ variant, rid, name, lcd, talker, ptt, chips }: RadioShellProps) {
-  const narrow = variant.lcdPx < NARROW_LCD_PX;
+  const narrow = variant.density === "compact";
   const gap = narrow ? 7 : 9;
   const pad = narrow ? "10px" : "14px 12px 12px";
+
+  // statusDivider is honoured in BOTH branches, so the field is a whole
+  // contract: whether a compact variant draws one is the descriptor's call.
+  const status = (
+    <div
+      data-testid="shell-status"
+      style={{
+        minWidth: 0,
+        paddingTop: variant.shows.statusDivider ? 6 : undefined,
+        borderTop: variant.shows.statusDivider ? "1px solid var(--bd-1)" : undefined,
+      }}
+    >
+      {talker}
+    </div>
+  );
 
   return (
     <div
@@ -46,9 +58,7 @@ export function RadioColumn({ variant, rid, name, lcd, talker, ptt, chips }: Rad
 
       {narrow ? (
         <>
-          <div data-testid="shell-status" style={{ minWidth: 0 }}>
-            {talker}
-          </div>
+          {status}
           <div style={{ display: "flex" }}>{ptt}</div>
         </>
       ) : (
@@ -56,16 +66,7 @@ export function RadioColumn({ variant, rid, name, lcd, talker, ptt, chips }: Rad
           <div className="row acenter" style={{ justifyContent: "flex-end", minWidth: 0 }}>
             {ptt}
           </div>
-          <div
-            data-testid="shell-status"
-            style={{
-              minWidth: 0,
-              paddingTop: 6,
-              borderTop: variant.shows.statusDivider ? "1px solid var(--bd-1)" : undefined,
-            }}
-          >
-            {talker}
-          </div>
+          {status}
         </>
       )}
     </div>

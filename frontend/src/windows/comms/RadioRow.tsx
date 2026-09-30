@@ -7,7 +7,8 @@ import type { RadioShellProps } from "./shells";
  * right (design/vcs/radio-variants.md §2).
  */
 export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioShellProps) {
-  const narrow = variant.shows.chips === "none";
+  const narrow = variant.density === "compact";
+  const showChips = variant.shows.chips !== "none";
 
   if (narrow) {
     return (
@@ -36,6 +37,7 @@ export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioS
             <span data-testid="shell-name-slot" style={{ minWidth: 0, overflow: "hidden", flex: 1 }}>
               {name}
             </span>
+            {showChips && chips}
           </div>
           <div data-testid="shell-status" style={{ minWidth: 0 }}>
             {talker}
@@ -70,7 +72,7 @@ export function RadioRow({ variant, rid, name, lcd, talker, ptt, chips }: RadioS
           <span data-testid="shell-name-slot" style={{ minWidth: 0, overflow: "hidden", flex: 1 }}>
             {name}
           </span>
-          {chips}
+          {showChips && chips}
         </div>
         {/* Left-aligned, not centred: the column's left edge is the card's
             reading line. */}

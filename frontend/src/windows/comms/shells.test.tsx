@@ -46,26 +46,43 @@ describe("every variant renders through a shell", () => {
 });
 
 describe("the column shell", () => {
-  it("draws the status divider when the descriptor asks", () => {
+  it("draws the status divider exactly when shows.statusDivider says so", () => {
+    // The SAME variant with only the field toggled, so nothing else can explain
+    // the difference. toHaveStyle cannot see this (jsdom drops var() inside a
+    // border shorthand), so read the inline style attribute.
     const Column = SHELLS.column;
-    const { unmount } = render(<Column {...pieces(variantById("vertical"))} />);
-    // toHaveStyle cannot see this: jsdom drops a var() inside a border shorthand,
-    // so it compares against nothing (and the negative form passes vacuously).
-    // Read the inline style attribute instead.
+    const vertical = variantById("vertical");
     const divider = "border-top: 1px solid var(--bd-1)";
-    expect(screen.getByTestId("shell-status").getAttribute("style")).toContain(divider);
-    unmount();
-    render(<Column {...pieces(variantById("narrow-v"))} />);
-    expect(screen.getByTestId("shell-status").getAttribute("style") ?? "").not.toContain(
-      "border-top",
+    const styleOf = () => screen.getByTestId("shell-status").getAttribute("style") ?? "";
+
+    const on = render(<Column {...pieces(vertical)} />);
+    expect(styleOf()).toContain(divider);
+    on.unmount();
+
+    const off = render(
+      <Column {...pieces({ ...vertical, shows: { ...vertical.shows, statusDivider: false } })} />,
     );
+    expect(styleOf()).not.toContain("border-top");
+    off.unmount();
+
+    // Honoured in the compact branch too: the field is a whole contract.
+    const compact = { ...vertical, density: "compact" as const };
+    render(<Column {...pieces(compact)} />);
+    expect(styleOf()).toContain(divider);
   });
 
   it("left-aligns the narrow-v name beside the rid rather than centring it", () => {
     const Column = SHELLS.column;
     render(<Column {...pieces(variantById("narrow-v"))} />);
     const header = screen.getByTestId("shell-header");
+    // justify-content: flex-start is the flex default, so it is belt-and-braces
+    // declared intent; what actually left-aligns is the DOM order below plus a
+    // slot that neither centres its text nor takes auto margins.
     expect(header).toHaveStyle({ justifyContent: "flex-start" });
+    const slot = screen.getByTestId("shell-name-slot");
+    expect(slot.style.textAlign).not.toBe("center");
+    expect(slot.style.margin).not.toContain("auto");
+    expect(slot.style.marginLeft).not.toBe("auto");
     // rid first, then the name slot (which wraps the name).
     const kids = within(header).getAllByTestId(/^(rid|shell-name-slot)$/);
     expect(kids.map((k) => k.getAttribute("data-testid"))).toEqual(["rid", "shell-name-slot"]);
@@ -107,5 +124,48 @@ describe("a name longer than the card", () => {
       expect(screen.getByTestId("lcd"), `${v.id} lost its LCD`).toBeInTheDocument();
       unmount();
     }
+  });
+});
+
+// The invariant made executable: a fifth variant is a descriptor and nothing
+// else. These never touch a shell; if one fails, a shell has grown a proxy.
+describe("a synthetic fifth variant", () => {
+  const order = (a: string, b: string) =>
+    !!(screen.getByTestId(a).compareDocumentPosition(screen.getByTestId(b)) &
+      Node.DOCUMENT_POSITION_FOLLOWING);
+
+  it("takes the compact column path from density alone, not lcdPx", () => {
+    const Column = SHELLS.column;
+    const v = { ...variantById("vertical"), density: "compact" as const, lcdPx: 30 };
+    const { unmount } = render(<Column {...pieces(v)} />);
+    // Compact: status line precedes the PTT.
+    expect(order("talker", "ptt")).toBe(true);
+    unmount();
+    render(<Column {...pieces(variantById("vertical"))} />);
+    // Comfortable: PTT precedes the status line.
+    expect(order("ptt", "talker")).toBe(true);
+  });
+
+  it("takes the compact row path from density alone and still renders its chips", () => {
+    const Row = SHELLS.row;
+    const v = { ...variantById("horizontal"), density: "compact" as const };
+    expect(v.shows.chips).toBe("enabled-only");
+    const { unmount } = render(<Row {...pieces(v)} />);
+    expect(screen.getByTestId("chips")).toBeInTheDocument();
+    // Compact row: the LCD leads, ahead of the header (comfortable puts it below).
+    expect(order("lcd", "rid")).toBe(true);
+    unmount();
+    render(<Row {...pieces(variantById("horizontal"))} />);
+    expect(order("rid", "lcd")).toBe(true);
+  });
+
+  it("hides chips in a comfortable row that asks for none", () => {
+    const Row = SHELLS.row;
+    const v = {
+      ...variantById("horizontal"),
+      shows: { ...variantById("horizontal").shows, chips: "none" as const },
+    };
+    render(<Row {...pieces(v)} />);
+    expect(screen.queryByTestId("chips")).toBeNull();
   });
 });

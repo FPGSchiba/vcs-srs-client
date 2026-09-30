@@ -5,7 +5,8 @@ import { RadioRow } from "./RadioRow";
 
 /**
  * What a shell is handed. A shell ARRANGES pieces; it builds none of them, and
- * it reads only `orientation`, `shows` and the paddings those imply. That is
+ * it reads only `orientation`, `density`, `shows` and the paddings those
+ * imply — never `lcdPx` or a variant id. That is
  * what keeps a new SIZE from touching anything outside variants.ts — the
  * pieces already size themselves from the descriptor.
  */

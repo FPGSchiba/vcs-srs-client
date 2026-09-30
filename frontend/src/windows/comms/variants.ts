@@ -18,6 +18,12 @@ export interface RadioVariant {
   w: number;
   h: number;
   orientation: "column" | "row";
+  /**
+   * The layout-density decision shells branch on. Deliberately independent of
+   * `lcdPx` and `shows.chips`: those size and filter the pieces, this picks
+   * the arrangement, so a new size never forces a shell edit.
+   */
+  density: "comfortable" | "compact";
   /** Frequency digit size in px. */
   lcdPx: number;
   /** "fill" means the PTT spans the card's content width. */
@@ -41,6 +47,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     w: 280,
     h: 166,
     orientation: "column",
+    density: "comfortable",
     lcdPx: 30,
     ptt: { w: 96, h: 28 },
     shows: { chips: "full", unit: true, statusDivider: true },
@@ -51,6 +58,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     w: 360,
     h: 110,
     orientation: "row",
+    density: "comfortable",
     lcdPx: 22,
     ptt: { w: 64, h: 64 },
     shows: { chips: "enabled-only", unit: true, statusDivider: false },
@@ -61,6 +69,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     w: 300,
     h: 68,
     orientation: "row",
+    density: "compact",
     lcdPx: 21,
     ptt: { w: 32, h: 30 },
     shows: { chips: "none", unit: false, statusDivider: false },
@@ -71,6 +80,7 @@ export const VARIANTS: readonly RadioVariant[] = [
     w: 150,
     h: 124,
     orientation: "column",
+    density: "compact",
     lcdPx: 18,
     ptt: { w: "fill", h: 26 },
     shows: { chips: "none", unit: false, statusDivider: false },

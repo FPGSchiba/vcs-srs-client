@@ -10,6 +10,16 @@ describe("the registry", () => {
     expect(byId["narrow-v"]).toMatchObject({ w: 150, h: 124, orientation: "column", lcdPx: 18 });
   });
 
+  it("assigns the agreed layout density to each variant", () => {
+    const d = Object.fromEntries(VARIANTS.map((v) => [v.id, v.density]));
+    expect(d).toEqual({
+      vertical: "comfortable",
+      horizontal: "comfortable",
+      "narrow-h": "compact",
+      "narrow-v": "compact",
+    });
+  });
+
   it("gives every variant a unique id", () => {
     const ids = VARIANTS.map((v) => v.id);
     expect(new Set(ids).size).toBe(ids.length);
