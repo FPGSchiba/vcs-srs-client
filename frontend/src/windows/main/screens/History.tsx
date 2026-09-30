@@ -30,7 +30,7 @@ const WINDOWS = [
 export function History() {
   const entries = useHistory((s) => s.entries);
   const [channel, setChannel] = useState("all");
-  const [window, setWindow] = useState("1h");
+  const [timeWindow, setTimeWindow] = useState("1h");
   const [search, setSearch] = useState("");
 
   useEffect(() => {
@@ -57,7 +57,7 @@ export function History() {
 
   const rows = useMemo(() => {
     const cutoff =
-      WINDOWS.find((w) => w.value === window)?.ms ?? Number.POSITIVE_INFINITY;
+      WINDOWS.find((w) => w.value === timeWindow)?.ms ?? Number.POSITIVE_INFINITY;
     const since = Date.now() - cutoff;
     const q = search.trim().toLowerCase();
     return entries.filter((e) => {
@@ -66,7 +66,7 @@ export function History() {
       if (q && !`${e.sender} ${e.radio}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [entries, channel, window, search]);
+  }, [entries, channel, timeWindow, search]);
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
@@ -106,8 +106,8 @@ export function History() {
             <button
               key={w.value}
               type="button"
-              className={`seg-btn ${window === w.value ? "active" : ""}`}
-              onClick={() => setWindow(w.value)}
+              className={`seg-btn ${timeWindow === w.value ? "active" : ""}`}
+              onClick={() => setTimeWindow(w.value)}
             >
               {w.label}
             </button>
