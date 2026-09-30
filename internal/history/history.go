@@ -47,6 +47,22 @@ type Log struct {
 	// dirty is set by every mutation and cleared by the persistence layer
 	// after a successful flush. See store.go.
 	dirty bool
+	// rev increments on every mutation. Flush captures it with its snapshot
+	// and clears dirty only if it is unchanged, so an Append that lands
+	// during the (unlocked) file write is not marked clean.
+	rev uint64
+	// lastChange is when the most recent mutation happened; Tick reads it to
+	// decide whether the debounce window has elapsed.
+	lastChange time.Time
+
+	path     string
+	debounce time.Duration
+	now      func() time.Time
+	onErr    func(error)
+
+	// afterSnapshot is a test seam: Flush calls it, unlocked, between taking
+	// its snapshot and writing. Nil in production.
+	afterSnapshot func()
 }
 
 // New builds a Log. A non-positive cap means DefaultCap.
@@ -74,6 +90,10 @@ func (l *Log) Append(e Entry) {
 	}
 	l.entries = append(l.entries, e)
 	l.dirty = true
+	l.rev++
+	if l.now != nil {
+		l.lastChange = l.now()
+	}
 }
 
 // Snapshot returns a copy, NEWEST FIRST -- the order the table renders and
@@ -105,4 +125,8 @@ func (l *Log) Clear() {
 	defer l.mu.Unlock()
 	l.entries = l.entries[:0]
 	l.dirty = true
+	l.rev++
+	if l.now != nil {
+		l.lastChange = l.now()
+	}
 }
