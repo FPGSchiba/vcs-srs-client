@@ -75,9 +75,17 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
     setName(radio.name);
   }, [radio.name]);
 
+  // Dismissal discards the draft. Moving focus to the gear blurs a focused name
+  // input synchronously, and that blur would otherwise commit the half-typed
+  // name; the flag is set only around that one focus() call.
+  const discarding = useRef(false);
+
   function close() {
+    discarding.current = true;
+    setName(lastName.current);
     setOpen(false);
     gearRef.current?.focus();
+    discarding.current = false;
   }
 
   useLayoutEffect(() => {
@@ -130,6 +138,7 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
   }, [open]);
 
   function commitName() {
+    if (discarding.current) return;
     const next = nextRadioName(name, lastName.current);
     if (next) {
       lastName.current = next;

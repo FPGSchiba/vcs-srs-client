@@ -320,6 +320,45 @@ describe("the name draft", () => {
     expect(screen.getByRole("textbox")).toHaveValue("Fleet Common");
   });
 
+  // jsdom only blurs on dismissal if the input really has focus, so focus it.
+  const typeFocused = () => {
+    const input = screen.getByRole("textbox");
+    input.focus();
+    fireEvent.change(input, { target: { value: "half-typed" } });
+  };
+
+  it("discards the draft on Escape instead of committing it", () => {
+    const spy = stubUpdate();
+    show();
+    open();
+    typeFocused();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(spy).not.toHaveBeenCalled();
+    open();
+    expect(screen.getByRole("textbox")).toHaveValue("Fleet Common");
+  });
+
+  it("discards the draft on an outside pointerdown instead of committing it", () => {
+    const spy = stubUpdate();
+    show();
+    open();
+    typeFocused();
+    fireEvent.pointerDown(document.body);
+    expect(spy).not.toHaveBeenCalled();
+    open();
+    expect(screen.getByRole("textbox")).toHaveValue("Fleet Common");
+  });
+
+  it("still commits when focus moves elsewhere inside the drawer", () => {
+    const spy = stubUpdate();
+    show();
+    open();
+    typeFocused();
+    screen.getByRole("switch", { name: /enabled/i }).focus();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0].radios[0].name).toBe("half-typed");
+  });
+
   it("rejects an all-whitespace name in the drawer", () => {
     const spy = stubUpdate();
     show();
@@ -353,7 +392,6 @@ describe("events do not leak through the portal", () => {
     const drag = vi.fn();
     const click = vi.fn();
     render(
-      // eslint-disable-next-line jsx-a11y/no-static-element-interactions
       <div onDragStart={drag} onDragOver={drag} onDrop={drag} onClick={click}>
         <RadioCard radio={radio} allRadios={[radio]} muted={false} variantId="vertical" onVariantChange={() => {}} />
       </div>,
@@ -370,7 +408,7 @@ describe("events do not leak through the portal", () => {
   });
 });
 
-describe("state stays readable from the frame without the chips", () => {
+describe("state stays readable from the frame", () => {
   it("exposes disabled and intercom as data attributes", () => {
     show("narrow-h", { enabled: false, is_intercom: true });
     const frame = screen.getByRole("option");
