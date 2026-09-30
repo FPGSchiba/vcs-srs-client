@@ -5,6 +5,7 @@ import { Icon } from "../../shared/components/Icon";
 import { Toggle } from "../../shared/components/Toggle";
 import type { RadioDTO } from "../../shared/api/client";
 import { VARIANTS } from "./variants";
+import { nextRadioName } from "./radioName";
 
 interface Props {
   radio: RadioDTO;
@@ -21,14 +22,15 @@ const GAP = 4;
 const ESTIMATED_HEIGHT = 190;
 
 /** A compact label + control row. Adding a setting is one more of these. */
-function Row({ label, htmlFor, children }: { label: string; htmlFor?: string; children: ReactNode }) {
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  // A <label> wrapping its control: clicking the visible text operates it.
   return (
-    <div className="row acenter" style={{ justifyContent: "space-between", gap: 10, minHeight: 24 }}>
-      <label htmlFor={htmlFor} className="cap" style={{ color: "var(--tx-2)", fontSize: 10, letterSpacing: "0.1em" }}>
+    <label className="row acenter" style={{ justifyContent: "space-between", gap: 10, minHeight: 24 }}>
+      <span className="cap" style={{ color: "var(--tx-2)", fontSize: 10, letterSpacing: "0.1em" }}>
         {label}
-      </label>
+      </span>
       {children}
-    </div>
+    </label>
   );
 }
 
@@ -41,8 +43,20 @@ function Row({ label, htmlFor, children }: { label: string; htmlFor?: string; ch
  * above when it would leave the viewport) and CLOSED on scroll or resize
  * rather than tracked.
  *
- * Every click inside the drawer stops at the portal boundary: React bubbles
- * synthetic events through portals to the card's own select handler.
+ * Click and drag events inside the drawer stop at the portal boundary: React
+ * bubbles synthetic events through portals to the card's select handler and to
+ * RadioBlock's HTML5 reorder handlers.
+ *
+ * Choosing a variant closes the drawer first. A same-orientation change moves
+ * the gear out from under a drawer positioned once, and a different-orientation
+ * change swaps the shell component and unmounts this one outright. KNOWN
+ * LIMITATION: after an orientation change the gear belongs to a freshly mounted
+ * shell, so the focus return below may not land; it is on the manual checklist.
+ *
+ * Focus moves into the panel in an effect keyed on `pos`, i.e. after the
+ * visible render has committed: a browser will not focus a `visibility:hidden`
+ * element, and the first pass is hidden until it is measured. Escape is
+ * handled on the document so dismissal never depends on where focus is.
  */
 export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: Props) {
   const [open, setOpen] = useState(false);
@@ -52,9 +66,14 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
   const panelRef = useRef<HTMLDivElement>(null);
   const uid = useId();
   const titleId = `${uid}-title`;
-  const nameId = `${uid}-name`;
+  // What the server last accepted or we last sent: Enter then blur must not
+  // send the same name twice while the echo is still in flight.
+  const lastName = useRef(radio.name);
 
-  useEffect(() => setName(radio.name), [radio.name]);
+  useEffect(() => {
+    lastName.current = radio.name;
+    setName(radio.name);
+  }, [radio.name]);
 
   function close() {
     setOpen(false);
@@ -66,6 +85,8 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
       setPos(null);
       return;
     }
+    lastName.current = radio.name;
+    setName(radio.name); // never show an abandoned draft
     const g = gearRef.current?.getBoundingClientRect();
     if (!g) return;
     const h = panelRef.current?.offsetHeight || ESTIMATED_HEIGHT;
@@ -75,8 +96,11 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
     let top = g.bottom + GAP;
     if (top + h > vh - MARGIN) top = Math.max(MARGIN, g.top - GAP - h); // flip above
     setPos({ left, top });
-    panelRef.current?.focus();
   }, [open]);
+
+  useEffect(() => {
+    if (open && pos) panelRef.current?.focus();
+  }, [open, pos]);
 
   useEffect(() => {
     if (!open) return;
@@ -85,21 +109,35 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
       if (t && (panelRef.current?.contains(t) || gearRef.current?.contains(t))) return;
       close();
     };
-    const dismiss = () => setOpen(false);
+    const onScroll = (e: Event) => {
+      // Scrolling the drawer's own input (a long name) is not a reason to close.
+      if (e.target instanceof Node && panelRef.current?.contains(e.target)) return;
+      close();
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
     document.addEventListener("pointerdown", onDown);
-    window.addEventListener("scroll", dismiss, true);
-    window.addEventListener("resize", dismiss);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", close);
     return () => {
       document.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("scroll", dismiss, true);
-      window.removeEventListener("resize", dismiss);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", close);
     };
   }, [open]);
 
   function commitName() {
-    const next = name.trim();
-    if (next && next !== radio.name) onCommit({ ...radio, name: next });
-    else setName(radio.name);
+    const next = nextRadioName(name, lastName.current);
+    if (next) {
+      lastName.current = next;
+      setName(next);
+      onCommit({ ...radio, name: next });
+    } else {
+      setName(lastName.current);
+    }
   }
 
   const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
@@ -136,7 +174,6 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
           stop(e);
           setOpen((o) => !o);
         }}
-        onDoubleClick={stop}
         style={{
           display: "inline-flex",
           alignItems: "center",
@@ -162,21 +199,15 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
             tabIndex={-1}
             style={panelStyle}
             onClick={stop}
-            onDoubleClick={stop}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                e.stopPropagation();
-                close();
-              }
-            }}
+            onDragStart={stop}
+            onDragOver={stop}
+            onDrop={stop}
           >
             <div id={titleId} className="cap" style={{ color: "var(--tx-1)", fontSize: 10, letterSpacing: "0.14em" }}>
               Radio settings
             </div>
-            <Row label="Name" htmlFor={nameId}>
+            <Row label="Name">
               <input
-                id={nameId}
                 className="input"
                 style={{ height: 20, fontSize: 12, padding: "0 6px", width: 120 }}
                 value={name}
@@ -218,7 +249,10 @@ export function RadioSettings({ radio, variantId, onCommit, onVariantChange }: P
                     type="radio"
                     name={`${uid}-variant`}
                     checked={v.id === variantId}
-                    onChange={() => onVariantChange(v.id)}
+                    onChange={() => {
+                      close();
+                      onVariantChange(v.id);
+                    }}
                   />
                   {v.label}
                 </label>

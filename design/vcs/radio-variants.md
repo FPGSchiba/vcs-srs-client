@@ -160,7 +160,7 @@ Two deliberate choices:
 
 - **Intercom uses a different colour channel from selection**, so a selected
   intercom radio shows both without the two competing. This is also why the
-  narrow variants can drop the `ICOM` chip without losing the information — the
+  intercom needs no chip of its own on any variant without losing the information — the
   frame already carries it.
 - **Transmitting is visually distinct from receiving.** Your own transmission
   (`▲ you`, blue) must never look like someone else's (`▶ Dabble`, green).
@@ -221,7 +221,7 @@ glow. The styling for this interaction exists; only the wiring is missing.
 
 ## 7. What the narrow variants drop
 
-Only the `ON`/`INTERCOM` **chips** and the `MHZ` unit suffix.
+Only the `MHZ` unit suffix. (The `ON`/`INTERCOM` chips were replaced on every variant by a settings gear opening a drawer with name, variant, enabled and intercom; `shows.chips` no longer exists.)
 
 They keep the radio name, the talker name and the VU meter. Intercom survives via
 the frame (§4).
@@ -242,7 +242,6 @@ interface RadioVariant {
   lcdPx: number;
   ptt: { w: number | "fill"; h: number };
   shows: {
-    chips: "full" | "enabled-only" | "none";
     unit: boolean;
     statusDivider: boolean;
   };

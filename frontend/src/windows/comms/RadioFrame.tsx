@@ -25,7 +25,7 @@ interface Props extends RadioState {
  * channels (amber vs blue) so a selected intercom radio shows both — the blue
  * border from `selected`, the amber edge and brackets from `intercom` —
  * instead of one state hiding the other. This is what lets the narrow variants
- * drop the ICOM chip without losing the information.
+ * not show an intercom toggle without losing the information.
  *
  * Disabled drains everything: a radio that is off should not compete for
  * attention with one that is live.
@@ -51,7 +51,7 @@ const CORNERS = [
  * states read identically at 150px and at 360px — see
  * design/vcs/radio-variants.md §4.
  *
- * It is the card's selection stop (its controls — name, LCD, chips — are separate
+ * It is the card's selection stop (its controls — name, LCD, settings gear — are separate
  * tab stops) and carries role="option" against the
  * grid's role="listbox". A key bubbled from a child control (the name input,
  * the LCD) is ignored, so typing a space in the name does not re-select.

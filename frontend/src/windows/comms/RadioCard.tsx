@@ -5,6 +5,7 @@ import { LcdFreq } from "../../shared/components/LcdFreq";
 import { khzToMhz, mhzToKhz } from "../../shared/freq";
 import { variantById } from "./variants";
 import { SHELLS } from "./shells";
+import { nextRadioName } from "./radioName";
 import { RadioFrame } from "./RadioFrame";
 import { TalkerLine } from "./TalkerLine";
 import { PttIndicator } from "./PttIndicator";
@@ -121,7 +122,9 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
                 if (e.key === "Enter") {
                   e.preventDefault();
                   setEditing(false);
-                  commit({ ...radio, name });
+                  const next = nextRadioName(name, radio.name);
+                  if (next) commit({ ...radio, name: next });
+                  else setName(radio.name);
                 } else if (e.key === "Escape") {
                   e.preventDefault();
                   setName(radio.name);
