@@ -46,6 +46,34 @@ const CORNERS = [
 ] as const;
 
 /**
+ * Every kind of interactive descendant a click must NOT turn into a card
+ * selection. INVARIANT: this must list every interactive element kind that can
+ * appear inside a card; a kind missing here silently selects the card behind
+ * its control, with no failing test unless one is added for it.
+ */
+const CONTROLS =
+  "button,input,select,textarea,a[href],[tabindex],[contenteditable]," +
+  "[role=button],[role=checkbox],[role=spinbutton],[role=switch]";
+
+/**
+ * The frame's border colour. Precedence: a disabled radio is muted (dimmer blue
+ * when selected, --bd-1 otherwise); an enabled one is blue when selected or
+ * transmitting, --bd-2 otherwise.
+ */
+function frameBorder({
+  selected,
+  transmitting,
+  disabled,
+}: Readonly<{ selected: boolean; transmitting: boolean; disabled: boolean }>): string {
+  if (disabled) {
+    return selected
+      ? "color-mix(in srgb, var(--ac-primary) 45%, var(--bg-1))"
+      : "var(--bd-1)";
+  }
+  return selected || transmitting ? "var(--ac-primary)" : "var(--bd-2)";
+}
+
+/**
  * RadioFrame is the card's border, corner brackets, intercom edge, disabled
  * hatch and selection behaviour. Every variant renders inside one, so the five
  * states read identically at 150px and at 360px — see
@@ -66,26 +94,6 @@ const CORNERS = [
  * A click bubbling through a React portal (the settings panel) comes from
  * outside this element's DOM and is ignored too.
  */
-const CONTROLS = "button,input,select,textarea,[role=spinbutton],[role=switch]";
-
-/**
- * The frame's border colour. Precedence: a disabled radio is muted (dimmer blue
- * when selected, --bd-1 otherwise); an enabled one is blue when selected or
- * transmitting, --bd-2 otherwise.
- */
-function frameBorder({
-  selected,
-  transmitting,
-  disabled,
-}: Readonly<{ selected: boolean; transmitting: boolean; disabled: boolean }>): string {
-  if (disabled) {
-    return selected
-      ? "color-mix(in srgb, var(--ac-primary) 45%, var(--bg-1))"
-      : "var(--bd-1)";
-  }
-  return selected || transmitting ? "var(--ac-primary)" : "var(--bd-2)";
-}
-
 export function RadioFrame({
   w,
   h,
@@ -117,8 +125,17 @@ export function RadioFrame({
   function onClick(e: MouseEvent<HTMLDivElement>) {
     const target = e.target as Element;
     if (!e.currentTarget.contains(target)) return; // portalled panel
+    // Bounded to this frame: an interactive ancestor OUTSIDE the card must not
+    // suppress selection. The frame itself matches [tabindex], so it is
+    // excluded by identity.
     const control = target.closest(CONTROLS);
-    if (control && control !== e.currentTarget && !control.hasAttribute("data-card-select")) return;
+    if (
+      control &&
+      control !== e.currentTarget &&
+      e.currentTarget.contains(control) &&
+      !control.hasAttribute("data-card-select")
+    )
+      return;
     onSelect();
   }
 

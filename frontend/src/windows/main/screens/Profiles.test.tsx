@@ -222,11 +222,22 @@ describe("Profiles screen", () => {
     expect(screen.getByText("3 configured")).toBeInTheDocument();
   });
 
-  it("does not select the row when Enter is pressed on a nested button", () => {
+  it("does not select the row when Enter activates a nested button", async () => {
+    // userEvent drives the real activation path (Enter on a focused button
+    // fires a click that bubbles to the row); only the button's own
+    // stopPropagation keeps the row from being selected.
     seed([summary()]);
     render(<Profiles />);
-    fireEvent.keyDown(screen.getByRole("button", { name: /^load$/i }), { key: "Enter" });
+    screen.getByRole("button", { name: /^load$/i }).focus();
+    await userEvent.keyboard("{Enter}");
     expect(screen.queryByText("3 configured")).not.toBeInTheDocument();
+  });
+
+  it("focuses the new-profile-name input when SAVE CURRENT AS NEW opens it", () => {
+    seed([summary()]);
+    render(<Profiles />);
+    fireEvent.click(screen.getByRole("button", { name: /save current as new/i }));
+    expect(screen.getByLabelText("New profile name")).toHaveFocus();
   });
 
   it("stops following profile:state after unmount", async () => {
@@ -369,6 +380,10 @@ describe("Profiles rename", () => {
     fireEvent.click(screen.getByRole("button", { name: "Rename Fleet Op" }));
     return screen.getByLabelText("Profile name");
   };
+
+  it("focuses the rename input when it opens", () => {
+    expect(openRename()).toHaveFocus();
+  });
 
   it("does not rename to an empty or whitespace name", () => {
     const input = openRename();

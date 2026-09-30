@@ -142,6 +142,12 @@ describe("the name", () => {
     expect(screen.getByRole("textbox", { name: /radio name/i })).toHaveValue("Fleet Common");
   });
 
+  it("focuses the name input when the editor opens", () => {
+    show();
+    fireEvent.doubleClick(screen.getByText("Fleet Common"));
+    expect(screen.getByRole("textbox", { name: /radio name/i })).toHaveFocus();
+  });
+
   it("does not select the card when the name input is clicked", () => {
     const spy = vi.spyOn(api, "selectRadio").mockResolvedValue(undefined as never);
     show();

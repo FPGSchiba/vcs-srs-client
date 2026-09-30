@@ -145,6 +145,36 @@ describe("selection", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["a link", '<a href="#x">go</a>'],
+    ["a tabindex element", '<div tabindex="0">go</div>'],
+    ["a role=button element", '<div role="button">go</div>'],
+    ["a role=checkbox element", '<div role="checkbox">go</div>'],
+    ["a contenteditable element", '<div contenteditable="true">go</div>'],
+  ])("ignores a click on %s inside the card", (_label, html) => {
+    const onSelect = vi.fn();
+    const f = show({}, onSelect);
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    f.appendChild(host);
+    fireEvent.click(host.firstElementChild!);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("is not suppressed by an interactive ANCESTOR outside the card", () => {
+    cleanup();
+    const onSelect = vi.fn();
+    render(
+      <a href="#outer">
+        <RadioFrame {...base} w={280} h={166} label="R01 Fleet Common" onSelect={onSelect}>
+          <span>body</span>
+        </RadioFrame>
+      </a>,
+    );
+    fireEvent.click(screen.getByText("body"));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
   it("is still selectable when the radio is disabled", () => {
     // "Disabled" is the RADIO's enabled flag, not the card's interactivity:
     // a disabled radio must remain selectable and keep a visible selection.
