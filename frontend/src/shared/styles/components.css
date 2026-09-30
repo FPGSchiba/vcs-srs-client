@@ -1294,6 +1294,8 @@ input:focus, select:focus, textarea:focus {
 }
 .tbl tr:hover td { background: var(--bg-3); }
 
+.own { color: var(--ac-primary); }
+
 /* ========== Drag-and-drop / utility ========== */
 .row { display: flex; align-items: center; }
 .col { display: flex; flex-direction: column; }
