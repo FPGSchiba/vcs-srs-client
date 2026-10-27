@@ -180,3 +180,39 @@ func TestRouteVoiceAddressUpdate_EmptySecretPreservesStoredSecret(t *testing.T) 
 		t.Fatalf("expected event to be emitted, saw %v", em.names)
 	}
 }
+
+// SERVER_SETTINGS_CHANGED updates the store (which the voice session
+// observes) but emits no webview event: state:settings_update had no
+// subscriber anywhere and carried an empty payload.
+func TestServerSettingsChangedUpdatesStoreWithoutEvent(t *testing.T) {
+	st := state.New()
+	em := &capEmitter{}
+	route(&srspb.ServerUpdate{
+		Type: srspb.ServerUpdate_SERVER_SETTINGS_CHANGED,
+		Update: &srspb.ServerUpdate_SettingsUpdate{
+			SettingsUpdate: &srspb.ServerSettings{TestFrequencies: []float32{123.45}},
+		},
+	}, st, events.New(em))
+
+	if s := st.Settings(); s == nil || len(s.GetTestFrequencies()) != 1 || s.GetTestFrequencies()[0] != 123.45 {
+		t.Fatalf("store settings = %v; SERVER_SETTINGS_CHANGED must still update the store", s)
+	}
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	if len(em.names) != 0 {
+		t.Fatalf("SERVER_SETTINGS_CHANGED emitted %v, want no events", em.names)
+	}
+}
+
+// SERVER_ACTION has no client-side consumer and is ignored by design.
+func TestServerActionEmitsNothing(t *testing.T) {
+	st := state.New()
+	em := &capEmitter{}
+	route(&srspb.ServerUpdate{Type: srspb.ServerUpdate_SERVER_ACTION}, st, events.New(em))
+
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	if len(em.names) != 0 {
+		t.Fatalf("SERVER_ACTION emitted %v, want no events", em.names)
+	}
+}

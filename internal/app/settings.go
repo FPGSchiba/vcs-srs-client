@@ -70,6 +70,15 @@ type settingsBackend struct {
 	// SetSettings itself), so reusing it here would self-deadlock.
 	writeMu sync.Mutex
 
+	// saveMu orders config.toml writes. Lock order: writeMu -> saveMu -> mu.
+	// It is separate from writeMu because rememberDevice persists both with
+	// and without writeMu held, and separate from mu so the disk write
+	// itself never holds mu (the PTT path takes mu on every press). See
+	// persistCfg.
+	saveMu sync.Mutex
+	// save is a test seam for persistCfg; nil means config.Save.
+	save func(path string, c *config.Config) error
+
 	cfg     *config.Config
 	cfgPath string
 	kb      *keybinds.Store
@@ -109,9 +118,13 @@ type settingsBackend struct {
 	captureGen int64
 
 	// radioSig is the signature of the per-radio action set the last
-	// RefreshKeybinds saw, so a radio update that does not change the local
+	// keybind refresh observer saw, so a radio update that does not change the local
 	// client's radios does not re-emit keybinds:changed.
 	radioSig string
+	// refresh runs keybind refreshes off the store observer's goroutine; see
+	// keybindrefresh.go. Started by SetSettingsBackend, stopped in
+	// ServiceShutdown before the hotkey manager is closed.
+	refresh *keybindRefresher
 
 	// permInterval / permTimeout bound the re-check armed by
 	// RequestHotkeyPermission. Overridable through
@@ -160,7 +173,7 @@ type settingsBackend struct {
 // SetJoystickBackend wires the joystick manager. Optional -- when it is never
 // called, every joystick path degrades to "unsupported" and the keyboard
 // behaviour is exactly what it was before this feature existed.
-func (a *App) SetJoystickBackend(jm *joystick.Manager) {
+func SetJoystickBackend(a *App, jm *joystick.Manager) {
 	sb := a.settings
 	sb.mu.Lock()
 	sb.joy = jm
@@ -257,11 +270,7 @@ func (a *App) SetSettings(s SettingsDTO) error {
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
 
-	sb.mu.Lock()
-	// Shallow copy: Keybinds is a map and would be shared with the original,
-	// but this path never touches Keybinds, so that sharing is harmless.
-	next := *sb.cfg
-	next.General = config.General{
+	general := config.General{
 		StartMinimized:         s.StartMinimized,
 		MinimizeToTray:         s.MinimizeToTray,
 		ShowTransmitterName:    s.ShowTransmitterName,
@@ -269,20 +278,16 @@ func (a *App) SetSettings(s SettingsDTO) error {
 		PlayNotificationSounds: s.PlayNotificationSounds,
 		RadioSwitchAsPTT:       s.RadioSwitchAsPTT,
 	}
-	next.Audio = configAudioFromDTO(s.Audio)
-	audioCfg := next.Audio
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
+	audioCfg := configAudioFromDTO(s.Audio)
 	var mgr *audio.Manager
-	if saveErr == nil {
-		sb.cfg = &next
-		mgr = sb.audio
-	}
-	sb.mu.Unlock()
-	if saveErr != nil {
-		return fmt.Errorf("save settings: %w", saveErr)
+	if _, err := sb.persistCfg(cfgTxn{
+		mutate: func(c *config.Config) {
+			c.General = general
+			c.Audio = audioCfg
+		},
+		onCommit: func() { mgr = sb.audio },
+	}); err != nil {
+		return fmt.Errorf("save settings: %w", err)
 	}
 	// Push the newly-persisted audio config into the running engine. Done
 	// AFTER sb.mu.Unlock() -- Manager has its own independent locking, and
@@ -378,20 +383,20 @@ func (a *App) rememberDevice(id, name string) {
 		return
 	}
 	sb.deviceNames[id] = name
-	next := *sb.cfg
-	next.KeybindDevices = map[string]string{}
-	for k, v := range sb.cfg.KeybindDevices {
-		next.KeybindDevices[k] = v
-	}
-	next.KeybindDevices[id] = name
-	if sb.cfgPath != "" {
-		if err := config.Save(sb.cfgPath, &next); err == nil {
-			sb.cfg = &next
-		}
-	} else {
-		sb.cfg = &next
-	}
 	sb.mu.Unlock()
+	// No writeMu: this runs both under it (applyHotkeys/GetKeybinds) and
+	// outside it. persistCfg's saveMu orders the write against every other
+	// writer either way. The error is dropped by design (see above).
+	_, _ = sb.persistCfg(cfgTxn{mutate: func(c *config.Config) {
+		// A fresh map built from c's own entries on each run, so the
+		// commit-time re-apply keeps any entry that landed in between.
+		m := make(map[string]string, len(c.KeybindDevices)+1)
+		for k, v := range c.KeybindDevices {
+			m[k] = v
+		}
+		m[id] = name
+		c.KeybindDevices = m
+	}})
 }
 
 // AddTrigger validates the raw capture, binds it, persists, re-applies OS
@@ -1019,7 +1024,7 @@ func (a *App) emitHotkeyState() {
 	a.notifyHotkeyState(dto)
 }
 
-// Pressed implements hotkeys.Handler.
+// pressed handles a hotkey or joystick press edge (via hotkeyHandler.Pressed).
 //
 // The log line alongside the emit is deliberate and deliberately at Info: a
 // hotkey edge is a low-frequency, genuinely diagnostic event, and the log
@@ -1028,7 +1033,7 @@ func (a *App) emitHotkeyState() {
 // never the key, the keycode or the character. The OS layer sees every
 // keystroke on the machine (see internal/hotkeys/registrar_gohook.go), so
 // widening this to key identities would turn the log into a keylog.
-func (a *App) Pressed(actionID string) {
+func (a *App) pressed(actionID string) {
 	if a.settings == nil {
 		return
 	}
@@ -1040,9 +1045,9 @@ func (a *App) Pressed(actionID string) {
 	a.settings.em.HotkeyPressed(actionID)
 }
 
-// Released implements hotkeys.Handler. See Pressed for why this logs the
+// released handles a release edge (via hotkeyHandler.Released). See pressed for why this logs the
 // action ID and nothing about the key itself.
-func (a *App) Released(actionID string) {
+func (a *App) released(actionID string) {
 	if a.settings == nil {
 		return
 	}
@@ -1065,7 +1070,7 @@ func (a *App) isHold(actionID string) bool {
 	return sb.holds[actionID]
 }
 
-// ForceReleased implements hotkeys.StaleReleaser. The OS layer calls it when
+// forceReleased backs hotkeyHandler.ForceReleased (hotkeys.StaleReleaser). The OS layer calls it when
 // its stale-latch watchdog had to release a hotkey that never got its key-up.
 //
 // Warn, not Info: an ordinary edge is routine, but this one means a release
@@ -1080,7 +1085,7 @@ func (a *App) isHold(actionID string) bool {
 //
 // The matching Released arrives immediately after this and does the actual
 // work; this call only annotates it.
-func (a *App) ForceReleased(actionID string) {
+func (a *App) forceReleased(actionID string) {
 	if a.settings == nil {
 		return
 	}
@@ -1129,22 +1134,14 @@ func (a *App) labelFor(id keybinds.ActionID) string {
 // caller rolls back on error).
 func (a *App) persistKeybinds() error {
 	sb := a.settings
-	sb.mu.Lock()
-	next := *sb.cfg
-	next.Keybinds = map[string]config.KeybindValue{}
+	binds := map[string]config.KeybindValue{}
 	for id, list := range sb.kb.Snapshot() {
-		next.Keybinds[id] = config.KeybindValue(list)
+		binds[id] = config.KeybindValue(list)
 	}
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
-	if saveErr == nil {
-		sb.cfg = &next
-	}
-	sb.mu.Unlock()
-	if saveErr != nil {
-		return fmt.Errorf("save keybinds: %w", saveErr)
+	if _, err := sb.persistCfg(cfgTxn{
+		mutate: func(c *config.Config) { c.Keybinds = binds },
+	}); err != nil {
+		return fmt.Errorf("save keybinds: %w", err)
 	}
 	return nil
 }
@@ -1250,7 +1247,7 @@ func (a *App) applyHotkeys() {
 	// matching it.
 	_ = sb.hk.Apply(kbBinds) // failures surface via the event below
 	if jm != nil {
-		_ = jm.Apply(joyBinds)
+		jm.Apply(joyBinds)
 	}
 
 	sb.mu.Lock()
@@ -1261,40 +1258,6 @@ func (a *App) applyHotkeys() {
 	// recorded in Manager.Failed(), and never reached the UI, so the row
 	// rendered the chord as if it were live.
 	a.emitHotkeyState()
-}
-
-// RefreshKeybinds recomputes the joined action list against the CURRENT radio
-// set, re-applies OS hotkeys and emits keybinds:changed.
-//
-// Per-radio actions are derived from the local client's radios, which do not
-// exist at startup -- they arrive with SyncClient at connect time and change
-// again on every server-side radio update. Without this the per-radio panel
-// stayed absent and per-radio hotkeys stayed unregistered until the user
-// happened to change some unrelated keybind. Wired to state.Store's radio
-// observer in SetSettingsBackend.
-//
-// Radio updates for OTHER clients flow through the same observer, so this
-// short-circuits unless the LOCAL radio set actually changed; otherwise every
-// remote radio tweak would re-emit the whole keybind list.
-func (a *App) RefreshKeybinds() {
-	sb := a.settings
-	if sb == nil {
-		return // settings backend not wired (tests that only exercise session bindings)
-	}
-	sb.writeMu.Lock()
-	defer sb.writeMu.Unlock()
-
-	sig := radioSignature(a.radioRefs())
-	sb.mu.Lock()
-	unchanged := sb.radioSig == sig
-	sb.radioSig = sig
-	sb.mu.Unlock()
-	if unchanged {
-		return
-	}
-
-	a.applyHotkeys()
-	sb.em.KeybindsChanged(a.GetKeybinds())
 }
 
 // radioSignature renders the local radio set as a comparable string. Both the

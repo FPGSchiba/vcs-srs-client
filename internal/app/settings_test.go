@@ -226,7 +226,7 @@ func (deadRegistrar) UnregisterAll() {}
 // caller's goroutine, before it returns. That is exactly what
 // registrar_gohook.go does -- UnregisterAll -> dispatcher.clear() ->
 // drainLatchedLocked() -> h.Released(id) -- and it is the reason
-// hotkeys.Manager.Suspend()/Apply() can re-enter App.Released from inside the
+// hotkeys.Manager.Suspend()/Apply() can re-enter App.released from inside the
 // call.
 //
 // countingRegistrar, failingRegistrar and deadRegistrar all implement
@@ -307,8 +307,9 @@ func newTestAppWithPath(t *testing.T, cfgPath string) (*App, *recordingEmitter, 
 	cfg := config.Default()
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	hk := hotkeys.New(reg, a)
-	a.SetSettingsBackend(cfg, cfgPath, kb, hk, em)
+	hk := hotkeys.New(reg, HotkeyHandler(a))
+	SetSettingsBackend(a, cfg, cfgPath, kb, hk, em)
+	t.Cleanup(a.stopKeybindRefresh)
 	return a, em, reg
 }
 
@@ -320,7 +321,8 @@ func newTestAppOn(t *testing.T, st *state.Store, reg hotkeys.Registrar) (*App, *
 	a := NewForTest(st, nil, nil)
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(reg, a), em)
+	SetSettingsBackend(a, config.Default(), "", kb, hotkeys.New(reg, HotkeyHandler(a)), em)
+	t.Cleanup(a.stopKeybindRefresh)
 	return a, em
 }
 
@@ -404,7 +406,7 @@ func TestSetSettingsWithAWiredManagerDoesNotDeadlock(t *testing.T) {
 		PollInterval: time.Hour, VUInterval: time.Hour,
 	})
 	t.Cleanup(m.Stop)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
 	s := a.GetSettings()
 	s.Audio.Levels.Master = 0.42
@@ -575,9 +577,9 @@ func TestCaptureTimeoutTellsTheFrontendItsCaptureDied(t *testing.T) {
 	a, em, _ := newTestApp(t)
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	btn := trigger.JoyButton{Device: "stick-c3", Button: 5}
@@ -863,8 +865,8 @@ func TestGetHotkeyStateReportsPerActionFailures(t *testing.T) {
 	cfg := config.Default()
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	hk := hotkeys.New(reg, a)
-	a.SetSettingsBackend(cfg, "", kb, hk, em)
+	hk := hotkeys.New(reg, HotkeyHandler(a))
+	SetSettingsBackend(a, cfg, "", kb, hk, em)
 
 	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("SetKeybind: %v", err)
@@ -926,7 +928,7 @@ func TestPartialRegistrationFailureKeepsHotkeysRegistered(t *testing.T) {
 	a := NewForTest(state.New(), nil, nil)
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, a), em)
+	SetSettingsBackend(a, config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, HotkeyHandler(a)), em)
 
 	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("SetKeybind(global.ptt): %v", err)
@@ -959,7 +961,7 @@ func TestApplyHotkeysEmitsHotkeyState(t *testing.T) {
 	a := NewForTest(state.New(), nil, nil)
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, a), em)
+	SetSettingsBackend(a, config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, HotkeyHandler(a)), em)
 
 	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
 		t.Fatalf("SetKeybind: %v", err)
@@ -981,7 +983,7 @@ func TestSetSettingsBackendEmitsInitialHotkeyState(t *testing.T) {
 	// the shipped defaults when empty), so the binding has to go through cfg.
 	cfg := config.Default()
 	cfg.Keybinds = map[string]config.KeybindValue{"global.ptt": {"F1"}}
-	a.SetSettingsBackend(cfg, "", keybinds.New(), hotkeys.New(deadRegistrar{}, a), em)
+	SetSettingsBackend(a, cfg, "", keybinds.New(), hotkeys.New(deadRegistrar{}, HotkeyHandler(a)), em)
 
 	got := em.lastHotkeyState(t)
 	if got.Registered {
@@ -1002,7 +1004,7 @@ func TestResumeAfterCaptureEmitsHotkeyState(t *testing.T) {
 	a := NewForTest(state.New(), nil, nil)
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, a), em)
+	SetSettingsBackend(a, config.Default(), "", kb, hotkeys.New(&failingRegistrar{failActionID: "global.ptt"}, HotkeyHandler(a)), em)
 
 	token := a.BeginCapture("global.ptt")
 	if _, err := a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}); err != nil {
@@ -1037,6 +1039,7 @@ func TestRadiosArrivingAfterStartupProducePerRadioRows(t *testing.T) {
 		{Id: 2, Name: "FLEET"},
 	}})
 	st.SetSelf("me", &srspb.ClientInfo{Name: "me"})
+	waitKeybindRefreshIdle(t, a) // the refresh is asynchronous (Phase 6.9 CL2)
 
 	rows := perRadioRows(a.GetKeybinds())
 	if len(rows) != 4 { // one PTT + one Select per radio
@@ -1055,13 +1058,14 @@ func TestUnrelatedRadioUpdateDoesNotReEmit(t *testing.T) {
 	st.SetSelf("me", &srspb.ClientInfo{Name: "me"})
 	st.SetRadios("me", &srspb.RadioInfo{Radios: []*srspb.Radio{{Id: 1, Name: "GUARD"}}})
 
+	waitKeybindRefreshIdle(t, a)
 	before := em.count(events.EventKeybindsChanged)
 	st.SetRadios("someone-else", &srspb.RadioInfo{Radios: []*srspb.Radio{{Id: 9, Name: "THEIRS"}}})
+	waitKeybindRefreshIdle(t, a)
 
 	if got := em.count(events.EventKeybindsChanged); got != before {
 		t.Errorf("keybinds:changed fired %d times for another client's radios, want %d", got-before, 0)
 	}
-	_ = a
 }
 
 // perRadioRows filters a keybind list down to the per-radio category.
@@ -1081,7 +1085,7 @@ func perRadioRows(rows []KeybindDTO) []string {
 func TestBackendUnavailableReportsHotkeysUnavailable(t *testing.T) {
 	em := &recordingEmitter{}
 	a := NewForTest(state.New(), nil, nil)
-	a.SetSettingsBackend(config.Default(), "", keybinds.New(), hotkeys.New(deadRegistrar{}, a), em)
+	SetSettingsBackend(a, config.Default(), "", keybinds.New(), hotkeys.New(deadRegistrar{}, HotkeyHandler(a)), em)
 
 	got := a.GetHotkeyState()
 	if got.Registered {
@@ -1108,8 +1112,8 @@ func TestHotkeyEdgesAreLogged(t *testing.T) {
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -1137,8 +1141,8 @@ func TestHotkeyEdgesWithoutBackendDoNotPanic(t *testing.T) {
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
 
 	if buf.Len() != 0 {
 		t.Errorf("no backend wired, so nothing should be logged; got %q", buf.String())
@@ -1156,7 +1160,7 @@ func TestForceReleasedLogsAtWarn(t *testing.T) {
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	a.ForceReleased("global.ptt")
+	a.forceReleased("global.ptt")
 
 	out := strings.TrimSpace(buf.String())
 	if !strings.Contains(out, "level=WARN") {
@@ -1172,11 +1176,12 @@ func TestForceReleasedLogsAtWarn(t *testing.T) {
 
 // TestForceReleasedIsAStaleReleaser: the OS layer only calls this through the
 // optional hotkeys.StaleReleaser interface, so App failing to satisfy it would
-// silently disable the Warn with nothing failing to compile.
+// silently disable the Warn with nothing failing to compile. The handler
+// main.go passes to hotkeys.New is HotkeyHandler(gui), not *App itself.
 func TestForceReleasedIsAStaleReleaser(t *testing.T) {
 	a, _, _ := newTestApp(t)
-	if _, ok := any(a).(hotkeys.StaleReleaser); !ok {
-		t.Fatal("*App must implement hotkeys.StaleReleaser, or forced releases " +
+	if _, ok := any(HotkeyHandler(a)).(hotkeys.StaleReleaser); !ok {
+		t.Fatal("HotkeyHandler(a) must implement hotkeys.StaleReleaser, or forced releases " +
 			"are never annotated in the log")
 	}
 }
@@ -1188,7 +1193,7 @@ func TestForceReleasedWithoutBackendDoesNotPanic(t *testing.T) {
 	var buf bytes.Buffer
 	a.logger = slog.New(slog.NewTextHandler(&buf, nil))
 
-	a.ForceReleased("global.ptt")
+	a.forceReleased("global.ptt")
 
 	if buf.Len() != 0 {
 		t.Errorf("no backend wired, so nothing should be logged; got %q", buf.String())
@@ -1241,13 +1246,13 @@ func TestRemoveTriggerOutOfRangeErrors(t *testing.T) {
 }
 
 func TestHoldActionHeldByTwoSourcesEmitsOneEdgePair(t *testing.T) {
-	// The PTT-cut defect, end to end through App.Pressed/Released.
+	// The PTT-cut defect, end to end through the hotkey handler.
 	a, em, _ := newTestApp(t)
 	a.AddTrigger("global.ptt", CaptureDTO{Code: "F1"}) // global.ptt is KindHold
 
-	a.Pressed("global.ptt")  // keyboard
-	a.Pressed("global.ptt")  // joystick
-	a.Released("global.ptt") // keyboard lets go; joystick still held
+	a.pressed("global.ptt")  // keyboard
+	a.pressed("global.ptt")  // joystick
+	a.released("global.ptt") // keyboard lets go; joystick still held
 
 	if n := em.count(events.EventHotkeyPressed); n != 1 {
 		t.Errorf("HotkeyPressed emitted %d times, want 1", n)
@@ -1256,7 +1261,7 @@ func TestHoldActionHeldByTwoSourcesEmitsOneEdgePair(t *testing.T) {
 		t.Errorf("HotkeyReleased emitted while the joystick still held it (%d times)", n)
 	}
 
-	a.Released("global.ptt") // joystick lets go
+	a.released("global.ptt") // joystick lets go
 	if n := em.count(events.EventHotkeyReleased); n != 1 {
 		t.Errorf("HotkeyReleased emitted %d times, want 1", n)
 	}
@@ -1266,8 +1271,8 @@ func TestPressKindActionIsNotRefcounted(t *testing.T) {
 	// global.mute_toggle is KindPress and never receives a Released, so
 	// refcounting it would silence every press after the first.
 	a, em, _ := newTestApp(t)
-	a.Pressed("global.mute_toggle")
-	a.Pressed("global.mute_toggle")
+	a.pressed("global.mute_toggle")
+	a.pressed("global.mute_toggle")
 	if n := em.count(events.EventHotkeyPressed); n != 2 {
 		t.Errorf("press-kind action emitted %d times, want 2", n)
 	}
@@ -1276,8 +1281,8 @@ func TestPressKindActionIsNotRefcounted(t *testing.T) {
 func TestBeginCaptureSuspendsBothManagers(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	joySrc := newFakeJoySource()
-	jm := joystick.New(joySrc, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	a.SetJoystickBackend(jm)
+	jm := joystick.New(joySrc, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	SetJoystickBackend(a, jm)
 
 	token := a.BeginCapture("global.ptt")
 	if token == 0 {
@@ -1318,9 +1323,9 @@ func TestApplyHotkeysDuringRebindDoesNotSwallowARelease(t *testing.T) {
 	a, em, _ := newTestApp(t)
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	btn := trigger.JoyButton{Device: "stick-c3", Button: 0}
@@ -1361,9 +1366,9 @@ func TestApplyHotkeysDuringRebindDoesNotStrandAHeldAction(t *testing.T) {
 	a, em, _ := newTestApp(t)
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	btn := trigger.JoyButton{Device: "stick-c3", Button: 0}
@@ -1401,7 +1406,7 @@ func TestApplyHotkeysDuringRebindDoesNotStrandAHeldAction(t *testing.T) {
 // BeginCapture used to call sb.hk.Suspend() while holding sb.mu. Suspend
 // reaches registrar.UnregisterAll(), which -- in the REAL registrar, and in
 // latchingRegistrar above -- synchronously calls Handler.Released for every
-// latched hold action. App.Released asks isHold(), which takes sb.mu. sb.mu
+// latched hold action. App.released asks isHold(), which takes sb.mu. sb.mu
 // is not reentrant, so the whole app hung on the caller's goroutine with the
 // microphone still open. Go's deadlock detector never fires for it because
 // the other goroutines stay runnable.
@@ -1416,7 +1421,7 @@ func TestBeginCaptureDoesNotDeadlockWhileAHotkeyIsHeld(t *testing.T) {
 	reg := newLatchingRegistrar()
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(reg, a), em)
+	SetSettingsBackend(a, config.Default(), "", kb, hotkeys.New(reg, HotkeyHandler(a)), em)
 
 	c, err := chord.FromCode("F8", false, false, false, false)
 	if err != nil {
@@ -1487,9 +1492,9 @@ func TestApplyHotkeysBalancesEdgesWhenAPerRadioActionDisappears(t *testing.T) {
 	st.SetSelf("me", &srspb.ClientInfo{Name: "me"})
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	btn := trigger.JoyButton{Device: "stick-c3", Button: 0}
@@ -1563,8 +1568,8 @@ func TestJoystickStateDistinguishesDeniedFromUnsupported(t *testing.T) {
 
 	t.Run("denied", func(t *testing.T) {
 		a, _, _ := newTestApp(t)
-		jm := joystick.New(deniedJoySource{}, a, discard)
-		a.SetJoystickBackend(jm)
+		jm := joystick.New(deniedJoySource{}, HotkeyHandler(a), discard)
+		SetJoystickBackend(a, jm)
 		defer jm.Close()
 
 		got := a.GetJoystickState()
@@ -1582,8 +1587,8 @@ func TestJoystickStateDistinguishesDeniedFromUnsupported(t *testing.T) {
 
 	t.Run("unsupported", func(t *testing.T) {
 		a, _, _ := newTestApp(t)
-		jm := joystick.New(unsupportedJoySource{}, a, discard)
-		a.SetJoystickBackend(jm)
+		jm := joystick.New(unsupportedJoySource{}, HotkeyHandler(a), discard)
+		SetJoystickBackend(a, jm)
 		defer jm.Close()
 
 		got := a.GetJoystickState()
@@ -1633,9 +1638,9 @@ func TestJoystickCaptureBindsEndToEnd(t *testing.T) {
 	a, _, _ := newTestApp(t)
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	if token := a.BeginCapture("global.ptt"); token == 0 {
@@ -1775,9 +1780,9 @@ func TestJoystickCaptureReportsTheSteal(t *testing.T) {
 	a, em, _ := newTestApp(t)
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	btn := trigger.JoyButton{Device: "stick-c3", Button: 4}
@@ -1831,10 +1836,10 @@ func TestJoystickStateIsPushedWhenDevicesChange(t *testing.T) {
 	a, em, _ := newTestApp(t)
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
 	jm.RediscoverInterval = 5 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	waitFor(t, 2*time.Second, "joystick:state was never emitted for the first enumeration",
@@ -1907,8 +1912,8 @@ func TestJoystickStateDevicesMarshalsAsAnArrayNeverNull(t *testing.T) {
 
 	t.Run("backend with no attached device", func(t *testing.T) {
 		a, _, _ := newTestApp(t)
-		jm := joystick.New(emptyJoySource{}, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		a.SetJoystickBackend(jm)
+		jm := joystick.New(emptyJoySource{}, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
+		SetJoystickBackend(a, jm)
 		defer jm.Close()
 		assertArray(t, a.GetJoystickState())
 	})
@@ -1961,9 +1966,9 @@ func TestJoystickCaptureBoundButtonThenFires(t *testing.T) {
 	a, em, _ := newTestApp(t)
 
 	src := newControllableJoySource("stick-c3")
-	jm := joystick.New(src, a, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	jm := joystick.New(src, HotkeyHandler(a), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	jm.PollInterval = 2 * time.Millisecond
-	a.SetJoystickBackend(jm)
+	SetJoystickBackend(a, jm)
 	defer jm.Close()
 
 	token := a.BeginCapture("global.ptt")

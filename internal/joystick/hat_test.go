@@ -163,11 +163,9 @@ const povCentered = uint32(0xFFFFFFFF)
 // fired with the hat still physically deflected. The mic closed mid-word.
 func TestHatDiagonalDoesNotCutAPTTBoundToTheCardinal(t *testing.T) {
 	m, src, rec := testManager(t)
-	if err := m.Apply(map[string][]Binding{
+	m.Apply(map[string][]Binding{
 		"global.ptt": {holdBind(trigger.HatButton(0, 0))},
-	}); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	})
 
 	holdHatAt(src, 0) // straight up
 	m.tick()
@@ -188,11 +186,9 @@ func TestHatDiagonalDoesNotCutAPTTBoundToTheCardinal(t *testing.T) {
 // diagonal its precise trigger.
 func TestHatDiagonalBindingStillFires(t *testing.T) {
 	m, src, rec := testManager(t)
-	if err := m.Apply(map[string][]Binding{
+	m.Apply(map[string][]Binding{
 		"global.ptt": {holdBind(trigger.HatButton(0, 1))}, // hat1.up_right
-	}); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	})
 
 	holdHatAt(src, 0) // straight up must NOT fire an up_right binding
 	m.tick()

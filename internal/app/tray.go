@@ -12,11 +12,11 @@ import (
 const MainWindowName = "main"
 
 // SetupTray creates the system tray icon and menu. Call after the main window
-// exists. If tray creation fails, a.tray is left nil so TrayAvailable
+// exists. If tray creation fails, a.tray is left nil so trayAvailable
 // reports false and close-to-tray is force-disabled (spec R13) -- otherwise
 // a silent tray failure would leave the user with a hidden window and no way
 // to bring it back.
-func (a *App) SetupTray(icon []byte) {
+func SetupTray(a *App, icon []byte) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.logger.Error("system tray setup failed; close-to-tray disabled", "panic", r)
@@ -39,10 +39,10 @@ func (a *App) SetupTray(icon []byte) {
 	a.tray = tray
 }
 
-// TrayAvailable reports whether the system tray was created successfully.
+// trayAvailable reports whether the system tray was created successfully.
 // Used to gate close-to-tray: a failed tray must never trap the user with a
 // hidden window and no way back (spec R13).
-func (a *App) TrayAvailable() bool {
+func (a *App) trayAvailable() bool {
 	return a.tray != nil
 }
 
@@ -77,8 +77,8 @@ func (a *App) toggleMainWindow() {
 // AND the tray was created successfully -- if the tray failed, closing must
 // behave normally or the user would be stuck with no way to bring the window
 // back (spec R13).
-func (a *App) OnMainWindowClose() (preventClose bool) {
-	return a.GetSettings().MinimizeToTray && a.TrayAvailable()
+func OnMainWindowClose(a *App) (preventClose bool) {
+	return a.GetSettings().MinimizeToTray && a.trayAvailable()
 }
 
 // quit terminates the app. Wired to the tray menu's Quit item -- it must

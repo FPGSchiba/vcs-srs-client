@@ -1,6 +1,7 @@
 package windowstate_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -29,5 +30,24 @@ func TestLoad_MissingFileReturnsEmpty(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Fatalf("expected empty map, got %+v", out)
+	}
+}
+
+// A failed rename must not leave windows.json.tmp behind: the next save
+// would overwrite it anyway, but a stray .tmp next to the real file is
+// exactly the kind of debris that makes a user doubt which one is current.
+func TestSaveRemovesTmpOnRenameFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "windows.json")
+	// A non-empty directory at the target path makes the rename fail on
+	// every OS while the tmp write itself still succeeds.
+	if err := os.MkdirAll(filepath.Join(path, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := windowstate.Save(path, map[string]windowstate.Geometry{"comms": {W: 1, H: 1}})
+	if err == nil {
+		t.Fatal("Save onto a non-empty directory succeeded; want an error")
+	}
+	if _, statErr := os.Stat(path + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatalf("windows.json.tmp left behind after a failed save (stat err = %v)", statErr)
 	}
 }

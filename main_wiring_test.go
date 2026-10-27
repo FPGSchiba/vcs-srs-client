@@ -123,7 +123,7 @@ func TestAudioBackendIsWired(t *testing.T) {
 	for _, want := range []string{
 		"audio.NewMalgoBackend()",
 		"audio.NewManager(",
-		"gui.SetAudioBackend(",
+		"app.SetAudioBackend(gui, ",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("main.go does not call %s -- the audio subsystem would be inert", want)
@@ -270,7 +270,7 @@ func TestNotifierStopTimersIsRegisteredBeforeTheSources(t *testing.T) {
 func TestVoiceBridgeIsWiredAsBothSinkAndSource(t *testing.T) {
 	text := readMainGo(t)
 	for _, want := range []string{
-		"gui.VoiceBridge()",
+		"app.VoiceBridge(gui)",
 		"am.AddSink(",
 		"am.SetSource(",
 	} {
@@ -282,7 +282,7 @@ func TestVoiceBridgeIsWiredAsBothSinkAndSource(t *testing.T) {
 
 // TestSFXDedup_SkipsExactRepeat is F4's regression test (Phase 6
 // whole-branch review): monitor.SetControlState dedupes against the state it
-// already holds, but gui.PlayConnectionSFX does not, and a known, accepted
+// already holds, but app.PlayConnectionSFX does not, and a known, accepted
 // duplicate `disconnected` (Disconnect firing after the probe detector has
 // already declared loss) used to reach PlayConnectionSFX twice.
 func TestSFXDedup_SkipsExactRepeat(t *testing.T) {
@@ -466,8 +466,8 @@ func TestHistoryIsWired(t *testing.T) {
 			t.Errorf("main.go does not contain %s -- the transmission log would be inert", want)
 		}
 	}
-	if n := strings.Count(text, "gui.SeedBuiltinProfiles()"); n != 1 {
-		t.Errorf("main.go calls gui.SeedBuiltinProfiles() %d times, want exactly 1 (a second call double-seeds)", n)
+	if n := strings.Count(text, "app.SeedBuiltinProfiles(gui)"); n != 1 {
+		t.Errorf("main.go calls app.SeedBuiltinProfiles(gui) %d times, want exactly 1 (a second call double-seeds)", n)
 	}
 
 	voiceSrc, err := os.ReadFile("internal/app/voice.go")
@@ -479,5 +479,28 @@ func TestHistoryIsWired(t *testing.T) {
 		if n := strings.Count(vtext, want); n != 1 {
 			t.Errorf("voice.go has %d occurrences of %s in voiceDialOptions, want exactly 1", n, want)
 		}
+	}
+}
+
+// TestMainCallsWiringSeamsNotMethods pins main.go to the package-level
+// wiring seams. Every exported method on *App is bound into the webview by
+// application.NewService(gui), so main-only wiring (and the hotkey/joystick
+// handler, which would let a script key PTT) must not be reachable as a
+// method. internal/app's TestBoundSurfaceIsTheFrontendAPI pins the method
+// set itself; this one catches a call site regressing.
+func TestMainCallsWiringSeamsNotMethods(t *testing.T) {
+	text := readMainGo(t)
+	for _, banned := range []string{
+		"gui.SetApp(", "gui.SetBackend(", "gui.SetConnHealth(", "gui.SetSettingsBackend(",
+		"gui.SetAudioBackend(", "gui.SetJoystickBackend(", "gui.SetupTray(",
+		"gui.SeedBuiltinProfiles(", "gui.OnMainWindowClose(", "gui.PlayConnectionSFX(",
+		"gui.VoiceBridge(", "gui.VoiceRTT", "gui.Store(", "hotkeys.NewOSRegistrar(), gui)",
+	} {
+		if strings.Contains(text, banned) {
+			t.Errorf("main.go uses %s -- use the package-level app.X(gui, ...) seam instead", banned)
+		}
+	}
+	if n := strings.Count(text, "app.HotkeyHandler(gui)"); n != 2 {
+		t.Errorf("main.go passes app.HotkeyHandler(gui) %d times, want 2 (hotkeys.New and joystick.New)", n)
 	}
 }

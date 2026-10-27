@@ -131,7 +131,7 @@ func newPermTestApp(t *testing.T, perm *fakePermission) (*App, *recordingEmitter
 	a.setPermissionChecker(perm)
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(reg, a), em)
+	SetSettingsBackend(a, config.Default(), "", kb, hotkeys.New(reg, HotkeyHandler(a)), em)
 	a.setHotkeyPermissionPoll(time.Millisecond, 10*time.Second)
 	return a, em, reg
 }

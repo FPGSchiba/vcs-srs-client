@@ -69,7 +69,7 @@ func TestConnect_SetsHealthMonitorServer(t *testing.T) {
 	fs := &fakeSession{}
 	a := app.NewForTest(state.New(), fs, &fakeWindows{})
 	m := connhealth.New(connhealth.Options{})
-	a.SetConnHealth(m)
+	app.SetConnHealth(a, m)
 
 	if err := a.Connect("192.168.1.50:5002", "n", "p", "u"); err != nil {
 		t.Fatalf("Connect: %v", err)

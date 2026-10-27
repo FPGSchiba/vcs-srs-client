@@ -1,6 +1,8 @@
 package app
 
 import (
+	"log/slog"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +18,12 @@ type Registry struct {
 	factory WindowFactory
 	path    string
 	emitter events.Emitter // may be nil (e.g. in tests)
+
+	// saveMu orders windows.json writes (lock order saveMu -> mu) so the
+	// disk always ends with the latest geometry, while mu is NOT held across
+	// the write. saveFn is a test seam; nil means windowstate.Save.
+	saveMu sync.Mutex
+	saveFn func(path string, m map[string]windowstate.Geometry) error
 
 	mu   sync.Mutex
 	open map[string]WindowHandle
@@ -71,9 +79,9 @@ func (r *Registry) settleBounds(id string, h WindowHandle) {
 		return
 	}
 	r.geom[id] = g
-	_ = windowstate.Save(r.path, r.geom)
 	obs := r.observer
 	r.mu.Unlock()
+	r.persist()
 	if obs != nil {
 		obs(id, g)
 	}
@@ -132,8 +140,8 @@ func (r *Registry) Close(id string) {
 	h.Close()
 	r.mu.Lock()
 	r.geom[id] = g
-	_ = windowstate.Save(r.path, r.geom)
 	r.mu.Unlock()
+	r.persist()
 	r.broadcast()
 }
 
@@ -178,9 +186,28 @@ func (r *Registry) SetGeometry(id string, g windowstate.Geometry) {
 	if open {
 		h.SetBounds(g)
 	}
+	r.persist()
+}
+
+// persist writes the current geometry map to windows.json. The map is
+// cloned under r.mu and written with r.mu released, so window events are not
+// stalled behind disk I/O; saveMu (taken first) serialises writers so the
+// clone taken last is also the one written last. A failure is logged, not
+// returned: geometry stays correct in memory and the next save retries.
+// Callers must NOT hold r.mu.
+func (r *Registry) persist() {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
 	r.mu.Lock()
-	_ = windowstate.Save(r.path, r.geom)
+	snap := maps.Clone(r.geom)
 	r.mu.Unlock()
+	save := r.saveFn
+	if save == nil {
+		save = windowstate.Save
+	}
+	if err := save(r.path, snap); err != nil {
+		slog.Default().Warn("save windows.json failed", "path", r.path, "err", err)
+	}
 }
 
 func (r *Registry) openIDsLocked() []string {

@@ -39,10 +39,14 @@ func Save(path string, m map[string]Geometry) error {
 		return fmt.Errorf("marshal windows.json: %w", err)
 	}
 	tmp := path + ".tmp"
+	// The tmp file is removed best-effort on either failure so a failed save
+	// leaves no windows.json.tmp debris next to the real file.
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write windows.json: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename windows.json: %w", err)
 	}
 	return nil

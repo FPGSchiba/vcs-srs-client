@@ -249,7 +249,7 @@ func (m *Manager) Devices() []Device {
 // Apply replaces the desired binding set. Any action that was held and is no
 // longer bound to what is currently held is released first, so the edge
 // balance the app-level refcount depends on is never broken by a rebind.
-func (m *Manager) Apply(binds map[string][]Binding) error {
+func (m *Manager) Apply(binds map[string][]Binding) {
 	m.notifyMu.Lock()
 	defer m.notifyMu.Unlock()
 
@@ -274,7 +274,6 @@ func (m *Manager) Apply(binds map[string][]Binding) error {
 	m.mu.Unlock()
 
 	m.emitReleases(release)
-	return nil
 }
 
 // Suspend stops driving handlers and releases anything held, so a capture
@@ -542,7 +541,7 @@ func (m *Manager) tick() {
 // so there is no edge to emit for them here -- and clearing them anyway made
 // the next tick see a button that is still physically down as newly active
 // and fire a SECOND Pressed with no Released between. Apply is not rare (any
-// server radio-list update reaches it via App.RefreshKeybinds), so a
+// server radio-list update reaches it via the app keybind refresh), so a
 // mute-toggle held on a HOTAS button toggled twice and netted a no-op.
 //
 // Latching them is the simpler of the two available fixes -- the alternative,

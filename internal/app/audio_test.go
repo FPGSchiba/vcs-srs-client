@@ -27,13 +27,13 @@ func newTestAudioManager(t *testing.T) *audio.Manager {
 func TestMuteToggleActionFlipsManagerMute(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
-	a.Pressed("global.mute_toggle")
+	a.pressed("global.mute_toggle")
 	if !m.Muted() {
 		t.Fatal("mute_toggle did not mute")
 	}
-	a.Pressed("global.mute_toggle")
+	a.pressed("global.mute_toggle")
 	if m.Muted() {
 		t.Fatal("mute_toggle did not unmute on the second press")
 	}
@@ -44,13 +44,13 @@ func TestMuteToggleActionFlipsManagerMute(t *testing.T) {
 func TestPushToMuteHoldsMuteOnlyWhileHeld(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
-	a.Pressed("global.push_to_mute")
+	a.pressed("global.push_to_mute")
 	if !m.Muted() {
 		t.Fatal("push_to_mute did not mute on press")
 	}
-	a.Released("global.push_to_mute")
+	a.released("global.push_to_mute")
 	if m.Muted() {
 		t.Fatal("push_to_mute stayed muted after release")
 	}
@@ -63,15 +63,15 @@ func TestPushToMuteHoldsMuteOnlyWhileHeld(t *testing.T) {
 func TestMuteToggleActionEmitsMicMutedEvent(t *testing.T) {
 	a, em, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
-	a.Pressed("global.mute_toggle")
+	a.pressed("global.mute_toggle")
 	payloads := em.payloadsFor(events.EventAudioMicMuted)
 	if len(payloads) != 1 || payloads[0] != true {
 		t.Fatalf("after first mute_toggle press, audio:mic_muted payloads = %v, want [true]", payloads)
 	}
 
-	a.Pressed("global.mute_toggle")
+	a.pressed("global.mute_toggle")
 	payloads = em.payloadsFor(events.EventAudioMicMuted)
 	if len(payloads) != 2 || payloads[1] != false {
 		t.Fatalf("after second mute_toggle press, audio:mic_muted payloads = %v, want [true false]", payloads)
@@ -84,10 +84,10 @@ func TestMuteToggleActionEmitsMicMutedEvent(t *testing.T) {
 func TestPushToMuteEmitsMicMutedEventOnPressAndRelease(t *testing.T) {
 	a, em, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
-	a.Pressed("global.push_to_mute")
-	a.Released("global.push_to_mute")
+	a.pressed("global.push_to_mute")
+	a.released("global.push_to_mute")
 
 	payloads := em.payloadsFor(events.EventAudioMicMuted)
 	if len(payloads) != 2 || payloads[0] != true || payloads[1] != false {
@@ -101,10 +101,10 @@ func TestPushToMuteEmitsMicMutedEventOnPressAndRelease(t *testing.T) {
 func TestPTTActionDoesNotEmitMicMutedEvent(t *testing.T) {
 	a, em, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
 
 	if n := em.count(events.EventAudioMicMuted); n != 0 {
 		t.Fatalf("audio:mic_muted emitted %d times for global.ptt, want 0", n)
@@ -115,13 +115,13 @@ func TestPTTActionDoesNotEmitMicMutedEvent(t *testing.T) {
 func TestPTTActionReachesTheManager(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
-	a.Pressed("global.ptt")
+	a.pressed("global.ptt")
 	if !m.PTT() {
 		t.Fatal("global.ptt did not reach the manager")
 	}
-	a.Released("global.ptt")
+	a.released("global.ptt")
 	if m.PTT() {
 		t.Fatal("global.ptt release did not reach the manager")
 	}
@@ -132,13 +132,13 @@ func TestPTTActionReachesTheManager(t *testing.T) {
 func TestRadioPTTActionReachesTheManager(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
-	a.Pressed("radio.1.ptt")
+	a.pressed("radio.1.ptt")
 	if !m.PTT() {
 		t.Fatal("radio.1.ptt did not reach the manager")
 	}
-	a.Released("radio.1.ptt")
+	a.released("radio.1.ptt")
 	if m.PTT() {
 		t.Fatal("radio.1.ptt release did not reach the manager")
 	}
@@ -151,13 +151,13 @@ func TestRadioPTTActionReachesTheManager(t *testing.T) {
 func TestAudioActionsAreNoOpsWithoutABackend(t *testing.T) {
 	a, _, _ := newTestApp(t)
 
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
-	a.Pressed("global.push_to_mute")
-	a.Released("global.push_to_mute")
-	a.Pressed("global.mute_toggle")
-	a.Pressed("radio.1.ptt")
-	a.Released("radio.1.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
+	a.pressed("global.push_to_mute")
+	a.released("global.push_to_mute")
+	a.pressed("global.mute_toggle")
+	a.pressed("radio.1.ptt")
+	a.released("radio.1.ptt")
 	// Reaching here without a panic is the assertion; there is no manager
 	// to observe state on.
 
@@ -193,7 +193,7 @@ func TestGetAudioDevicesAndStateReflectTheManager(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(m.Stop)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
 	// Each list is the System Default sentinel followed by the real
 	// enumeration -- see AudioDeviceDTOs, and the dedicated test below.
@@ -217,7 +217,7 @@ func TestGetAudioDevicesAndStateReflectTheManager(t *testing.T) {
 func TestPreviewEffectReachesTheManager(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
 	if err := a.PreviewEffect("tx_start"); err != nil {
 		t.Fatalf("PreviewEffect: %v", err)
@@ -233,7 +233,7 @@ func TestPreviewEffectReachesTheManager(t *testing.T) {
 func TestGetSettingsSourcesEffectCatalogFromTheManifest(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
 	settingsDTO := a.GetSettings().Audio
 	got := settingsDTO.Effects
@@ -425,7 +425,7 @@ func TestGetAudioDevicesLeadsWithSystemDefault(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(m.Stop)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
 	devs := a.GetAudioDevices()
 	for _, tc := range []struct {
@@ -481,7 +481,7 @@ func TestGetAudioStateCarriesDeviceAndSubstitution(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(m.Stop)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 
 	st := a.GetAudioState()
 	if st.InputDevice != "mic-1" {
@@ -529,7 +529,7 @@ func TestSetAudioBackendAppliesThePersistedDeviceBeforeStart(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	// main.go's order: configure, THEN start.
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

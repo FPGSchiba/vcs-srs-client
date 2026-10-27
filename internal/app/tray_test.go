@@ -66,7 +66,7 @@ func TestOnMainWindowClose_TruthTable(t *testing.T) {
 			}
 			setMinimizeToTray(t, a, tt.minimizeToTray)
 
-			if got := a.OnMainWindowClose(); got != tt.wantPrevent {
+			if got := OnMainWindowClose(a); got != tt.wantPrevent {
 				t.Errorf("OnMainWindowClose() = %v, want %v (trayPresent=%v, minimizeToTray=%v)",
 					got, tt.wantPrevent, tt.trayPresent, tt.minimizeToTray)
 			}
@@ -74,24 +74,24 @@ func TestOnMainWindowClose_TruthTable(t *testing.T) {
 	}
 }
 
-// TestTrayAvailable_TrayPresent asserts TrayAvailable reports true once a
+// TestTrayAvailable_TrayPresent asserts trayAvailable reports true once a
 // tray has been assigned.
 func TestTrayAvailable_TrayPresent(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	a.tray = &application.SystemTray{}
 
-	if !a.TrayAvailable() {
-		t.Error("TrayAvailable() = false, want true when a.tray is set")
+	if !a.trayAvailable() {
+		t.Error("trayAvailable() = false, want true when a.tray is set")
 	}
 }
 
-// TestTrayAvailable_TrayAbsent asserts TrayAvailable reports false when no
+// TestTrayAvailable_TrayAbsent asserts trayAvailable reports false when no
 // tray was ever assigned (the zero value of *App.tray).
 func TestTrayAvailable_TrayAbsent(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	a.tray = nil
 
-	if a.TrayAvailable() {
-		t.Error("TrayAvailable() = true, want false when a.tray is nil")
+	if a.trayAvailable() {
+		t.Error("trayAvailable() = true, want false when a.tray is nil")
 	}
 }

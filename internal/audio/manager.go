@@ -453,10 +453,6 @@ func (m *Manager) PlayNotification(id string) {
 	}
 }
 
-// NotificationAvailable reports whether a decoded sample backs the slot.
-// False for every slot until the pack lands.
-func (m *Manager) NotificationAvailable(id string) bool { return m.notif.Available(id) }
-
 // State returns a snapshot of the manager's health.
 func (m *Manager) State() State {
 	m.mu.Lock()
