@@ -58,14 +58,15 @@ function hydrate() {
     });
 }
 
-/** The console screen for a nav key; anything unmapped is the placeholder. */
-const SCREENS: Record<string, () => ReactElement> = {
+/** The console screen for a nav key; anything unmapped is the placeholder.
+ * `nav` switches the active screen, for screens that link to another one. */
+const SCREENS = (nav: (view: string) => void): Record<string, () => ReactElement> => ({
   home: () => <Home />,
   players: () => <Players />,
   history: () => <History />,
   profiles: () => <Profiles />,
-  settings: () => <SettingsScreen />,
-};
+  settings: () => <SettingsScreen onNavigate={nav} />,
+});
 
 /**
  * MainApp is the main-window shell. It gates on the session `phase`: before the
@@ -127,7 +128,7 @@ export function MainApp() {
 
   if (phase !== "connected") return <Welcome />;
 
-  const screen = (SCREENS[view] ?? (() => <Placeholder />))();
+  const screen = (SCREENS(setView)[view] ?? (() => <Placeholder />))();
 
   const handleLogout = () => {
     void api.disconnect();

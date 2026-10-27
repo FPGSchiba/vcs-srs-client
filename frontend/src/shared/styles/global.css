@@ -1,10 +1,110 @@
-@import "tailwindcss";
 @import "./tokens.css";
 @import "./components.css";
 
-/* Tailwind v4 reads the JS config (color/font aliases → design tokens) via
-   the @config directive. Path is relative to this file. */
-@config "../../../tailwind.config.ts";
+/* Adapted from Tailwind CSS v4 preflight (MIT). Only resets for elements the
+   app renders; dropped: hr, abbr, h1-h6, a, code/kbd/samp/pre, small,
+   sub/sup, progress, summary, textarea resize, img/video max-width,
+   date/time/search/file pseudo-elements, :-moz-*.
+   Values are copied from the built preflight the app shipped with before
+   Tailwind was removed. Layered, so every unlayered rule below and in
+   tokens.css / components.css still wins, exactly as it did over Tailwind's
+   own base layer. html's font-family and line-height are omitted: the
+   unlayered html rule below always overrode them. */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop {
+    box-sizing: border-box;
+    border: 0 solid;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    tab-size: 4;
+    font-feature-settings: normal;
+    font-variation-settings: normal;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  b,
+  strong {
+    font-weight: bolder;
+  }
+
+  table {
+    text-indent: 0;
+    border-color: inherit;
+    border-collapse: collapse;
+  }
+
+  ol,
+  ul,
+  menu {
+    list-style: none;
+  }
+
+  img,
+  svg,
+  video,
+  canvas,
+  audio,
+  iframe,
+  embed,
+  object {
+    vertical-align: middle;
+    display: block;
+  }
+
+  button,
+  input,
+  select,
+  optgroup,
+  textarea,
+  ::file-selector-button {
+    font: inherit;
+    font-feature-settings: inherit;
+    font-variation-settings: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+    opacity: 1;
+    background-color: transparent;
+    border-radius: 0;
+  }
+
+  button,
+  input:where([type="button"], [type="reset"], [type="submit"]),
+  ::file-selector-button {
+    appearance: button;
+  }
+
+  ::placeholder {
+    opacity: 1;
+  }
+
+  @supports (not (-webkit-appearance: -apple-pay-button)) or (contain-intrinsic-size: 1px) {
+    ::placeholder {
+      color: currentColor;
+    }
+
+    @supports (color: color-mix(in lab, red, red)) {
+      ::placeholder {
+        color: color-mix(in oklab, currentcolor 50%, transparent);
+      }
+    }
+  }
+
+  ::-webkit-inner-spin-button,
+  ::-webkit-outer-spin-button {
+    height: auto;
+  }
+
+  [hidden]:where(:not([hidden="until-found"])) {
+    display: none !important;
+  }
+}
 
 html, body, #root {
   margin: 0;

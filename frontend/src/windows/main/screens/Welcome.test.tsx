@@ -19,7 +19,7 @@ describe("Welcome (guest)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Reset the shared session store so phase changes don't leak between tests.
-    useSession.setState({ phase: "welcome", conn: "disconnected", error: null, server: "" });
+    useSession.setState({ phase: "welcome", conn: "disconnected" });
   });
 
   it("submits guest credentials via api.connect", async () => {

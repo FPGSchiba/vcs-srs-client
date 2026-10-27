@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export interface Capture {
   code: string;
@@ -9,7 +9,6 @@ export interface Capture {
 }
 
 interface KeyChipProps {
-  binding: string;
   onCapture: (c: Capture) => void;
   onCancel?: () => void;
   /** Seeds the chip already listening on mount, skipping the click-to-arm
@@ -36,9 +35,10 @@ const BARE_MODIFIER_CODES = new Set([
 ]);
 
 /**
- * KeyChip renders a bound chord as `.kbd` spans joined by `.plus` inside a
- * `.kbd-row` (or a single `.kbd.unbound` em dash when unbound), and lets the
- * user click to capture a new chord.
+ * KeyChip is the capture affordance for a keyboard chord: idle, it renders a
+ * single `.kbd.unbound` em dash; armed (by a click, or on mount with
+ * `autoListen`), it renders `.kbd.listening` "PRESS…" and waits for a chord.
+ * Bound chords are rendered elsewhere (TriggerChip), never by this chip.
  *
  * Deliberately captures `KeyboardEvent.code` (the physical key), never
  * `.key`: `.key` is keyboard-layout dependent, so what the user sees here
@@ -56,7 +56,7 @@ const BARE_MODIFIER_CODES = new Set([
  * `stopListening` below so a future new exit path can't forget to call
  * `onCancel`.
  */
-export function KeyChip({ binding, onCapture, onCancel, autoListen = false }: KeyChipProps) {
+export function KeyChip({ onCapture, onCancel, autoListen = false }: KeyChipProps) {
   const [listening, setListening] = useState(autoListen);
 
   // Mirrors `listening` synchronously so the unmount cleanup below can read
@@ -187,23 +187,9 @@ export function KeyChip({ binding, onCapture, onCancel, autoListen = false }: Ke
     );
   }
 
-  if (!binding) {
-    return (
-      <span className="kbd unbound" onClick={toggleListening}>
-        —
-      </span>
-    );
-  }
-
-  const parts = binding.split("+");
   return (
-    <span className="kbd-row" onClick={toggleListening}>
-      {parts.map((part, i) => (
-        <Fragment key={`${part}-${i}`}>
-          {i > 0 && <span className="plus">+</span>}
-          <span className="kbd">{part}</span>
-        </Fragment>
-      ))}
+    <span className="kbd unbound" onClick={toggleListening}>
+      —
     </span>
   );
 }

@@ -7,8 +7,10 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: false,
-    // Lets RadioFrame.test.tsx read tokens.css via ?raw (vitest blanks CSS by default).
-    css: { include: [/tokens.css/] },
+    // Lets tests read the app stylesheets via ?raw (vitest blanks CSS by
+    // default): RadioFrame.test.tsx reads tokens.css; styles.test.ts reads
+    // components.css and global.css.
+    css: { include: [/tokens\.css/, /components\.css/, /global\.css/] },
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
   },

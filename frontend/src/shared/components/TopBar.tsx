@@ -40,23 +40,24 @@ const POPOUT_LAUNCHERS: Launcher[] = [
   { key: "notifications", label: "Notif", icon: "bell" },
 ];
 
-/**
- * TopBar is the post-login application title bar, ported from the design
- * prototype's `shell.jsx` TopBar. The launcher strip wires `comms` and
- * `notifications` through `api.toggleWindow`; `fleet`, `ship` and `messages`
- * remain disabled placeholders for later phases. The `notifications`
- * launcher additionally carries an unread badge. The user/callsign identity
- * store is not wired yet, so the user-menu trigger shows placeholder text.
- * The `.topbar` className carries the drag region from the ported CSS.
- * classNames are kept byte-identical to the design so the ported CSS
- * applies unchanged.
- */
 const CONN_PILL: Record<Conn, { cls: string; label: string }> = {
   connected: { cls: "conn-pill", label: "CONNECTED" },
   reconnecting: { cls: "conn-pill warn", label: "RECONNECTING" },
   disconnected: { cls: "conn-pill alert", label: "DISCONNECTED" },
 };
 
+/**
+ * TopBar is the post-login application title bar, ported from the design
+ * prototype's `shell.jsx` TopBar. The launcher strip wires `comms` and
+ * `notifications` through `api.toggleWindow`; `fleet`, `ship` and `messages`
+ * remain disabled placeholders for later phases. The `notifications`
+ * launcher additionally carries an unread badge. The user menu shows the
+ * callsign and initials from `useSession().self`, falling back to `GUEST` /
+ * `—` before a snapshot is hydrated.
+ * The `.topbar` className carries the drag region from the ported CSS.
+ * classNames are kept byte-identical to the design so the ported CSS
+ * applies unchanged.
+ */
 export function TopBar({ view }: TopBarProps) {
   const build = useBuildInfo();
   const conn = useSession((s) => s.conn);

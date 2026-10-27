@@ -196,19 +196,7 @@ export function CommsApp() {
   }
 
   return (
-    <div
-      className="popout"
-      style={{
-        position: "static",
-        width: "100%",
-        height: "100%",
-        border: "none",
-        borderRadius: 0,
-        boxShadow: "none",
-        minWidth: 0,
-        minHeight: 0,
-      }}
-    >
+    <div className="popout native">
       <div className="popout-chrome">
         <div className="row acenter gap-3" style={{ minWidth: 0 }}>
           <Icon name="broadcast" size={14} />

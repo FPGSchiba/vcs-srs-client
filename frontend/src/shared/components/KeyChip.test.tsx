@@ -5,26 +5,20 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { KeyChip } from "./KeyChip";
 
 describe("KeyChip", () => {
-  it("renders the bound chord", () => {
-    render(<KeyChip binding="Ctrl+E" onCapture={() => {}} />);
-    expect(screen.getByText("Ctrl")).toBeInTheDocument();
-    expect(screen.getByText("E")).toBeInTheDocument();
-  });
-
   it("shows an em dash when unbound", () => {
-    render(<KeyChip binding="" onCapture={() => {}} />);
+    render(<KeyChip onCapture={() => {}} />);
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
   it("enters listening state on click", () => {
-    render(<KeyChip binding="" onCapture={() => {}} />);
+    render(<KeyChip onCapture={() => {}} />);
     fireEvent.click(screen.getByText("—"));
     expect(screen.getByText("PRESS…")).toBeInTheDocument();
   });
 
   it("reports the physical code and modifiers, not the layout key", () => {
     const onCapture = vi.fn();
-    render(<KeyChip binding="" onCapture={onCapture} />);
+    render(<KeyChip onCapture={onCapture} />);
     fireEvent.click(screen.getByText("—"));
     fireEvent.keyDown(window, { code: "Digit1", key: "!", altKey: true });
     expect(onCapture).toHaveBeenCalledWith({
@@ -35,8 +29,8 @@ describe("KeyChip", () => {
   it("cancels on Escape without capturing", () => {
     const onCapture = vi.fn();
     const onCancel = vi.fn();
-    render(<KeyChip binding="F1" onCapture={onCapture} onCancel={onCancel} />);
-    fireEvent.click(screen.getByText("F1"));
+    render(<KeyChip onCapture={onCapture} onCancel={onCancel} />);
+    fireEvent.click(screen.getByText("—"));
     fireEvent.keyDown(window, { code: "Escape", key: "Escape" });
     expect(onCapture).not.toHaveBeenCalled();
     expect(onCancel).toHaveBeenCalled();
@@ -44,7 +38,7 @@ describe("KeyChip", () => {
 
   it("ignores bare modifier presses while listening", () => {
     const onCapture = vi.fn();
-    render(<KeyChip binding="" onCapture={onCapture} />);
+    render(<KeyChip onCapture={onCapture} />);
     fireEvent.click(screen.getByText("—"));
     fireEvent.keyDown(window, { code: "ShiftLeft", key: "Shift", shiftKey: true });
     expect(onCapture).not.toHaveBeenCalled();
@@ -64,7 +58,7 @@ describe("KeyChip", () => {
     const onCapture = vi.fn();
     const onCancel = vi.fn();
     const { unmount } = render(
-      <KeyChip binding="" onCapture={onCapture} onCancel={onCancel} />,
+      <KeyChip onCapture={onCapture} onCancel={onCancel} />,
     );
     fireEvent.click(screen.getByText("—"));
     unmount();
@@ -78,7 +72,7 @@ describe("KeyChip", () => {
   it("cancels when the chip is clicked again while listening", () => {
     const onCapture = vi.fn();
     const onCancel = vi.fn();
-    render(<KeyChip binding="" onCapture={onCapture} onCancel={onCancel} />);
+    render(<KeyChip onCapture={onCapture} onCancel={onCancel} />);
     fireEvent.click(screen.getByText("—"));
     fireEvent.click(screen.getByText("PRESS…"));
     expect(onCancel).toHaveBeenCalled();
@@ -91,7 +85,7 @@ describe("KeyChip", () => {
   it("cancels when the window loses focus while listening", () => {
     const onCapture = vi.fn();
     const onCancel = vi.fn();
-    render(<KeyChip binding="" onCapture={onCapture} onCancel={onCancel} />);
+    render(<KeyChip onCapture={onCapture} onCancel={onCancel} />);
     fireEvent.click(screen.getByText("—"));
     fireEvent.blur(window);
     expect(onCancel).toHaveBeenCalled();
@@ -115,7 +109,6 @@ describe("KeyChip under StrictMode", () => {
     const [capturing, setCapturing] = useState(false);
     return capturing ? (
       <KeyChip
-        binding=""
         autoListen
         onCapture={() => {}}
         onCancel={() => {
@@ -148,7 +141,7 @@ describe("KeyChip under StrictMode", () => {
     const onCapture = vi.fn();
     render(
       <StrictMode>
-        <KeyChip binding="" autoListen onCapture={onCapture} onCancel={() => {}} />
+        <KeyChip autoListen onCapture={onCapture} onCancel={() => {}} />
       </StrictMode>,
     );
     await waitFor(() => expect(screen.queryByText("PRESS\u2026")).toBeInTheDocument());
@@ -169,7 +162,7 @@ describe("KeyChip under StrictMode", () => {
     const onCancel = vi.fn();
     const { unmount } = render(
       <StrictMode>
-        <KeyChip binding="" autoListen onCapture={() => {}} onCancel={onCancel} />
+        <KeyChip autoListen onCapture={() => {}} onCancel={onCancel} />
       </StrictMode>,
     );
     unmount();
@@ -180,7 +173,7 @@ describe("KeyChip under StrictMode", () => {
     const onCancel = vi.fn();
     const { unmount } = render(
       <StrictMode>
-        <KeyChip binding="F1" onCapture={() => {}} onCancel={onCancel} />
+        <KeyChip onCapture={() => {}} onCancel={onCancel} />
       </StrictMode>,
     );
     unmount();

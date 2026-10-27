@@ -81,15 +81,51 @@ describe("SettingsScreen", () => {
     expect(screen.queryByText(/Arrives in Phase/i)).not.toBeInTheDocument();
   });
 
-  it("shows the deferred notice for a not-yet-built section", () => {
-    render(<SettingsScreen />);
-    fireEvent.click(screen.getByText("Notifications"));
-    expect(screen.getByText(/Arrives in Phase 7/i)).toBeInTheDocument();
+  it("points Profiles & Layouts at the Profiles screen", () => {
+    const onNavigate = vi.fn();
+    render(<SettingsScreen onNavigate={onNavigate} />);
+    fireEvent.click(screen.getByText("Profiles & Layouts"));
+    expect(screen.getByText("Profiles and layouts are managed on the Profiles screen.")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("OPEN PROFILES"));
+    expect(onNavigate).toHaveBeenCalledWith("profiles");
+    expect(screen.queryByText(/Arrives in Phase/i)).toBeNull();
   });
 
-  it("names the right phase per deferred section", () => {
+  it("Profiles button is inert without onNavigate", () => {
     render(<SettingsScreen />);
     fireEvent.click(screen.getByText("Profiles & Layouts"));
-    expect(screen.getByText(/Arrives in Phase 7/i)).toBeInTheDocument();
+    expect(() => fireEvent.click(screen.getByText("OPEN PROFILES"))).not.toThrow();
+  });
+
+  it("Notifications is not yet scheduled and points sounds at General", () => {
+    render(<SettingsScreen />);
+    fireEvent.click(screen.getByText("Notifications"));
+    expect(screen.getByText("Not yet scheduled")).toBeInTheDocument();
+    expect(screen.getByText("Alert rules")).toBeInTheDocument();
+    expect(screen.getByText("Server notifications (needs server support)")).toBeInTheDocument();
+    expect(screen.getByText("Notification sounds: General → Play notification sounds.")).toBeInTheDocument();
+    expect(screen.queryByText(/Sound alerts/)).toBeNull();
+    expect(screen.queryByText(/Arrives in Phase/)).toBeNull();
+  });
+
+  it("Legacy is not yet scheduled", () => {
+    render(<SettingsScreen />);
+    fireEvent.click(screen.getByText("Legacy"));
+    expect(screen.getByText("Not yet scheduled")).toBeInTheDocument();
+    for (const item of ["Legacy SRS audio engine", "Legacy overlay", "Disable hardware acceleration"]) {
+      expect(screen.getByText(item)).toBeInTheDocument();
+    }
+    expect(screen.queryByText(/Arrives in Phase/)).toBeNull();
+  });
+
+  it("only Miscellaneous names a phase", () => {
+    render(<SettingsScreen />);
+    for (const label of ["General", "Keybinds", "Audio & Sounds", "Radio Effects",
+                         "Profiles & Layouts", "Notifications", "Legacy"]) {
+      fireEvent.click(screen.getByText(label));
+      expect(screen.queryByText(/Arrives in Phase/i)).toBeNull();
+    }
+    fireEvent.click(screen.getByText("Miscellaneous"));
+    expect(screen.getByText("Arrives in Phase 10")).toBeInTheDocument();
   });
 });
