@@ -812,3 +812,38 @@ func TestProfileFieldsDefaultToZero(t *testing.T) {
 		t.Errorf("HistoryIdleMS = %d, want 0 meaning 'the documented default'", cfg.Voice.HistoryIdleMS)
 	}
 }
+
+func TestConfig_LastServerAddressRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := config.Default()
+	if cfg.LastServerAddress != "" {
+		t.Fatalf("default LastServerAddress = %q, want empty", cfg.LastServerAddress)
+	}
+	cfg.LastServerAddress = "vcs.example:443"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `last_server_address = "vcs.example:443"`) {
+		t.Fatalf("saved file lacks last_server_address:\n%s", raw)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.LastServerAddress != "vcs.example:443" {
+		t.Fatalf("LastServerAddress = %q after round trip", got.LastServerAddress)
+	}
+
+	old := filepath.Join(t.TempDir(), "old.toml")
+	if err := os.WriteFile(old, []byte("log_level = \"INFO\"\nserver_url = \"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = config.Load(old)
+	if err != nil {
+		t.Fatalf("load old: %v", err)
+	}
+	if got.LastServerAddress != "" {
+		t.Fatalf("an old file loaded LastServerAddress = %q, want empty", got.LastServerAddress)
+	}
+}

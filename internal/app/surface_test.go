@@ -26,7 +26,7 @@ var boundSurface = []string{
 	"ClearNotifications", "CloseWindow", "Connect", "DeleteProfile", "Disconnect",
 	"EndCapture", "ExportHistoryCSV", "ExportProfile", "FocusMainWindow", "GetAudioDevices",
 	"GetAudioEffectPresets", "GetAudioState", "GetBuildInfo", "GetClientState", "GetCommsLayout",
-	"GetConnectionState", "GetHistory", "GetHotkeyState", "GetJoystickState", "GetKeybinds",
+	"GetConnectionState", "GetHistory", "GetHotkeyState", "GetJoystickState", "GetKeybinds", "GetLastServerAddress",
 	"GetNotifications", "GetOpenWindows", "GetProfileState", "GetSettings", "ImportProfile",
 	"ListProfiles", "LoadProfile", "MarkAllNotificationsRead", "MarkNotificationRead",
 	"OpenHotkeyPermissionSettings", "OpenProfilesDir", "OpenWindow", "PreviewEffect",
