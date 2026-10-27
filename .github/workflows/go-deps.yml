@@ -33,6 +33,7 @@ jobs:
   preflight:
     name: Require DEPS_BOT_TOKEN
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require DEPS_BOT_TOKEN
         env:
@@ -48,6 +49,7 @@ jobs:
     name: Update and test
     needs: preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     outputs:
@@ -70,9 +72,10 @@ jobs:
       # Same packages as test.yml's backend job: GTK4/WebKitGTK 6.0 headers for
       # the Wails application package, xvfb for internal/hotkeys' X11 tests.
       - name: Install Linux GUI deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev xvfb
+        timeout-minutes: 10
+        uses: ./.github/actions/linux-gui-deps
+        with:
+          xvfb: "true"
 
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
@@ -145,6 +148,7 @@ jobs:
     needs: update
     if: needs.update.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     env:

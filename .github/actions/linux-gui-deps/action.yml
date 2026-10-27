@@ -1,0 +1,86 @@
+name: Linux GUI deps
+description: >
+  Installs the GTK4 / WebKitGTK 6.0 / libsoup3 / X11 dev headers Wails' cgo
+  links against (and optionally xvfb), restored from an actions cache so a
+  slow or hanging Ubuntu mirror is off the hot path. Composite steps cannot
+  carry timeout-minutes: every CALLING step must set `timeout-minutes: 10`.
+
+inputs:
+  xvfb:
+    description: Also install xvfb, for tests run under xvfb-run.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # The package list lives here only. cache-apt-pkgs-action already folds
+    # the list (with resolved versions) into its cache key; bump `version`
+    # below to force a fresh cache when the restore approach itself changes.
+    - name: Resolve package list
+      id: pkgs
+      shell: bash
+      env:
+        XVFB: ${{ inputs.xvfb }}
+      run: |
+        pkgs="libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev"
+        if [ "$XVFB" = "true" ]; then
+          pkgs="$pkgs xvfb"
+        fi
+        echo "list=$pkgs" >> "$GITHUB_OUTPUT"
+
+    # A cache hit untars the packages' files without running dpkg or any
+    # postinst script; a miss installs with apt-fast and saves the cache.
+    - name: Install from cache (awalsh128/cache-apt-pkgs-action v1.6.3)
+      id: cache
+      continue-on-error: true
+      uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+      with:
+        packages: ${{ steps.pkgs.outputs.list }}
+        version: linux-gui-deps-v1
+
+    # A restore skips the packages' postinst scripts, which would have run
+    # ldconfig (libc triggers): refresh the linker cache so the restored .so
+    # files resolve at runtime, then prove the hit restored everything cgo
+    # and the tests need. A hit that fails this check falls back to apt-get
+    # below rather than failing the job.
+    - name: Refresh linker cache and check restored deps
+      id: cached
+      if: steps.cache.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        XVFB: ${{ inputs.xvfb }}
+      run: |
+        sudo ldconfig
+        bash "$GITHUB_ACTION_PATH/verify.sh"
+
+    # Fallback when the cache action failed (or restored an incomplete set):
+    # plain apt-get, retried, each attempt bounded so the calling step's
+    # 10-minute timeout is not the only thing standing between a hung mirror
+    # and a stuck runner.
+    - name: Install with apt-get (fallback)
+      if: steps.cached.outcome != 'success'
+      shell: bash
+      env:
+        PKGS: ${{ steps.pkgs.outputs.list }}
+      run: |
+        echo "::warning title=Linux GUI deps::apt cache unavailable or incomplete; installing with apt-get"
+        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+        for attempt in 1 2 3; do
+          echo "apt-get attempt ${attempt}/3"
+          # shellcheck disable=SC2086 # PKGS is a space-separated list
+          if sudo timeout 120 apt-get "${apt_opts[@]}" update &&
+            sudo DEBIAN_FRONTEND=noninteractive timeout 240 apt-get "${apt_opts[@]}" install -y $PKGS; then
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "::error title=Linux GUI deps::apt-get install failed after 3 attempts"
+        exit 1
+
+    - name: Verify GUI deps
+      shell: bash
+      env:
+        XVFB: ${{ inputs.xvfb }}
+      run: bash "$GITHUB_ACTION_PATH/verify.sh"
