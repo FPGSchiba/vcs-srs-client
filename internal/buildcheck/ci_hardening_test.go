@@ -9,9 +9,6 @@ import (
 // The shared composite action every Linux job installs its GUI deps through.
 const linuxGUIDepsAction = ".github/actions/linux-gui-deps/action.yml"
 
-// awalsh128/cache-apt-pkgs-action v1.6.3, pinned by commit.
-const cacheAptPkgsPin = "awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9"
-
 var (
 	jobKeyRe     = regexp.MustCompile(`(?m)^  ([A-Za-z0-9_-]+):\s*$`)
 	jobTimeoutRe = regexp.MustCompile(`(?m)^    timeout-minutes: [1-9][0-9]*\s*$`)
@@ -57,8 +54,8 @@ func TestEveryJobHasTimeout(t *testing.T) {
 	}
 }
 
-// Phase 6.9 follow-up: apt installs go through the cached composite action
-// only, so a slow or hanging Ubuntu mirror is off the hot path.
+// Phase 6.9 follow-up: apt installs go through the shared composite action
+// only, so every install is retried and time-capped the same way.
 func TestNoRawAptInstallInWorkflows(t *testing.T) {
 	for _, wf := range workflowFiles(t) {
 		for i, l := range strings.Split(readRepoFile(t, wf), "\n") {
@@ -94,27 +91,26 @@ func TestLinuxGUIDepsCallsAreBounded(t *testing.T) {
 	}
 }
 
-// The composite action caches through the SHA-pinned cache-apt-pkgs-action,
-// falls back to a retried plain apt-get when the cache step fails, refreshes
-// the linker cache after a restore (which skips postinst scripts), and proves
-// the pkg-config modules Wails' cgo needs are present either way.
+// The composite action installs with a retried, per-attempt time-capped plain
+// apt-get and proves the pkg-config modules Wails' cgo needs are present.
+// It uses no third-party action: awalsh128/cache-apt-pkgs-action was tried
+// and removed (2026-10-27) because on GitHub runners it never refreshes the
+// package lists, so a stale image list made it save an empty cache and every
+// "hit" restored 0 packages.
 func TestLinuxGUIDepsActionShape(t *testing.T) {
 	text := readRepoFile(t, linuxGUIDepsAction)
-	for _, m := range usesRe.FindAllStringSubmatch(text, -1) {
-		target := strings.Trim(m[1], `"'`)
-		if strings.HasPrefix(target, "actions/") || strings.HasPrefix(target, "./") {
-			continue
-		}
-		if !pinnedRe.MatchString(target) {
-			t.Errorf("%s: third-party action %s is not pinned to a commit SHA", linuxGUIDepsAction, target)
+	if m := usesRe.FindAllStringSubmatch(text, -1); len(m) != 0 {
+		t.Errorf("%s: uses %d action(s), want none (plain apt-get only)", linuxGUIDepsAction, len(m))
+	}
+	for _, unwanted := range []string{"cache-apt-pkgs-action", "continue-on-error"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("%s still contains %q", linuxGUIDepsAction, unwanted)
 		}
 	}
 	for _, want := range []string{
-		"uses: " + cacheAptPkgsPin,
-		"continue-on-error: true",
-		"steps.cache.outcome",
 		"Acquire::Retries=3",
-		"sudo ldconfig",
+		"timeout 120 apt-get",
+		"timeout 240 apt-get",
 		"libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev",
 		`bash "$GITHUB_ACTION_PATH/verify.sh"`,
 	} {
@@ -127,8 +123,5 @@ func TestLinuxGUIDepsActionShape(t *testing.T) {
 		if !strings.Contains(verify, want) {
 			t.Errorf("linux-gui-deps/verify.sh lacks %q", want)
 		}
-	}
-	if !regexp.MustCompile(`(?m)^\s+version: linux-gui-deps-v[0-9]+\s*$`).MatchString(text) {
-		t.Errorf("%s: cache step has no `version: linux-gui-deps-vN` key", linuxGUIDepsAction)
 	}
 }
