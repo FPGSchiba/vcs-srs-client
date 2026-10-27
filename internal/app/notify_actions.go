@@ -1,6 +1,11 @@
 package app
 
-import "github.com/FPGSchiba/vcs-srs-client/internal/notify"
+import (
+	"errors"
+
+	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
+	"github.com/FPGSchiba/vcs-srs-client/internal/session"
+)
 
 // actionFailure describes the error notification one user-initiated binding
 // raises when it fails (Phase 6.9 CL3, FE09).
@@ -23,7 +28,7 @@ var (
 )
 
 // reportAction raises f on its stable key when err is non-nil and RESOLVES
-// the key when err is nil (design D6, the same rule notifyHistoryFlush
+// the key when err is nil or wraps session.ErrSessionEnded (design D6, the same rule notifyHistoryFlush
 // follows). Without the resolve, the same failure recurring after an
 // intervening success would match the still-live item's fingerprint and be
 // dropped silently -- no toast, no sound.
@@ -36,7 +41,10 @@ func (a *App) reportAction(f actionFailure, err error) {
 	if a.notif == nil {
 		return
 	}
-	if err == nil {
+	// A session the server ended has already told the user (Welcome's
+	// session notice); raising "not sent to the server" on top would leave a
+	// stale toast after the re-login, so it resolves instead (Phase 6.9 CL1).
+	if err == nil || errors.Is(err, session.ErrSessionEnded) {
 		a.notif.Resolve(f.key)
 		return
 	}

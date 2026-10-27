@@ -49,7 +49,17 @@ func (a *App) Connect(serverURL, name, password, unitID string) error {
 // against.
 func (a *App) Disconnect() error {
 	a.stopVoiceSession()
-	return a.sess.Disconnect(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), disconnectTimeout)
+	defer cancel()
+	return a.sess.Disconnect(ctx)
+}
+
+// CancelConnect aborts a Connect or Reconnect still in flight (the Welcome
+// screen's CANCEL). The in-flight call then returns the session's
+// connect-cancelled error, which the frontend shows no error for. A no-op
+// when nothing is in flight.
+func (a *App) CancelConnect() {
+	a.sess.CancelConnect()
 }
 
 // Reconnect re-establishes the control session, then re-pushes the locally
@@ -104,7 +114,9 @@ func (a *App) UpdateRadioInfo(info RadioInfoDTO) error {
 		return err
 	}
 	a.refreshRXContext()
-	err = a.sess.UpdateRadioInfo(context.Background(), RadioInfoToProto(info))
+	ctx, cancel := context.WithTimeout(context.Background(), radioPushTimeout)
+	defer cancel()
+	err = a.sess.UpdateRadioInfo(ctx, RadioInfoToProto(info))
 	a.reportAction(actRadioSend, err)
 	return err
 }

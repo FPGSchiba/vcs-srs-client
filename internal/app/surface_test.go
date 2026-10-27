@@ -22,7 +22,7 @@ import (
 // SetSettingsBackend, HotkeyHandler, ...), not methods, so it stays off the
 // webview. Adding a bound method means adding its name here deliberately.
 var boundSurface = []string{
-	"AddTrigger", "BeginCapture", "BrowseProfilesDir", "ClearHistory", "ClearKeybind",
+	"AddTrigger", "BeginCapture", "BrowseProfilesDir", "CancelConnect", "ClearHistory", "ClearKeybind",
 	"ClearNotifications", "CloseWindow", "Connect", "DeleteProfile", "Disconnect",
 	"EndCapture", "ExportHistoryCSV", "ExportProfile", "FocusMainWindow", "GetAudioDevices",
 	"GetAudioEffectPresets", "GetAudioState", "GetBuildInfo", "GetClientState", "GetCommsLayout",

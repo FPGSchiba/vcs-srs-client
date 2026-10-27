@@ -19,7 +19,10 @@ type fakeSession struct {
 	disconnects     int
 	disconnectCtx   context.Context
 	disconnectError error
+	cancelConnects  int
 }
+
+func (f *fakeSession) CancelConnect() { f.cancelConnects++ }
 
 func (f *fakeSession) Connect(_ context.Context, url, _, _, _ string) error {
 	f.connected = true
@@ -162,5 +165,29 @@ func TestServiceShutdown_NoSession(t *testing.T) {
 	a := app.NewForTest(state.New(), nil, &fakeWindows{})
 	if err := a.ServiceShutdown(); err != nil {
 		t.Errorf("ServiceShutdown() = %v, want nil with no session", err)
+	}
+}
+
+// GO-03: Logout is bounded at 2 s (D1).
+func TestDisconnect_HasDeadline(t *testing.T) {
+	fs := &fakeSession{}
+	a := app.NewForTest(state.New(), fs, &fakeWindows{})
+	start := time.Now()
+	_ = a.Disconnect()
+	dl, ok := fs.disconnectCtx.Deadline()
+	if !ok {
+		t.Fatal("Disconnect passed a context with no deadline")
+	}
+	if dl.Sub(start) > 2*time.Second {
+		t.Fatalf("Disconnect deadline %v after the call, want <= 2s", dl.Sub(start))
+	}
+}
+
+func TestCancelConnect_Forwards(t *testing.T) {
+	fs := &fakeSession{}
+	a := app.NewForTest(state.New(), fs, &fakeWindows{})
+	a.CancelConnect()
+	if fs.cancelConnects != 1 {
+		t.Fatalf("CancelConnect forwarded %d times, want 1", fs.cancelConnects)
 	}
 }

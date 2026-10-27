@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
+	"github.com/FPGSchiba/vcs-srs-client/internal/session"
 	"github.com/FPGSchiba/vcs-srs-client/srspb"
 )
 
@@ -200,5 +202,85 @@ func TestMicTestAndPreviewWithoutBackendRaise(t *testing.T) {
 	}
 	if len(got) != 2 || !got["action:audio.mictest"] || !got["action:audio.preview"] {
 		t.Fatalf("keys = %v, want action:audio.mictest and action:audio.preview", got)
+	}
+}
+
+func assertDeadlineWithin(t *testing.T, ctx context.Context, start time.Time, max time.Duration) {
+	t.Helper()
+	if ctx == nil {
+		t.Fatal("no call recorded")
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("the RPC context has no deadline")
+	}
+	if dl.Sub(start) > max {
+		t.Fatalf("deadline %v after the call, want <= %v", dl.Sub(start), max)
+	}
+}
+
+// GO-03: radio pushes are bounded at 5 s (D1).
+func TestUpdateRadioInfo_HasDeadline(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	fs := &fakeControlSession{}
+	a.sess = fs
+	start := time.Now()
+	if err := a.UpdateRadioInfo(RadioInfoDTO{Radios: []RadioDTO{
+		{ID: 1, Name: "Radio 1", Frequency: 130.000, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	assertDeadlineWithin(t, fs.lastCtx(), start, 5*time.Second)
+}
+
+func TestPushPersistedRadios_HasDeadline(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	fs := &fakeControlSession{}
+	a.sess = fs
+	start := time.Now()
+	if err := a.Connect("localhost:5002", "n", "p", "u"); err != nil {
+		t.Fatal(err)
+	}
+	assertDeadlineWithin(t, fs.lastCtx(), start, 5*time.Second)
+}
+
+// A session the server ended has already told the user; a stale "not sent
+// to the server" toast after re-login would be noise.
+func TestReportAction_SessionEndedResolves(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	n := notify.New(notify.Options{})
+	a.setNotifier(n)
+	a.reportAction(actRadioSend, errors.New("plain"))
+	a.reportAction(actRadioSend, fmt.Errorf("x: %w", session.ErrSessionEnded))
+	items := n.Snapshot().Items
+	if len(items) != 1 || items[0].Key != "action:radio.send" || !items[0].Resolved {
+		t.Fatalf("items = %+v, want the one radio.send item resolved", items)
+	}
+}
+
+// hookSession is a sessionAPI that also accepts the session-ended hook.
+type hookSession struct {
+	fakeControlSession
+	hook func(string)
+}
+
+func (h *hookSession) SetSessionEndedHook(fn func(string)) { h.hook = fn }
+
+func TestSetBackend_InstallsSessionEndedHook(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	hs := &hookSession{}
+	SetBackend(a, hs, nil)
+	if hs.hook == nil {
+		t.Fatal("SetBackend did not install the session-ended hook")
+	}
+	live := &fakeVoiceSession{}
+	a.voice.mu.Lock()
+	a.voice.sess = live
+	a.voice.mu.Unlock()
+
+	hs.hook("kicked")
+
+	if a.voiceSession() != nil {
+		t.Fatal("voice still live after the server ended the session")
 	}
 }
