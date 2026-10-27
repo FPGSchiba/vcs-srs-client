@@ -32,6 +32,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Fails unless `go` is exactly go.mod's toolchain directive (go1.27.3),
+      # so CI can never silently build with an unpatched Go.
+      - name: Assert patched Go toolchain
+        shell: bash
+        run: bash .github/scripts/assert-go-toolchain.sh
+
       # Phase 5's voice tests run against the REAL server rather than a
       # hand-written fake. A fake can only encode our own reading of the
       # protocol, so it cannot catch a MISREADING of it -- which is the
@@ -240,6 +246,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Fails unless `go` is exactly go.mod's toolchain directive (go1.27.3),
+      # so CI can never silently build with an unpatched Go.
+      - name: Assert patched Go toolchain
+        shell: bash
+        run: bash .github/scripts/assert-go-toolchain.sh
 
       # `wails3 generate bindings` type-checks the Go packages, which (via the
       # Wails application package) use cgo against GTK4/WebKitGTK 6.0 headers, so

@@ -34,6 +34,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Fails unless `go` is exactly go.mod's toolchain directive (go1.27.3),
+      # so CI can never silently build with an unpatched Go.
+      - name: Assert patched Go toolchain
+        shell: bash
+        run: bash .github/scripts/assert-go-toolchain.sh
+
       - name: Setup Node
         uses: actions/setup-node@v7
         with:

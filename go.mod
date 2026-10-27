@@ -1,21 +1,20 @@
 module github.com/FPGSchiba/vcs-srs-client
 
-go 1.25.0
+go 1.27.0
+
+toolchain go1.27.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/gen2brain/malgo v0.11.26
+	github.com/google/uuid v1.6.0
+	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
 	github.com/robotn/gohook v1.0.0-beta1 // pinned: purego backends exist only from this tag; build with -tags purego
 	github.com/wailsapp/wails/v3 v3.0.0-beta.22
 	golang.org/x/crypto v0.53.0
 	google.golang.org/grpc v1.66.0
 	google.golang.org/protobuf v1.36.6
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
-)
-
-require (
-	github.com/gen2brain/malgo v0.11.26
-	github.com/google/uuid v1.6.0
-	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
 )
 
 require (
