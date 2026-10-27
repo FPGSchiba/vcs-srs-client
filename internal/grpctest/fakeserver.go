@@ -6,8 +6,10 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -203,4 +205,64 @@ func StartWith(t *testing.T, f *Fake, serverCreds credentials.TransportCredentia
 	}
 	cleanup = func() { srv.Stop(); _ = lis.Close() }
 	return dialWith, cleanup
+}
+
+// DialUntilFailure starts the fake on its own bufconn with serverCreds (nil
+// means plaintext), connects a NON-blocking client with clientCreds, waits
+// until that channel reports TransientFailure, and returns the error of one
+// RPC issued without wait-for-ready -- which carries the last connection
+// error, e.g. "x509: certificate signed by unknown authority".
+//
+// It exists for the TLS refusal tests. They used to dial blocking with
+// WithReturnConnectionError under a 500ms deadline, and that only surfaces
+// the handshake error if the first handshake has completed inside the
+// deadline; under a loaded -race run it sometimes had not, and the test saw a
+// bare "context deadline exceeded". Waiting for the channel state instead
+// returns as soon as the handshake fails, however slow the machine is.
+//
+// The server is stopped through t.Cleanup. It fails the test if the channel
+// reaches Ready (the handshake was expected to fail) or if no failure is seen
+// within 10s.
+func DialUntilFailure(t *testing.T, f *Fake, serverCreds, clientCreds credentials.TransportCredentials) error {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
+	var opts []grpc.ServerOption
+	if serverCreds != nil {
+		opts = append(opts, grpc.Creds(serverCreds))
+	}
+	srv := grpc.NewServer(opts...)
+	srspb.RegisterAuthServiceServer(srv, f)
+	srspb.RegisterSRSServiceServer(srv, f)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(func() { srv.Stop(); _ = lis.Close() })
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(c context.Context, _ string) (net.Conn, error) { return lis.DialContext(c) }),
+		grpc.WithTransportCredentials(clientCreds),
+	)
+	if err != nil {
+		t.Fatalf("DialUntilFailure: NewClient: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	conn.Connect()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		st := conn.GetState()
+		if st == connectivity.TransientFailure {
+			break
+		}
+		if st == connectivity.Ready {
+			t.Fatal("DialUntilFailure: the channel became Ready; expected the handshake to fail")
+		}
+		if !conn.WaitForStateChange(ctx, st) {
+			t.Fatalf("DialUntilFailure: no TransientFailure within 10s (last state %v)", st)
+		}
+	}
+
+	rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer rpcCancel()
+	_, err = srspb.NewSRSServiceClient(conn).Ping(rpcCtx, &srspb.PingRequest{})
+	return err
 }

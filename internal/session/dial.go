@@ -147,8 +147,9 @@ func dialerFor(serverURL, caFile string) (Dialer, error) {
 // still gets bounded, is identical at any duration.
 func boundedDial(ctx context.Context, timeout time.Duration, serverURL string, creds credentials.TransportCredentials, extraOpts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	// Derived from the caller's context, so a SHORTER caller deadline still
-	// wins -- the refusalCtx-based tests in tls_integration_test.go depend on
-	// that. Without this bound, a caller context with no deadline of its own
+	// wins -- kept for production callers (Connect/Reconnect derive the dial
+	// from a cancellable attempt context, so CANCEL aborts a dial in
+	// progress). Without this bound, a caller context with no deadline of its own
 	// (context.Background(), as internal/app's Connect and Reconnect pass)
 	// never returns on a persistent handshake failure; see dialTimeout.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
