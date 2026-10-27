@@ -99,9 +99,12 @@ Approval gates (CLAUDE.md) are hard stops at **plan approval**. The user's "leav
   - **SRV-14:** rate-limit the UDP parse-error and banned-IP logs; demote parse failures to WARN.
   - **SRV-19:** delete the unreachable `return nil` (`srs_service.go:590`) and fix the keepalive comment, so `go vet` is green.
   - **SRV-07:** unary auth failures return `codes.Unauthenticated`, and the auth RPCs return either a body or an error, never both. **Wire-visible.**
-    - **The user's decision: the error wins.** Ordinary auth failures (invalid GUID, guest login disabled, wrong password, ban, …) return a gRPC status error with a meaningful code (`Unauthenticated`, `PermissionDenied`, `FailedPrecondition`, …) and the same message text, plus a `nil` body.
-    - Today these handlers return `&pb.XResponse{Success:false, ErrorMessage:…}, err` (e.g. `srs/auth_service.go:284,360,411,620,704,788`). gRPC already drops that body, so every existing client, including the C# peer, already sees an error. Only the code changes, from `Unknown` to a meaningful one.
-    - SV3's design doc lists the code chosen for each failure; CL1 maps those codes to user-facing messages. File a token-refresh RPC as a new PROTO_GAPS entry (the doc edit is owned by DOC; SV3 hands DOC the text).
+    - **The user's decision (revised 2026-10-27, after SV3's re-verification corrected this spec): bodies for auth RPCs, status codes elsewhere.**
+    - **The correction.** This spec first claimed that every auth failure returns both a body and an error, so gRPC drops the body and clients only ever see an error. That is true for only **6** sites (`srs/auth_service.go:284,360,411,620,704,788`). About **30** other failure sites, including ban, guest-disabled and wrong-password, return `Success:false` + `ErrorMessage` with a nil error today, and the C# peer reads those bodies.
+    - **The decision:**
+      - `AuthService` failures return `Success:false` + `ErrorMessage` with a **nil** error. Only the 6 outlier sites change, to match the other ~30.
+      - The **auth interceptor** on non-auth RPCs (expired, invalid or unknown-GUID token; SRV-06) returns proper status codes, `codes.Unauthenticated` (and `PermissionDenied` for an insufficient role), instead of `fmt.Errorf`'s `Unknown`. This is the signal CL1's "session expired" handling uses.
+      - The recovery interceptor (SRV-04) returns `Internal`, and a nil `Capabilities` gets `Success:false` with a message. File a token-refresh RPC as a new PROTO_GAPS entry (the doc edit is owned by DOC; SV3 hands DOC the text).
   - **SRV-20:** the missing tests on client-critical paths are written here and in SV1/SV2 as part of each fix, not as a separate track.
 - **Files:** `state/server.go`, `state/state_test.go`, `srs/auth_service.go`, `srs/auth_service_test.go`, `srs/srs_service.go`, `control/server.go`, `control/server_test.go`, `voice/server.go`.
 - **Gates:** server-behaviour.
@@ -154,7 +157,7 @@ Approval gates (CLAUDE.md) are hard stops at **plan approval**. The user's "leav
   - **GO-02:** a second Connect (or Connect racing Reconnect) closes the old conn/stream first.
   - **GO-10:** Disconnect clears `lastDialer`/`lastToken`.
   - **CON-07:** `Store.ResetRoster()` on Disconnect and before re-hydrating.
-  - **SRV-06 / SRV-07 (client half):** `codes.Unauthenticated`, or an empty `voice_secret` from Reconnect's `SyncClient`, is a failed reconnect that routes to Welcome with a "session expired" message. That happens, for example, more than 120 s after the stream ended (SV1). Login failures map SV3's status codes to user-facing messages, and the existing `GetSuccess()`/`GetErrorMessage()` branches in `internal/auth` and `internal/control` are reworked to match. The client must also cope with CON-05's server-side behaviour as decided in SV1.
+  - **SRV-06 / SRV-07 (client half):** `codes.Unauthenticated`, or an empty `voice_secret` from Reconnect's `SyncClient`, is a failed reconnect that routes to Welcome with a "session expired" message. That happens, for example, more than 120 s after the stream ended (SV1). Login failures keep using the existing `GetSuccess()`/`GetErrorMessage()` body handling (SV3 keeps auth failures as bodies). Non-auth RPCs map the interceptor's `Unauthenticated`/`PermissionDenied` codes to the session-expired path. The client must also cope with CON-05's server-side behaviour as decided in SV1.
   - **Welcome-screen changes (approved in scope by the user, exact copy confirmed at plan approval):**
     - a **CANCEL** action in the "establishing tactical link" panel (aborts the bounded sequence);
     - **FE06:** the FFID label no longer says "(optional)" for a field that rejects blank;
@@ -352,7 +355,16 @@ No finding is rejected outright — the user kept everything. These are closed o
 | Scope | Every finding in; nothing rejected | user |
 | Go version, both repos | **1.27**, set in Wave 1 (SV5, CL5) | user |
 | SV1 stream-end grace period | **120 s** | user |
-| SRV-07 auth failures | **gRPC status error with a meaningful code**, nil body | user |
+| SRV-07 auth failures | AuthService failures return a **body** (`Success:false`, nil error); interceptor failures return **status codes** (`Unauthenticated`/`PermissionDenied`). Revised after the original "status errors everywhere" answer, which rested on an incorrect claim in this spec. | user |
+| Pending-login limits (SRV-17) | 5-min TTL re-armed per step; caps of 10,000 total and 32 per IP; 60s sweep; over the cap → `ResourceExhausted` for the new InitAuth | user |
+| Go dependency updates (CI-06) | weekly workflow in both repos that opens PRs with a PAT/GitHub App token (user creates it) | user |
+| Codecov (server) | tokenless OIDC upload; fork/Dependabot PRs skipped; `CODECOV_TOKEN` retired (user rotates it) | user |
+| Tailwind `pulse` collision | design prototype's 40% keyframe wins (the one deliberate visual change in CL4) | user |
+| Settings Notifications/Legacy stubs | "Not yet scheduled" | user |
+| macOS `.app` | Apple Silicon only | user |
+| Windows installer | per-machine (Program Files, UAC) | user |
+| Client/server CI ordering | CL5 pins client CI to a server SHA and merges before SV5's Go bump | orchestrator |
+| `TestTXWriteFrameNeverBlocks` flake (client `main` red on macOS) | assigned to CL2 | orchestrator |
 | Supported release packages | **Windows NSIS, Linux AppImage, macOS `.app`**; deb/rpm/AUR/docker deleted; no signing (Phase 10) | user |
 | Token revocation | SRV-06's unknown-GUID check; no denylist; kicked clients may log in again | orchestrator |
 | Distributed-mode kick | existing `kick_client` ControlMessage; no proto change | orchestrator |
