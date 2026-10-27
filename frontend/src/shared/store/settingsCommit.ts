@@ -42,11 +42,12 @@ export function commitSettings(change: (s: Settings) => Settings): Promise<void>
       usePendingSettings.setState({ pending: null });
     }
   };
-  // The executor runs synchronously, so the request is issued in this tick;
-  // a synchronous throw becomes a rejection and a non-promise return (a mock
-  // returning undefined) is tolerated. Either way the rejection handler below
-  // sees every failure.
-  const sent = new Promise<unknown>((resolve) => resolve(api.setSettings(next)));
+  // An async function body runs synchronously up to its first await, so the
+  // request is issued in this tick; a synchronous throw becomes a rejection
+  // and a non-promise return (a mock returning undefined) is tolerated.
+  // Either way the rejection handler below sees every failure.
+  const send = async (): Promise<unknown> => api.setSettings(next);
+  const sent = send();
   return sent.then(clear, (err) => {
     clear();
     console.error("setSettings failed; reported via the notification channel", err);

@@ -25,12 +25,12 @@ export interface HydrateHandle {
   dispose(): void;
 }
 
-// Calls fetch synchronously (the Promise executor runs in this tick, so
-// callers and tests see the request issued in the same tick, as before the
-// guard) and turns a synchronous throw into a rejection that the caller's
-// onError handler receives.
-function start<T>(fetch: () => Promise<T>): Promise<T> {
-  return new Promise<T>((resolve) => resolve(fetch()));
+// Calls fetch synchronously (an async function body runs up to its first
+// await in this tick, so callers and tests see the request issued in the same
+// tick, as before the guard) and turns a synchronous throw into a rejection
+// that the caller's onError handler receives.
+async function start<T>(fetch: () => Promise<T>): Promise<T> {
+  return fetch();
 }
 
 export function hydrateSnapshot<T>(
