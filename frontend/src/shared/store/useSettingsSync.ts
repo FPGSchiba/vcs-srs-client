@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { api } from "../api/client";
 import { on, EV } from "../api/events";
 import { useSettings } from "./settings";
+import { hydrateSnapshot } from "./hydrate";
 import type {
   Settings,
   Keybind,
@@ -30,84 +31,104 @@ import type {
  */
 export function useSettingsSync(): void {
   useEffect(() => {
-    api
-      .getSettings()
-      .then((s) => useSettings.getState().setSettings(s))
-      .catch(() => {
-        /* not available yet — ignore */
-      });
-    api
-      .getKeybinds()
-      .then((k) => useSettings.getState().setKeybinds(k))
-      .catch(() => {
-        /* not available yet — ignore */
-      });
-    api
-      .getHotkeyState()
-      .then((h) => useSettings.getState().setHotkeyState(h))
-      .catch((err) => {
-        // Logged rather than swallowed: this is the one hydrate call whose
-        // failure is otherwise completely invisible. The store's optimistic
-        // `registered: true` default means a rejection here leaves the UI
-        // claiming global hotkeys are fine when nothing has confirmed that,
-        // so the console line is the only trace of why.
-        console.error("getHotkeyState failed; hotkey health is unknown", err);
-      });
-    api
-      .getJoystickState()
-      .then((j) => useSettings.getState().setJoystickState(j))
-      .catch((err) => {
-        // Logged for the same reason as getHotkeyState above: the store's
-        // honest `supported: false` default hides the capture affordance's
-        // joystick half, so a rejection here silently leaves it hidden even
-        // on a machine that does support it, with nothing but this line to
-        // explain why.
-        console.error("getJoystickState failed; joystick support is unknown", err);
-      });
-    api
-      .getAudioDevices()
-      .then((d) => useSettings.getState().setAudioDevices(d))
-      .catch(() => {
-        /* not available yet — ignore, the store's empty-list default already
-         * renders no devices */
-      });
-    api
-      .getAudioState()
-      .then((a) => useSettings.getState().setAudioState(a))
-      .catch((err) => {
-        // Logged for the same reason as getHotkeyState/getJoystickState
-        // above: the store's honest `running: false` default already hides
-        // any claim of health, so a rejection here silently leaves that in
-        // place with nothing but this line to explain why.
-        console.error("getAudioState failed; audio health is unknown", err);
-      });
+    const st = () => useSettings.getState();
+    // FE08: each snapshot channel is hydrated through hydrateSnapshot, and
+    // its push handler marks the hydrate stale BEFORE it writes the store,
+    // so a late hydrate result can never roll a pushed value back.
+    const settingsH = hydrateSnapshot(
+      () => api.getSettings(),
+      (s) => st().setSettings(s),
+      (err) => console.error("getSettings failed", err),
+    );
+    const keybindsH = hydrateSnapshot(
+      () => api.getKeybinds(),
+      (k) => st().setKeybinds(k),
+      (err) => console.error("getKeybinds failed", err),
+    );
+    const hotkeysH = hydrateSnapshot(
+      () => api.getHotkeyState(),
+      (h) => st().setHotkeyState(h),
+      // Logged rather than swallowed: this is the one hydrate call whose
+      // failure is otherwise completely invisible. The store's optimistic
+      // `registered: true` default means a rejection here leaves the UI
+      // claiming global hotkeys are fine when nothing has confirmed that,
+      // so the console line is the only trace of why.
+      (err) => console.error("getHotkeyState failed; hotkey health is unknown", err),
+    );
+    const joystickH = hydrateSnapshot(
+      () => api.getJoystickState(),
+      (j) => st().setJoystickState(j),
+      // Logged for the same reason as getHotkeyState above: the store's
+      // honest `supported: false` default hides the capture affordance's
+      // joystick half, so a rejection here silently leaves it hidden even
+      // on a machine that does support it, with nothing but this line to
+      // explain why.
+      (err) => console.error("getJoystickState failed; joystick support is unknown", err),
+    );
+    const devicesH = hydrateSnapshot(
+      () => api.getAudioDevices(),
+      (d) => st().setAudioDevices(d),
+      // The store's empty-list default already renders no devices.
+      (err) => console.error("getAudioDevices failed", err),
+    );
+    const audioStateH = hydrateSnapshot(
+      () => api.getAudioState(),
+      (a) => st().setAudioState(a),
+      // Logged for the same reason as getHotkeyState/getJoystickState
+      // above: the store's honest `running: false` default already hides
+      // any claim of health, so a rejection here silently leaves that in
+      // place with nothing but this line to explain why.
+      (err) => console.error("getAudioState failed; audio health is unknown", err),
+    );
     // Static data (internal/audio's own preset tables), not per-Manager
     // state -- fetched once here, not re-pushed on any event, unlike
-    // audioDevices/audioState above.
+    // audioDevices/audioState above, so it needs no stale-hydrate guard.
     api
       .getAudioEffectPresets()
-      .then((p) => useSettings.getState().setAudioEffectPresets(p))
-      .catch(() => {
-        /* not available yet -- the store's empty-lists default already
-         * renders no preset options */
+      .then((p) => st().setAudioEffectPresets(p))
+      .catch((err) => {
+        // The store's empty-lists default already renders no preset options.
+        console.error("getAudioEffectPresets failed", err);
       });
 
+    const handles = [settingsH, keybindsH, hotkeysH, joystickH, devicesH, audioStateH];
     const offs = [
-      on<Settings>(EV.settingsChanged, (s) => useSettings.getState().setSettings(s)),
-      on<Keybind[]>(EV.keybindsChanged, (k) => useSettings.getState().setKeybinds(k)),
-      on<HotkeyState>(EV.hotkeysState, (h) => useSettings.getState().setHotkeyState(h)),
+      on<Settings>(EV.settingsChanged, (s) => {
+        settingsH.pushed();
+        st().setSettings(s);
+      }),
+      on<Keybind[]>(EV.keybindsChanged, (k) => {
+        keybindsH.pushed();
+        st().setKeybinds(k);
+      }),
+      on<HotkeyState>(EV.hotkeysState, (h) => {
+        hotkeysH.pushed();
+        st().setHotkeyState(h);
+      }),
       // The joystick half of the same contract. The hydrate above runs once,
       // on mount, and the backend's view changes on its own afterwards: a
       // stick plugged in later, or a transient enumeration error clearing.
       // Without this subscription that first answer was the only one the UI
       // ever had, so a device attached after Settings mounted stayed invisible
       // and one bad poll pinned "Joystick unavailable" for the session.
-      on<JoystickState>(EV.joystickState, (j) => useSettings.getState().setJoystickState(j)),
-      on<AudioDevices>(EV.audioDevicesChanged, (d) => useSettings.getState().setAudioDevices(d)),
-      on<AudioState>(EV.audioState, (a) => useSettings.getState().setAudioState(a)),
-      on<AudioVU>(EV.audioVU, (v) => useSettings.getState().setVU(v)),
-      on<boolean>(EV.audioMicMuted, (m) => useSettings.getState().setMicMuted(m)),
+      on<JoystickState>(EV.joystickState, (j) => {
+        joystickH.pushed();
+        st().setJoystickState(j);
+      }),
+      on<AudioDevices>(EV.audioDevicesChanged, (d) => {
+        devicesH.pushed();
+        st().setAudioDevices(d);
+      }),
+      on<AudioState>(EV.audioState, (a) => {
+        audioStateH.pushed();
+        st().setAudioState(a);
+      }),
+      on<AudioVU>(EV.audioVU, (v) => st().setVU(v)),
+      on<boolean>(EV.audioMicMuted, (m) => st().setMicMuted(m)),
     ];
-    return () => offs.forEach((off) => off());
+    return () => {
+      offs.forEach((off) => off());
+      handles.forEach((h) => h.dispose());
+    };
   }, []);
 }

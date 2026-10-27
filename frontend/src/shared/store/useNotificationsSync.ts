@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { api } from "../api/client";
 import { on, EV } from "../api/events";
 import { useNotifications, type NotifySnapshot } from "./notifications";
+import { hydrateSnapshot } from "./hydrate";
 
 /**
  * useNotificationsSync hydrates the notification store from the backend and
@@ -15,21 +16,28 @@ import { useNotifications, type NotifySnapshot } from "./notifications";
  */
 export function useNotificationsSync(): void {
   useEffect(() => {
-    api
-      .getNotifications()
-      .then((s) => useNotifications.getState().setSnapshot(s))
-      .catch((err) => {
+    // FE08: a notifications:changed push during the hydrate is at least as
+    // new as the hydrate's answer, so the late answer is dropped.
+    const hydrate = hydrateSnapshot(
+      () => api.getNotifications(),
+      (s) => useNotifications.getState().setSnapshot(s),
+      (err) => {
         // Logged rather than swallowed, for the same reason
         // getHotkeyState's rejection is: the store's empty default renders
         // an honest "all clear", so a failure here is otherwise completely
         // invisible -- the UI would claim there is nothing to report when
         // nothing has confirmed that.
         console.error("getNotifications failed; the notification list is unknown", err);
-      });
-
-    const off = on<NotifySnapshot>(EV.notifications, (s) =>
-      useNotifications.getState().setSnapshot(s),
+      },
     );
-    return off;
+
+    const off = on<NotifySnapshot>(EV.notifications, (s) => {
+      hydrate.pushed();
+      useNotifications.getState().setSnapshot(s);
+    });
+    return () => {
+      off();
+      hydrate.dispose();
+    };
   }, []);
 }
