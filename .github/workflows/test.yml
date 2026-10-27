@@ -51,7 +51,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: FPGSchiba/vcs-srs-server
-          ref: main
+          # Pinned, not `main`: client CI must not go red because the server
+          # moved. Bump this SHA deliberately in the PR that needs newer server
+          # behaviour (Phase 6.9 track CL1 bumps it after SV1/SV3).
+          ref: c3096ce6acb421d2e530e0238471dacdf1b1128e
           path: .vcs-srs-server
 
       # The checked-out server has its OWN gitignored generated code --
@@ -162,7 +165,7 @@ jobs:
       - name: Export the server binary path
         run: echo "VCS_SERVER_BIN=${{ runner.temp }}/vcs-server${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
 
-      # Wails v3 (alpha.96) links against GTK4 + WebKitGTK 6.0 on Linux. The
+      # Wails v3 links against GTK4 + WebKitGTK 6.0 on Linux. The
       # race-enabled `go test ./...` and `go build` compile the main package,
       # which imports the Wails application (cgo), so these dev headers must be
       # present or pkg-config fails on gtk4 / webkitgtk-6.0. macOS and Windows

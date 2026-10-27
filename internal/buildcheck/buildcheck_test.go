@@ -323,3 +323,32 @@ func TestVendorDocHasNoDanglingDockerPath(t *testing.T) {
 		t.Error("internal/audio/opus/VENDOR.md still describes the removed wails-cross docker path")
 	}
 }
+
+// CI-13: Wails v2/v3 template leftovers at the repo root are gone; the real
+// build assets under build/ remain.
+func TestNoStaleRootLeftovers(t *testing.T) {
+	for _, rel := range []string{"linux", "config.yml", "appicon.icon", "appicon.png", "frontend/package.json.md5"} {
+		mustNotExist(t, rel)
+	}
+	for _, rel := range []string{"build/appicon.png", "build/config.yml"} {
+		if _, err := os.Stat(repoPath(t, rel)); err != nil {
+			t.Errorf("%s: %v", rel, err)
+		}
+	}
+}
+
+// CI-03 (client half): the integration server checkout is pinned to a SHA so
+// client CI cannot go red because the server's main moved.
+func TestServerCheckoutPinnedToSHA(t *testing.T) {
+	text := readRepoFile(t, ".github/workflows/test.yml")
+	m := regexp.MustCompile(`repository: FPGSchiba/vcs-srs-server\s*\n(?:\s*#[^\n]*\n)*\s*ref: ([0-9a-f]{40})\b`).FindStringSubmatch(text)
+	if m == nil {
+		t.Fatal("test.yml: vcs-srs-server checkout is not pinned to a 40-hex SHA")
+	}
+	if want := "c3096ce6acb421d2e530e0238471dacdf1b1128e"; m[1] != want {
+		t.Errorf("server checkout pinned to %s, want %s", m[1], want)
+	}
+	if strings.Contains(text, "alpha.96") {
+		t.Error("test.yml still names Wails alpha.96")
+	}
+}
