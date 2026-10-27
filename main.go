@@ -223,7 +223,7 @@ func main() {
 
 	// Keybind store, seeded from config (falls back to shipped defaults on a
 	// fresh install), and the OS hotkey manager. The OS hotkey (and joystick)
-	// layers get app.HotkeyHandler(gui), an unregistered adapter, so
+	// layers get the HotkeyHandler adapter (unregistered with Wails), so
 	// Pressed/Released/ForceReleased stay off the webview-bound App surface:
 	// do not re-export them on App, or any webview script could key PTT.
 	kb := keybinds.New()
