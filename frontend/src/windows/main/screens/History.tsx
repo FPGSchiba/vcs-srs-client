@@ -133,7 +133,10 @@ export function History() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <button type="button" className="btn" onClick={() => void api.exportHistoryCsv()}>
+        <button type="button" className="btn" onClick={() =>
+            // A write failure is raised by Go as history:export; only log here.
+            api.exportHistoryCsv().catch((e) => console.error("exportHistoryCsv failed", e))
+          }>
           <Icon name="download" size={11} /> EXPORT CSV
         </button>
       </div>

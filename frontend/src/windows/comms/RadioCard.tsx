@@ -32,7 +32,12 @@ interface Props {
  * single source of truth for radio fields.
  *
  * Selection is different: a.st.SelectedRadio has no server echo (see
- * App.SelectRadio), so it IS applied optimistically to the shared store.
+ * App.SelectRadio), so it IS applied optimistically to the shared store. If
+ * SelectRadio fails, the card re-reads api.voiceState() and shows what the
+ * backend actually targets -- Go applies the selection before the persist
+ * that can fail, so a blind rollback could be just as wrong. The failure
+ * itself is reported by Go's notification channel (Phase 6.9 CL3, FE09); a
+ * failed edit is likewise reported there and only logged here.
  *
  * Transmit state is derived: this radio's own PTT action held, or `global.ptt`
  * held with this radio as the FROZEN press-time target. Using live `selected`
@@ -61,12 +66,19 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
   const Shell = SHELLS[variant.orientation];
 
   function commit(next: RadioDTO) {
-    void api.updateRadioInfo({ muted, radios: allRadios.map((r) => (r.id === next.id ? next : r)) });
+    api
+      .updateRadioInfo({ muted, radios: allRadios.map((r) => (r.id === next.id ? next : r)) })
+      .catch((e) => console.error("updateRadioInfo failed; reported via notifications", e));
   }
 
   function select() {
     useRadios.getState().setSelectedRadioId(radio.id);
-    void api.selectRadio(radio.id);
+    api.selectRadio(radio.id).catch(() =>
+      api
+        .voiceState()
+        .then((vs) => useRadios.getState().setSelectedRadioId(vs.selected_radio))
+        .catch(console.error),
+    );
   }
 
   const selected = selectedRadioId === radio.id;

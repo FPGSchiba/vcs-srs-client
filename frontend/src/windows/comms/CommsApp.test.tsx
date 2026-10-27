@@ -16,6 +16,18 @@ const revertProfile = vi.fn();
 const saveProfile = vi.fn();
 const resetLayout = vi.fn();
 const getProfileState = vi.fn().mockResolvedValue({ active_path: "", active_name: "", dirty: false, dir: "" });
+const closeWindow = vi.fn().mockResolvedValue(undefined);
+// vitest attaches its own handlers to every promise a vi.fn returns (to
+// record settled results), which would mark a rejection as handled. The
+// action mocks below hand the component a derived promise nobody else has
+// observed, so an unhandled rejection is still detectable.
+const fresh = <T,>(p: Promise<T>): Promise<T> => Promise.resolve(p).then((v) => v);
+
+// Node's process, typed locally: the project has no @types/node.
+type Listener = (reason: unknown) => void;
+const proc = (globalThis as unknown as {
+  process: { on(e: string, f: Listener): void; off(e: string, f: Listener): void };
+}).process;
 
 vi.mock("../../shared/api/client", () => ({
   api: {
@@ -29,14 +41,14 @@ vi.mock("../../shared/api/client", () => ({
     getAudioEffectPresets: () => getAudioEffectPresets(),
     voiceState: () => voiceState(),
     getCommsLayout: () => getCommsLayout(),
-    setCommsLayout: (l: unknown) => setCommsLayout(l),
-    revertProfile: () => revertProfile(),
-    saveProfile: () => saveProfile(),
-    resetLayout: () => resetLayout(),
+    setCommsLayout: (l: unknown) => fresh(setCommsLayout(l)),
+    revertProfile: () => fresh(revertProfile()),
+    saveProfile: () => fresh(saveProfile()),
+    resetLayout: () => fresh(resetLayout()),
     getProfileState: () => getProfileState(),
-    closeWindow: vi.fn(),
-    updateRadioInfo: vi.fn(),
-    selectRadio: vi.fn(),
+    closeWindow: (id: string) => fresh(closeWindow(id)),
+    updateRadioInfo: vi.fn().mockResolvedValue(undefined),
+    selectRadio: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -272,6 +284,7 @@ function setupBackend() {
   revertProfile.mockReset().mockResolvedValue(undefined);
   saveProfile.mockReset().mockResolvedValue(undefined);
   resetLayout.mockReset().mockResolvedValue(undefined);
+  closeWindow.mockReset().mockResolvedValue(undefined);
   useSettings.setState({
     settings: null, keybinds: [],
     hotkeys: { registered: true, error: "", failed: {}, permission: "not_applicable" },
@@ -365,6 +378,39 @@ describe("CommsApp profile chrome", () => {
     fireEvent.click(screen.getByRole("button", { name: /reset/i }));
     expect(resetLayout).toHaveBeenCalledTimes(1);
     expect(revertProfile).toHaveBeenCalledTimes(1);
+  });
+
+  // FE09: every Comms action is reported by Go's notification channel; the
+  // window only logs, and must never leave a rejection unhandled.
+  it("rejected save/revert/reset/layout flush produce no unhandled rejection", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const unhandled = vi.fn();
+    proc.on("unhandledRejection", unhandled);
+    try {
+      setProfile({ active_path: "/p/x.vcs.json", active_name: "Fleet Op", dirty: true, dir: "/p" });
+      getClientState.mockReset().mockResolvedValue(twoRadios);
+      saveProfile.mockReset().mockRejectedValue(new Error("save"));
+      revertProfile.mockReset().mockRejectedValue(new Error("revert"));
+      resetLayout.mockReset().mockRejectedValue(new Error("reset"));
+      setCommsLayout.mockReset().mockRejectedValue(new Error("layout"));
+      closeWindow.mockReset().mockRejectedValue(new Error("close"));
+      render(<CommsApp />);
+      await screen.findByText("Alpha");
+      // A pending layout edit, so SAVE's flush sends one.
+      fireEvent.keyDown(screen.getAllByRole("button", { name: /resize/i })[0], { key: "ArrowLeft" });
+      fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+      fireEvent.click(screen.getByRole("button", { name: /revert/i }));
+      fireEvent.click(screen.getByRole("button", { name: /reset/i }));
+      fireEvent.click(screen.getByRole("button", { name: /close/i }));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      expect(saveProfile).toHaveBeenCalled();
+      expect(setCommsLayout).toHaveBeenCalled();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      proc.off("unhandledRejection", unhandled);
+    }
   });
 });
 

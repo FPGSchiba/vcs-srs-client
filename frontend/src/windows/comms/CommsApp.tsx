@@ -75,7 +75,7 @@ export function CommsApp() {
     timer.current = undefined;
     const l = pending.current;
     pending.current = null;
-    if (l) void api.setCommsLayout(l);
+    if (l) api.setCommsLayout(l).catch((e) => console.error("setCommsLayout failed", e));
   }, []);
 
   const commit = useCallback(
@@ -220,7 +220,7 @@ export function CommsApp() {
               title="Save changes into the active profile"
               onClick={() => {
                 flush(); // an unsent drag must be part of what is saved
-                void api.saveProfile();
+                api.saveProfile().catch((e) => console.error("saveProfile failed", e));
               }}
             >
               SAVE
@@ -231,7 +231,9 @@ export function CommsApp() {
               type="button"
               className="btn btn-sm"
               title="Discard changes and reload the active profile"
-              onClick={() => void api.revertProfile()}
+              onClick={() =>
+                api.revertProfile().catch((e) => console.error("revertProfile failed", e))
+              }
             >
               REVERT
             </button>
@@ -240,7 +242,7 @@ export function CommsApp() {
             type="button"
             className="btn btn-sm"
             title="Restore the default layout"
-            onClick={() => void api.resetLayout()}
+            onClick={() => api.resetLayout().catch((e) => console.error("resetLayout failed", e))}
           >
             RESET
           </button>
@@ -249,7 +251,9 @@ export function CommsApp() {
             className="close"
             aria-label="close"
             title="Close"
-            onClick={() => void api.closeWindow("comms")}
+            onClick={() =>
+              api.closeWindow("comms").catch((e) => console.error("closeWindow failed", e))
+            }
           >
             <Icon name="close" size={14} />
           </button>
