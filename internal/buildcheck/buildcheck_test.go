@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -117,6 +118,71 @@ func TestCIScripts(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Errorf("%s failed: %v\n%s", s, err, out)
+		}
+	}
+}
+
+// taskBlock returns the text of the Taskfile task named key (at two-space
+// indent) up to the next task key at the same indent.
+func taskBlock(t *testing.T, text, key string) string {
+	t.Helper()
+	start := strings.Index(text, "\n  "+key+":\n")
+	if start < 0 {
+		t.Fatalf("task %q not found", key)
+	}
+	rest := text[start+1:]
+	next := regexp.MustCompile(`\n  [A-Za-z0-9:_.-]+:\n`).FindStringIndex(rest[len(key)+3:])
+	if next == nil {
+		return rest
+	}
+	return rest[:len(key)+3+next[0]]
+}
+
+// CI-05: production builds keep VCS stamping so version.Build() reports the
+// git revision; dev builds keep -buildvcs=false.
+func TestProductionBuildFlagsKeepVCS(t *testing.T) {
+	for _, os := range []string{"windows", "linux", "darwin"} {
+		rel := "build/" + os + "/Taskfile.yml"
+		var line string
+		for _, l := range strings.Split(readRepoFile(t, rel), "\n") {
+			if strings.Contains(l, `BUILD_FLAGS: '{{if eq .DEV "true"}}`) {
+				line = l
+				break
+			}
+		}
+		if line == "" {
+			t.Errorf("%s: no BUILD_FLAGS line", rel)
+			continue
+		}
+		dev, prod, ok := strings.Cut(line, "{{else}}")
+		if !ok {
+			t.Errorf("%s: BUILD_FLAGS has no {{else}} branch", rel)
+			continue
+		}
+		if !strings.Contains(dev, "-buildvcs=false") {
+			t.Errorf("%s: dev branch lost -buildvcs=false", rel)
+		}
+		if strings.Contains(prod, "-buildvcs") {
+			t.Errorf("%s: production branch still sets -buildvcs: %s", rel, prod)
+		}
+		if !strings.Contains(prod, "-trimpath") {
+			t.Errorf("%s: production branch lost -trimpath", rel)
+		}
+	}
+}
+
+// CI-12: the Taskfile installs from the lockfile and fails on an untidy
+// module in CI instead of rewriting it.
+func TestTaskfileAvoidsRepeatedWork(t *testing.T) {
+	text := readRepoFile(t, "build/Taskfile.yml")
+	npm := taskBlock(t, text, "install:frontend:deps:npm")
+	if !strings.Contains(npm, "- npm ci") || strings.Contains(npm, "- npm install") {
+		t.Errorf("install:frontend:deps:npm must run `npm ci`, not `npm install`:\n%s", npm)
+	}
+	tidy := taskBlock(t, text, "go:mod:tidy")
+	for _, want := range []string{"run: once", "go mod tidy -diff"} {
+		if !strings.Contains(tidy, want) {
+			t.Errorf("go:mod:tidy lacks %q:\n%s", want, tidy)
 		}
 	}
 }

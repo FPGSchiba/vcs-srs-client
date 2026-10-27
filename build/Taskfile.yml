@@ -2,10 +2,14 @@ version: '3'
 
 tasks:
   go:mod:tidy:
-    summary: Runs `go mod tidy`
+    summary: Runs `go mod tidy` (in CI, `go mod tidy -diff`, which fails on an untidy module instead of rewriting it)
     internal: true
+    # once: several tasks dep on this; one tidy per `task` invocation is enough.
+    run: once
     cmds:
-      - go mod tidy
+      # Task exposes environment variables as template variables; GitHub
+      # Actions sets CI=true.
+      - '{{if .CI}}go mod tidy -diff{{else}}go mod tidy{{end}}'
 
   install:frontend:deps:
     summary: Install frontend dependencies
@@ -23,7 +27,7 @@ tasks:
       - sh: npm --version
         msg: "npm not found. Install Node.js from https://nodejs.org/en/download/"
     cmds:
-      - npm install
+      - npm ci
 
   install:frontend:deps:bun:
     dir: frontend
