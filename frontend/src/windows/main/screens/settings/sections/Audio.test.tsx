@@ -3,13 +3,15 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Audio } from "./Audio";
 import { useSettings } from "../../../../../shared/store/settings";
+import { usePendingSettings } from "../../../../../shared/store/settingsCommit";
 
 const setSettings = vi.fn();
+const startMicTest = vi.fn(() => Promise.resolve());
 vi.mock("../../../../../shared/api/client", () => ({
   api: {
     setSettings: (...a: unknown[]) => setSettings(...a),
     getAudioDevices: () => Promise.resolve({ inputs: [], outputs: [] }),
-    startMicTest: () => Promise.resolve(),
+    startMicTest: () => startMicTest(),
     stopMicTest: () => Promise.resolve(),
   },
 }));
@@ -46,7 +48,12 @@ function seed() {
 }
 
 describe("Audio settings", () => {
-  beforeEach(() => { setSettings.mockClear(); seed(); });
+  beforeEach(() => {
+    setSettings.mockClear();
+    startMicTest.mockReset().mockImplementation(() => Promise.resolve());
+    usePendingSettings.setState({ pending: null });
+    seed();
+  });
 
   it("renders exactly the devices the backend hands it, synthesising none of its own", () => {
     render(<Audio />);
@@ -101,5 +108,16 @@ describe("Audio settings", () => {
     const { container: container2 } = render(<Audio />);
     const lit2 = container2.querySelectorAll('[data-vu-seg][data-lit="true"]');
     expect(lit2.length).toBe(15);
+  });
+
+  it("a rejected startMicTest leaves the button on TEST MIC", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    startMicTest.mockImplementation(() => Promise.reject(new Error("audio unavailable")));
+    render(<Audio />);
+    await userEvent.click(screen.getByRole("button", { name: /test mic/i }));
+    await waitFor(() => expect(startMicTest).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("button", { name: /test mic/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /stop test/i })).not.toBeInTheDocument();
   });
 });

@@ -7,6 +7,10 @@ import { VU } from "../../../../../shared/components/VU";
 import { Icon } from "../../../../../shared/components/Icon";
 import { api } from "../../../../../shared/api/client";
 import { useSettings } from "../../../../../shared/store/settings";
+import {
+  commitSettings,
+  useEffectiveSettings,
+} from "../../../../../shared/store/settingsCommit";
 import type {
   AudioSettings,
   AudioLevels,
@@ -50,18 +54,20 @@ function deviceOptions(devices: AudioDevice[], disambiguateDefault?: string) {
  * MASTER knob inside MIC TEST -- all four bus knobs now live in their own
  * LEVELS panel instead, leaving MIC TEST with just its button and VU meter.
  *
- * Go is the single source of truth, exactly like General.tsx: every control
- * calls `api.setSettings` with the full settings struct (audio patched in)
- * and never writes the store itself -- a row only re-renders once the
- * backend's `settings:changed` event lands and useSettingsSync's
- * subscription writes the new struct into the store. There is no local
- * mirror of any PERSISTED field here. `testing` below is the one piece of
- * local state, and it holds only the mic-test button's own ephemeral UI
- * state (mirroring Keybinds.tsx's `capturingId`) -- it is never written back
- * into `settings.audio`.
+ * Go is the single source of truth, exactly like General.tsx: the store is
+ * written only by the hydrate and the backend's `settings:changed` echo, and
+ * every control goes through `commitSettings`, which patches `audio` on the
+ * newest in-flight request and shows that request as `pending` until it
+ * settles. A failed save clears `pending`, so the control returns to the
+ * stored value; Go reports the failure through the notification channel
+ * (Phase 6.9 CL3, D11). `testing` below is the one piece of local state, and
+ * it holds only the mic-test button's own ephemeral UI state (mirroring
+ * Keybinds.tsx's `capturingId`) -- it is never written back into
+ * `settings.audio`. It turns on only once `startMicTest` has resolved, so a
+ * failed start leaves the button on TEST MIC.
  */
 export function Audio() {
-  const settings = useSettings((s) => s.settings);
+  const settings = useEffectiveSettings();
   const devices = useSettings((s) => s.audioDevices);
   const vu = useSettings((s) => s.vu);
   const [testing, setTesting] = useState(false);
@@ -76,19 +82,22 @@ export function Audio() {
   // override active and no control left on screen to turn it off.
   useEffect(() => {
     return () => {
-      if (testingRef.current) void api.stopMicTest();
+      if (testingRef.current) api.stopMicTest().catch(console.error);
     };
   }, []);
 
   if (!settings) return null;
   const audio = settings.audio;
 
-  const update = (patch: Partial<AudioSettings>) => {
-    void api.setSettings({ ...settings, audio: { ...audio, ...patch } });
+  // Patches are applied to the BASE commitSettings hands in (the newest
+  // in-flight request, else the store), never to this render's `audio`.
+  const updateAudio = (patch: (a: AudioSettings) => Partial<AudioSettings>) => {
+    void commitSettings((s) => ({ ...s, audio: { ...s.audio, ...patch(s.audio) } }));
   };
+  const update = (patch: Partial<AudioSettings>) => updateAudio(() => patch);
 
   const updateLevel = (key: keyof AudioLevels, knobValue: number) => {
-    update({ levels: { ...audio.levels, [key]: fromKnob(knobValue) } });
+    updateAudio((a) => ({ levels: { ...a.levels, [key]: fromKnob(knobValue) } }));
   };
 
   const selectDevice = (kind: "input" | "output", id: string) => {
@@ -103,11 +112,15 @@ export function Audio() {
 
   const toggleMicTest = () => {
     if (testing) {
-      void api.stopMicTest();
-      setTesting(false);
+      api
+        .stopMicTest()
+        .catch(console.error)
+        .finally(() => setTesting(false));
     } else {
-      void api.startMicTest();
-      setTesting(true);
+      api
+        .startMicTest()
+        .then(() => setTesting(true))
+        .catch(console.error);
     }
   };
 

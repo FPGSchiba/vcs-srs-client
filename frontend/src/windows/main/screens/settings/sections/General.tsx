@@ -1,9 +1,11 @@
 import { Panel } from "../../../../../shared/components/Panel";
 import { SettingRow } from "../../../../../shared/components/SettingRow";
 import { Toggle } from "../../../../../shared/components/Toggle";
-import { api } from "../../../../../shared/api/client";
-import { useSettings } from "../../../../../shared/store/settings";
 import type { Settings } from "../../../../../shared/store/settings";
+import {
+  commitSettings,
+  useEffectiveSettings,
+} from "../../../../../shared/store/settingsCommit";
 
 /**
  * General renders the General-section toggles from the design prototype's
@@ -11,19 +13,21 @@ import type { Settings } from "../../../../../shared/store/settings";
  * placed next to "Play connection sounds" because the two gate the same kind
  * of thing (an SFX the user may not want) through the same shape of setting.
  *
- * Go is the single source of truth: every toggle calls `api.setSettings`
- * with the full struct and never updates the store itself — the row only
- * re-renders once the backend's `settings:changed` event lands and
- * SettingsScreen's subscription writes the new struct into the store. There
- * is no local mirror state here.
+ * Go is the single source of truth: the store is written only by the
+ * hydrate and the backend's `settings:changed` echo. Every toggle goes
+ * through `commitSettings`, which sends the full struct built from the
+ * newest in-flight request (so two quick changes both survive) and shows
+ * that request as `pending` until it settles. A failed save clears
+ * `pending`, so the toggle returns to the stored value; Go reports the
+ * failure through the notification channel (Phase 6.9 CL3, D11).
  */
 export function General() {
-  const settings = useSettings((s) => s.settings);
+  const settings = useEffectiveSettings();
 
   if (!settings) return null;
 
   const update = (patch: Partial<Settings>) => {
-    void api.setSettings({ ...settings, ...patch });
+    void commitSettings((s) => ({ ...s, ...patch }));
   };
 
   return (
