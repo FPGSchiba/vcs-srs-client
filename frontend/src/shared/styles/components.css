@@ -4,6 +4,19 @@
    Tokens live in tokens.css; base resets live in global.css.
    ============================================================ */
 
+/* ========== Visually hidden, still announced by screen readers ========== */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border-width: 0;
+}
+
 /* ========== Title bar drag region ========== */
 .topbar { cursor: grab; }
 .topbar.dragging { cursor: grabbing; }
