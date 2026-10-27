@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import React from "react";
 import { History } from "./History";
@@ -246,5 +246,27 @@ describe("History screen", () => {
     appendedHandler?.(row({ sender: "AfterUnmount" }));
     expect(useHistory.getState().entries).toHaveLength(lenBefore);
     expect(useHistory.getState().entries.some((e) => e.sender === "AfterUnmount")).toBe(false);
+  });
+
+  // FE08: history is a DELTA channel. An append during the hydrate must not
+  // vanish under the (older) hydrate result, and must not be duplicated by
+  // the re-fetch that already contains it.
+  it("an append during the hydrate re-fetches and shows no duplicate", async () => {
+    const { api } = await import("../../../shared/api/client");
+    const getHistory = vi.mocked(api.getHistory);
+    const e = row({ sender: "RaceSender" });
+    let resolveFirst!: (v: HistoryEntry[]) => void;
+    getHistory
+      .mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)))
+      .mockImplementationOnce(async () => [e]);
+    render(<History />);
+    const appended = (mockEventHandlers.get("history:appended") ?? []).find((h) => h.live)!;
+    act(() => appended.handler(e));
+    await act(async () => {
+      resolveFirst([]);
+    });
+    await waitFor(() => expect(getHistory).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText("RaceSender")).toHaveLength(1));
+    expect(useHistory.getState().entries).toHaveLength(1);
   });
 });

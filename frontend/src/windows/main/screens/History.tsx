@@ -3,6 +3,7 @@ import { api } from "../../../shared/api/client";
 import type { HistoryEntry } from "../../../shared/api/client";
 import { EV, on } from "../../../shared/api/events";
 import { useHistory } from "../../../shared/store/history";
+import { hydrateDelta } from "../../../shared/store/hydrate";
 import { Icon } from "../../../shared/components/Icon";
 
 const WINDOWS = [
@@ -23,7 +24,8 @@ const WINDOWS = [
  * present rather than from the current radio list -- a channel you have
  * since retuned away from still has entries worth finding.
  *
- * The log is Go-owned: this hydrates once with App.GetHistory and applies
+ * The log is Go-owned: this hydrates once with App.GetHistory (re-fetching
+ * if a delta races it, see shared/store/hydrate.ts) and applies
  * `history:appended` deltas after that. It is not a full-snapshot broadcast
  * like notifications; see the store's own note.
  */
@@ -34,17 +36,28 @@ export function History() {
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    api
-      .getHistory()
-      .then((rows) => useHistory.getState().replaceAll(rows ?? []))
-      .catch(() => {
-        /* not wired yet -- ignore */
-      });
+    // FE08: history is a DELTA channel, so an append or clear during the
+    // hydrate re-fetches (bounded) instead of letting the older snapshot
+    // wipe it, and instead of keeping the delta and duplicating it.
+    const hydrate = hydrateDelta(
+      () => api.getHistory(),
+      (rows) => useHistory.getState().replaceAll(rows ?? []),
+      (e) => console.error("getHistory failed", e),
+    );
     const offs = [
-      on<HistoryEntry>(EV.historyAppended, (e) => useHistory.getState().append(e)),
-      on<null>(EV.historyCleared, () => useHistory.getState().clear()),
+      on<HistoryEntry>(EV.historyAppended, (e) => {
+        hydrate.pushed();
+        useHistory.getState().append(e);
+      }),
+      on<null>(EV.historyCleared, () => {
+        hydrate.pushed();
+        useHistory.getState().clear();
+      }),
     ];
-    return () => offs.forEach((off) => off());
+    return () => {
+      offs.forEach((off) => off());
+      hydrate.dispose();
+    };
   }, []);
 
   const channels = useMemo(() => {
