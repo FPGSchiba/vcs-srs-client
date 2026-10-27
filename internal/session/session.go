@@ -306,6 +306,27 @@ func (s *Session) attemptError(attemptCtx, pctx context.Context, err error) erro
 	return err
 }
 
+// teardownLive retires the current stream generation, cancels the stream and
+// closes the connection, if any, without publishing a state change. Caller
+// holds lifeMu.
+func (s *Session) teardownLive() {
+	s.mu.Lock()
+	if s.conn == nil && s.cancel == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.streamGen++
+	conn, cancel := s.conn, s.cancel
+	s.conn, s.control, s.cancel = nil, nil, nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
 // Connect runs the full guest sequence. Returns a typed error synchronously for
 // any pre-connected failure; post-connected transitions flow through events.
 //
@@ -326,6 +347,11 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 			s.setConnState(events.ConnDisconnected)
 		}
 	}()
+
+	// GO-02: a live connection is torn down before the new one is dialled,
+	// exactly as Reconnect replaces one -- otherwise its conn and update
+	// stream leak, one per extra Connect.
+	s.teardownLive()
 
 	dialer := s.dep.Dialer
 	if dialer == nil {
@@ -415,12 +441,22 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 
 // Disconnect tears down the stream and connection.
 func (s *Session) Disconnect(ctx context.Context) error {
+	// Abort a connect still negotiating BEFORE waiting for lifeMu, which
+	// that connect holds: a Logout must not wait out the post-dial bound.
+	s.CancelConnect()
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+
 	s.mu.Lock()
 	conn, cc, cancel := s.conn, s.control, s.cancel
 	s.conn, s.control, s.cancel = nil, nil, nil
 	s.streamGen++ // retire this stream's generation
+	// GO-10: forget the session, so a stale RECONNECT cannot resurrect it.
+	s.lastDialer, s.lastToken = nil, ""
 	s.mu.Unlock()
 
+	// Order kept for SV1 C12: the stream ctx is cancelled before the
+	// Disconnect RPC, so the server ending our stream is ignored here.
 	if cancel != nil {
 		cancel()
 	}
@@ -430,6 +466,8 @@ func (s *Session) Disconnect(ctx context.Context) error {
 	if conn != nil {
 		_ = conn.Close()
 	}
+	// CON-07: drop the roster and the voice secret with the session.
+	s.st.ResetSession()
 	s.st.ClearSelf()
 	tagged := events.New(s.em)
 	s.setConnState(events.ConnDisconnected)

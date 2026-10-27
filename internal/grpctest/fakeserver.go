@@ -52,6 +52,7 @@ type Fake struct {
 	fails     map[string]error
 	calls     []string
 	streamEnd chan error
+	active    int // SubscribeToUpdates handlers currently running
 }
 
 // NewFake returns a Fake with sensible defaults (guest enabled).
@@ -106,6 +107,15 @@ func (f *Fake) Calls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
+}
+
+// ActiveStreams returns how many SubscribeToUpdates handlers are running. A
+// stream the client cancelled or closed stops counting once the server
+// notices, so a leaked client stream shows up as a count above one.
+func (f *Fake) ActiveStreams() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
 }
 
 // SetSync replaces the clients and voice secret the next SyncClient returns
@@ -244,8 +254,14 @@ func (f *Fake) Ping(ctx context.Context, _ *srspb.PingRequest) (*srspb.PingRespo
 func (f *Fake) SubscribeToUpdates(_ *srspb.Empty, stream srspb.SRSService_SubscribeToUpdatesServer) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, "SubscribeToUpdates")
+	f.active++
 	end := f.streamEnd
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+	}()
 	for {
 		select {
 		case u, ok := <-f.updates:
