@@ -135,15 +135,85 @@ func (s *Session) SetControlStateObserver(fn func(events.ConnectionState)) {
 	s.dep.OnControlState = fn
 }
 
-// startStreamLocked launches the update-stream consumer and returns the
-// generation it was launched under. Caller holds s.mu.
-func (s *Session) startStreamLocked(ctx context.Context, cc *control.Client) {
+// startStreamLocked launches the update-stream consumer under a new
+// generation. A nil stream subscribes inside the goroutine; a non-nil one
+// (resync) is an already-open stream to consume. Caller holds s.mu.
+func (s *Session) startStreamLocked(ctx context.Context, cc *control.Client, stream srspb.SRSService_SubscribeToUpdatesClient) {
 	s.streamGen++
 	gen := s.streamGen
 	go func() {
-		err := cc.ConsumeUpdates(ctx, s.st, s.em)
+		var err error
+		if stream != nil {
+			err = cc.Consume(stream, s.st, s.em)
+		} else {
+			err = cc.ConsumeUpdates(ctx, s.st, s.em)
+		}
 		s.handleStreamEnd(ctx, gen, err)
 	}()
+}
+
+// resync answers SV2's C13 ("update stream fell behind: resubscribe and call
+// SyncClient") on the same connection, from the ended stream's goroutine:
+//
+//  1. re-check that gen is still current and the connection live;
+//  2. resubscribe FIRST (Subscribe opens the stream synchronously), and start
+//     consuming it under a new generation;
+//  3. then SyncClient, bounded by the post-dial timeout, which replaces the
+//     roster;
+//  4. on success publish connected again (consumers rehydrate on it);
+//  5. on failure, a session-ended verdict ends the session, anything else is
+//     an ordinary control loss.
+//
+// streamCtx is the ended stream's context, which the new stream reuses: the
+// connection's stream cancel (s.cancel) still governs it. There is no rate
+// cap; the server sends C13 only after its buffer of stalled events overflows.
+func (s *Session) resync(streamCtx context.Context, gen uint64) {
+	s.mu.Lock()
+	if gen != s.streamGen || s.conn == nil || s.control == nil {
+		s.mu.Unlock()
+		return
+	}
+	cc := s.control
+	s.mu.Unlock()
+
+	fail := func(err error, current uint64) {
+		if streamCtx.Err() != nil {
+			return // Disconnect/Reconnect/endSession ended it on purpose
+		}
+		if v, reason := classifyRPCError(err); v == verdictSessionEnded {
+			_ = s.endSession(reason)
+			return
+		}
+		s.log("resync failed", err)
+		s.markControlLost(current)
+	}
+
+	stream, err := cc.Subscribe(streamCtx)
+	if err != nil {
+		fail(err, gen)
+		return
+	}
+	s.mu.Lock()
+	if gen != s.streamGen || s.conn == nil {
+		s.mu.Unlock()
+		return // replaced while subscribing; that path owns the state
+	}
+	s.startStreamLocked(streamCtx, cc, stream)
+	newGen := s.streamGen
+	s.mu.Unlock()
+
+	sctx, cancel := context.WithTimeout(streamCtx, s.postDialTimeout())
+	defer cancel()
+	if _, err := cc.SyncClient(sctx, s.st); err != nil {
+		fail(err, newGen)
+		return
+	}
+	s.mu.Lock()
+	current := newGen == s.streamGen
+	s.mu.Unlock()
+	if current {
+		s.setConnState(events.ConnConnected)
+	}
 }
 
 // handleStreamEnd reports an update stream's termination as a control-link
@@ -183,7 +253,8 @@ func (s *Session) handleStreamEnd(ctx context.Context, gen uint64, err error) {
 		slog.Default().Warn("session: update stream superseded by another subscriber", "err", err)
 		s.markControlLost(gen)
 	case verdictResync:
-		s.markControlLost(gen) // replaced by the C13 resync in Task 7
+		// SV2 C13 (D6): fell behind, not a session loss.
+		s.resync(ctx, gen)
 	default:
 		s.markControlLost(gen)
 	}
@@ -531,7 +602,7 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 	s.conn, s.control, s.cancel = conn, cc, cancel
 	s.lastDialer = dialer
 	s.lastToken = guest.Token
-	s.startStreamLocked(streamCtx, cc)
+	s.startStreamLocked(streamCtx, cc, nil)
 	s.mu.Unlock()
 
 	s.setConnState(events.ConnConnected)
@@ -655,7 +726,7 @@ func (s *Session) Reconnect(ctx context.Context) (err error) {
 		_ = s.conn.Close()
 	}
 	s.conn, s.control, s.cancel = conn, cc, cancel
-	s.startStreamLocked(streamCtx, cc)
+	s.startStreamLocked(streamCtx, cc, nil)
 	s.mu.Unlock()
 	s.setConnState(events.ConnConnected)
 	return nil
