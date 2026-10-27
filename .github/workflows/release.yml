@@ -123,7 +123,7 @@ jobs:
       # has ever been pushed, so it had never run this far.
       - name: Install Linux GUI deps
         if: matrix.platform == 'linux-amd64'
-        timeout-minutes: 10
+        timeout-minutes: 15
         uses: ./.github/actions/linux-gui-deps
 
       # windows-latest ships no NSIS. Pinned like test.yml pins protoc via
