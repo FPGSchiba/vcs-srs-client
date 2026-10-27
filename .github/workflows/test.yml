@@ -26,12 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
       # Phase 5's voice tests run against the REAL server rather than a
       # hand-written fake. A fake can only encode our own reading of the
       # protocol, so it cannot catch a MISREADING of it -- which is the
@@ -45,8 +39,37 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: FPGSchiba/vcs-srs-server
-          ref: main
+          # Pinned, not `main`: client CI must not go red because the server
+          # moved. Bump this SHA deliberately in the PR that needs newer server
+          # behaviour (Phase 6.9 track CL1 bumps it after SV1/SV3).
+          ref: c3096ce6acb421d2e530e0238471dacdf1b1128e
           path: .vcs-srs-server
+
+      # TWO TOOLCHAINS IN ONE JOB. The server is generated and built with the
+      # SERVER's own Go (read from its go.mod -- go 1.25.0 at the pinned SHA),
+      # and only then does the job switch to the client's pinned go1.27.3
+      # (the second setup-go below, after "Export the server binary path").
+      # setup-go exports GOTOOLCHAIN=local and prepends its Go to PATH, so each
+      # step runs exactly the toolchain most recently set up -- no silent
+      # auto-download. Why split at all: the server's gqlgen (v0.17.89, with
+      # golang.org/x/tools v0.42.0) exits 1 with no message when run under
+      # go1.27.3, which is what failed this job once the client moved to 1.27.
+      # The server is not ours to re-toolchain from here; when the server repo
+      # moves to Go 1.27 itself, bumping the pinned SHA above carries that over
+      # with no change to this step.
+      #
+      # cache: false -- both setup-go steps share one GOMODCACHE, whose files
+      # are read-only, so two cache restores into it can collide. The
+      # server's modules are downloaded fresh instead; only the client's
+      # setup-go caches.
+      #
+      # No toolchain assert here: the assert script compares against a
+      # `toolchain` directive, which the server's go.mod (not ours) lacks.
+      - name: Setup Go (server's go.mod)
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: .vcs-srs-server/go.mod
+          cache: false
 
       # The checked-out server has its OWN gitignored generated code --
       # srspb/, voicecontrolpb/, vcsauthpb/ (protoc) and graphql/generated/
@@ -156,7 +179,31 @@ jobs:
       - name: Export the server binary path
         run: echo "VCS_SERVER_BIN=${{ runner.temp }}/vcs-server${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
 
-      # Wails v3 (alpha.96) links against GTK4 + WebKitGTK 6.0 on Linux. The
+      # Switch to the CLIENT's toolchain for everything below (see the
+      # "TWO TOOLCHAINS IN ONE JOB" note above the server's setup-go).
+      #
+      # env GOTOOLCHAIN: auto -- the server's setup-go exported
+      # GOTOOLCHAIN=local into $GITHUB_ENV, and setup-go ignores go.mod's
+      # `toolchain` directive whenever GOTOOLCHAIN=local (backwards-compat
+      # branch in its parseGoVersionFile): it would fall back to the `go`
+      # directive and install go1.27.0, failing the assert below. Overriding
+      # it on this step only makes setup-go read `toolchain go1.27.3`; setup-go
+      # then re-exports GOTOOLCHAIN=local for every later step as usual.
+      - name: Setup Go (client's go.mod)
+        uses: actions/setup-go@v7
+        env:
+          GOTOOLCHAIN: auto
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Fails unless `go` is exactly go.mod's toolchain directive (go1.27.3),
+      # so CI can never silently build with an unpatched Go.
+      - name: Assert patched Go toolchain
+        shell: bash
+        run: bash .github/scripts/assert-go-toolchain.sh
+
+      # Wails v3 links against GTK4 + WebKitGTK 6.0 on Linux. The
       # race-enabled `go test ./...` and `go build` compile the main package,
       # which imports the Wails application (cgo), so these dev headers must be
       # present or pkg-config fails on gtk4 / webkitgtk-6.0. macOS and Windows
@@ -240,6 +287,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Fails unless `go` is exactly go.mod's toolchain directive (go1.27.3),
+      # so CI can never silently build with an unpatched Go.
+      - name: Assert patched Go toolchain
+        shell: bash
+        run: bash .github/scripts/assert-go-toolchain.sh
 
       # `wails3 generate bindings` type-checks the Go packages, which (via the
       # Wails application package) use cgo against GTK4/WebKitGTK 6.0 headers, so

@@ -297,11 +297,9 @@ below are reasoned, not observed — the user pushes and watches CI.
   (see above), and in any case `DLL_EXPORT` is never defined so `OPUS_EXPORT`
   collapses to a plain visibility attribute; (c) compile time — 137 translation
   units is materially slower than RNNoise's 7, and the Windows runner is the slowest
-  leg. A second, untested Windows path exists: `build/windows/Taskfile.yml`'s
-  `build:docker` target cross-compiles with **Zig** inside the `wails-cross` image
-  when `CGO_ENABLED=1` on a non-Windows host. `zig cc` is a clang driver and should
-  take these sources (C99, VLAs, `<xmmintrin.h>`) the same way clang does here, but
-  that path was not exercised either.
+  leg. A Zig-in-Docker cross-compile path (`build:docker` / the template's
+  cross-compile image) existed in the template Taskfiles and was removed in Phase 6.9
+  (track CL5); cgo builds are made on the target OS.
 - **`CGO_ENABLED=0` any platform:** `opus_stub.go` takes over and every constructor
   returns `errNoCGO`, with `Available()` reporting `false`. Verified locally.
   `build/windows/Taskfile.yml` defaults `CGO_ENABLED=0` for release builds, which is

@@ -1,2 +1,8 @@
 # Embedded builtin profiles are hashed byte-for-byte; keep LF on every host.
 *.vcs.json text eol=lf
+
+# Shell scripts run under bash on every CI runner, Windows included; CRLF breaks them.
+*.sh text eol=lf
+# `go mod tidy -diff` (CI) compares byte-for-byte; CRLF from a Windows checkout reads as untidy.
+go.mod text eol=lf
+go.sum text eol=lf
