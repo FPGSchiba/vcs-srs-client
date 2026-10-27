@@ -42,14 +42,11 @@ export function commitSettings(change: (s: Settings) => Settings): Promise<void>
       usePendingSettings.setState({ pending: null });
     }
   };
-  let sent: Promise<unknown>;
-  try {
-    // Called synchronously; Promise.resolve tolerates a mock that returns
-    // undefined.
-    sent = Promise.resolve(api.setSettings(next));
-  } catch (e) {
-    sent = Promise.reject(e);
-  }
+  // The executor runs synchronously, so the request is issued in this tick;
+  // a synchronous throw becomes a rejection and a non-promise return (a mock
+  // returning undefined) is tolerated. Either way the rejection handler below
+  // sees every failure.
+  const sent = new Promise<unknown>((resolve) => resolve(api.setSettings(next)));
   return sent.then(clear, (err) => {
     clear();
     console.error("setSettings failed; reported via the notification channel", err);

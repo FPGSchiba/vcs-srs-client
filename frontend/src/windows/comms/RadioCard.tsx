@@ -71,14 +71,18 @@ export function RadioCard({ radio, allRadios, muted, variantId, onVariantChange 
       .catch((e) => console.error("updateRadioInfo failed; reported via notifications", e));
   }
 
+  // A failed select re-reads the backend's selection so the optimistic
+  // highlight snaps back to what Go actually has.
+  function resyncSelection() {
+    return api
+      .voiceState()
+      .then((vs) => useRadios.getState().setSelectedRadioId(vs.selected_radio))
+      .catch(console.error);
+  }
+
   function select() {
     useRadios.getState().setSelectedRadioId(radio.id);
-    api.selectRadio(radio.id).catch(() =>
-      api
-        .voiceState()
-        .then((vs) => useRadios.getState().setSelectedRadioId(vs.selected_radio))
-        .catch(console.error),
-    );
+    api.selectRadio(radio.id).catch(resyncSelection);
   }
 
   const selected = selectedRadioId === radio.id;

@@ -66,6 +66,21 @@ describe("commitSettings", () => {
     expect(err).toHaveBeenCalled();
   });
 
+  it("a synchronous throw from setSettings is a handled rejection that rolls back", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const boom = new Error("binding missing");
+    setSettings.mockImplementation(() => {
+      throw boom;
+    });
+    const p = commitSettings((s) => ({ ...s, start_minimized: true }));
+    // The request was issued in the same tick and the overlay is shown.
+    expect(setSettings).toHaveBeenCalledTimes(1);
+    expect(usePendingSettings.getState().pending?.start_minimized).toBe(true);
+    await expect(p).resolves.toBeUndefined();
+    expect(usePendingSettings.getState().pending).toBeNull();
+    expect(err).toHaveBeenCalledWith(expect.any(String), boom);
+  });
+
   it("a settle of an older commit keeps the newer pending", async () => {
     const a = deferred();
     const b = deferred();

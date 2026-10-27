@@ -36,7 +36,11 @@ const DRAG_COMMIT_MS = 150;
  * pointer-move frame. Each commit patches only this bus onto the newest
  * in-flight settings, so concurrent changes are not lost.
  */
-function LevelKnob({ bus, label, value }: { bus: keyof AudioLevels; label: string; value: number }) {
+function LevelKnob({
+  bus,
+  label,
+  value,
+}: Readonly<{ bus: keyof AudioLevels; label: string; value: number }>) {
   const { push, flush } = useThrottledCommit<number>((v) => {
     void commitSettings((s) => ({
       ...s,

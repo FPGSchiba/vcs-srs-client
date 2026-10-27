@@ -132,4 +132,20 @@ describe.each([
     expect(apply).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+
+  it("a synchronous throw from fetch is routed to onError, not thrown", async () => {
+    const err = new Error("sync boom");
+    const fetch = vi.fn((): Promise<number> => {
+      throw err;
+    });
+    const apply = vi.fn();
+    const onError = vi.fn();
+    expect(() => hydrate(fetch, apply, onError)).not.toThrow();
+    // fetch is still issued in the same tick.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(err);
+    expect(apply).not.toHaveBeenCalled();
+  });
 });
