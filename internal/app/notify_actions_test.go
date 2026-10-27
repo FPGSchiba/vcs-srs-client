@@ -205,7 +205,13 @@ func TestMicTestAndPreviewWithoutBackendRaise(t *testing.T) {
 	}
 }
 
-func assertDeadlineWithin(t *testing.T, ctx context.Context, start time.Time, max time.Duration) {
+// assertDeadlineWithin checks ctx carries a deadline no later than max after
+// end, the time the call under test RETURNED. Measuring from a time taken
+// before the call fails on any clock finer than the call itself: the deadline
+// is time.Now()+max inside the call, so it lies max plus the call's own
+// duration after a "start" taken before it (seen on the Linux and macOS CI
+// legs; Windows' coarse clock hid it).
+func assertDeadlineWithin(t *testing.T, ctx context.Context, end time.Time, max time.Duration) {
 	t.Helper()
 	if ctx == nil {
 		t.Fatal("no call recorded")
@@ -214,8 +220,8 @@ func assertDeadlineWithin(t *testing.T, ctx context.Context, start time.Time, ma
 	if !ok {
 		t.Fatal("the RPC context has no deadline")
 	}
-	if dl.Sub(start) > max {
-		t.Fatalf("deadline %v after the call, want <= %v", dl.Sub(start), max)
+	if dl.Sub(end) > max {
+		t.Fatalf("deadline %v after the call returned, want <= %v", dl.Sub(end), max)
 	}
 }
 
@@ -224,24 +230,22 @@ func TestUpdateRadioInfo_HasDeadline(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	fs := &fakeControlSession{}
 	a.sess = fs
-	start := time.Now()
 	if err := a.UpdateRadioInfo(RadioInfoDTO{Radios: []RadioDTO{
 		{ID: 1, Name: "Radio 1", Frequency: 130.000, Enabled: true},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	assertDeadlineWithin(t, fs.lastCtx(), start, 5*time.Second)
+	assertDeadlineWithin(t, fs.lastCtx(), time.Now(), 5*time.Second)
 }
 
 func TestPushPersistedRadios_HasDeadline(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	fs := &fakeControlSession{}
 	a.sess = fs
-	start := time.Now()
 	if err := a.Connect("localhost:5002", "n", "p", "u"); err != nil {
 		t.Fatal(err)
 	}
-	assertDeadlineWithin(t, fs.lastCtx(), start, 5*time.Second)
+	assertDeadlineWithin(t, fs.lastCtx(), time.Now(), 5*time.Second)
 }
 
 // A session the server ended has already told the user; a stale "not sent

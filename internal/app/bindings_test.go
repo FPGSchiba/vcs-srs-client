@@ -172,14 +172,16 @@ func TestServiceShutdown_NoSession(t *testing.T) {
 func TestDisconnect_HasDeadline(t *testing.T) {
 	fs := &fakeSession{}
 	a := app.NewForTest(state.New(), fs, &fakeWindows{})
-	start := time.Now()
 	_ = a.Disconnect()
+	// Measured from when the call returned, not from before it: the
+	// deadline is time.Now()+2s inside the call (see assertDeadlineWithin).
+	end := time.Now()
 	dl, ok := fs.disconnectCtx.Deadline()
 	if !ok {
 		t.Fatal("Disconnect passed a context with no deadline")
 	}
-	if dl.Sub(start) > 2*time.Second {
-		t.Fatalf("Disconnect deadline %v after the call, want <= 2s", dl.Sub(start))
+	if dl.Sub(end) > 2*time.Second {
+		t.Fatalf("Disconnect deadline %v after the call returned, want <= 2s", dl.Sub(end))
 	}
 }
 

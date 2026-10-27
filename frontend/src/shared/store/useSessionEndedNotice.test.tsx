@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render } from "@testing-library/react";
 
+// The real runtime must not load here: its drag.js starts a 50 ms
+// window.setInterval at import, and this file is short enough that jsdom can
+// be torn down before the first tick, which then throws "window is not
+// defined" as an unhandled error (seen on CI). ../api/events only needs
+// Events, and `on` is mocked below anyway.
+vi.mock("@wailsio/runtime", () => ({ Events: { On: () => () => {} } }));
+
 const handlers = new Map<string, Set<(d: unknown) => void>>();
 const emit = (name: string, data: unknown) => handlers.get(name)?.forEach((h) => h(data));
 
