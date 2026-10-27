@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -53,6 +54,12 @@ type Fake struct {
 	calls     []string
 	streamEnd chan error
 	active    int // SubscribeToUpdates handlers currently running
+
+	// subDelay delays SubscribeToUpdates before it records and registers
+	// the subscription; noSubHeader suppresses the subscription ack (the
+	// pre-SV2-C17 server). See SetSubscribeDelay and SetSubscribeAck.
+	subDelay    time.Duration
+	noSubHeader bool
 }
 
 // NewFake returns a Fake with sensible defaults (guest enabled).
@@ -87,7 +94,8 @@ func (f *Fake) Block(method string, ch chan struct{}) {
 }
 
 // Fail makes every later call to method ("SyncClient", "Ping",
-// "UpdateRadioInfo" or "Disconnect") return err. Passing nil removes it.
+// "UpdateRadioInfo", "Disconnect" or "SubscribeToUpdates") return err. A
+// failed SubscribeToUpdates is recorded but never acknowledged. Passing nil removes it.
 func (f *Fake) Fail(method string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -125,6 +133,27 @@ func (f *Fake) SetSync(clients map[string]*srspb.ClientInfo, secret string) {
 	defer f.mu.Unlock()
 	f.SyncClients = clients
 	f.SyncVoiceSecret = secret
+}
+
+// SetSubscribeDelay makes every later SubscribeToUpdates wait d before it
+// records and registers the subscription. It widens the window between the
+// client's request leaving and the server registering the stream, which
+// grpc-go's client does not wait for on its own.
+func (f *Fake) SetSubscribeDelay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subDelay = d
+}
+
+// SetSubscribeAck controls whether SubscribeToUpdates acknowledges the
+// registered subscription by sending (empty) response headers -- SV2 C17,
+// the server's stream.SendHeader once the subscriber is registered. On by
+// default; false imitates a server from before C17 (e.g. dcce3ad), whose
+// headers go out only with the first update.
+func (f *Fake) SetSubscribeAck(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.noSubHeader = !on
 }
 
 // EndStream makes the current SubscribeToUpdates handler return err (a nil
@@ -251,17 +280,41 @@ func (f *Fake) Ping(ctx context.Context, _ *srspb.PingRequest) (*srspb.PingRespo
 	return &srspb.PingResponse{ServerTimeMs: 1}, nil
 }
 
+// SubscribeToUpdates behaves like the server after SV2 C17: it records and
+// registers the subscriber, and only then acknowledges it with
+// stream.SendHeader, so a client that waits on Header() knows an update
+// published from here on reaches this stream.
 func (f *Fake) SubscribeToUpdates(_ *srspb.Empty, stream srspb.SRSService_SubscribeToUpdatesServer) error {
 	f.mu.Lock()
+	delay := f.subDelay
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
+	f.mu.Lock()
 	f.calls = append(f.calls, "SubscribeToUpdates")
+	if err := f.fails["SubscribeToUpdates"]; err != nil {
+		f.mu.Unlock()
+		return err
+	}
 	f.active++
 	end := f.streamEnd
+	ack := !f.noSubHeader
 	f.mu.Unlock()
 	defer func() {
 		f.mu.Lock()
 		f.active--
 		f.mu.Unlock()
 	}()
+	if ack {
+		if err := stream.SendHeader(metadata.MD{}); err != nil {
+			return err
+		}
+	}
 	for {
 		select {
 		case u, ok := <-f.updates:

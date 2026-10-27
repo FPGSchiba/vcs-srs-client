@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -162,8 +163,8 @@ func (s *Session) startStreamLocked(ctx context.Context, cc *control.Client, str
 // SyncClient") on the same connection, from the ended stream's goroutine:
 //
 //  1. re-check that gen is still current and the connection live;
-//  2. resubscribe FIRST (Subscribe opens the stream synchronously), and start
-//     consuming it under a new generation;
+//  2. resubscribe FIRST, wait for the server's subscription ack (SV2 C17,
+//     see awaitSubscribed), and start consuming it under a new generation;
 //  3. then SyncClient, bounded by the post-dial timeout, which replaces the
 //     roster;
 //  4. on success publish connected again (consumers rehydrate on it);
@@ -199,6 +200,10 @@ func (s *Session) resync(streamCtx context.Context, gen uint64) {
 		fail(err, gen)
 		return
 	}
+	if err := s.awaitSubscribed(streamCtx, stream); err != nil {
+		fail(err, gen)
+		return
+	}
 	s.mu.Lock()
 	if gen != s.streamGen || s.conn == nil {
 		s.mu.Unlock()
@@ -219,6 +224,52 @@ func (s *Session) resync(streamCtx context.Context, gen uint64) {
 	s.mu.Unlock()
 	if current {
 		s.setConnState(events.ConnConnected)
+	}
+}
+
+// awaitSubscribed waits until the server has registered the subscription
+// that stream opened. grpc-go returns from a server-streaming call once the
+// request is sent, and SyncClient travels on its own HTTP/2 stream, so
+// without this the server can serve SyncClient before the subscriber exists
+// and an update published in between is in neither the snapshot nor the
+// stream. SV2 C17 closes that: the server sends (empty) response headers
+// right after registering, and Header() returns on them.
+//
+// The wait is bounded by the post-dial timeout. A server from before C17
+// sends its headers only with the first update; past the bound this logs a
+// Warn and returns nil, so the resync proceeds as it did before C17 instead
+// of wedging. A stream that ends before any header (the server refused it)
+// returns that stream's error, like a failed Subscribe. A cancelled ctx
+// returns its error.
+//
+// On the fallback, the Header goroutine outlives this call until the first
+// update or the stream's end; grpc-go permits Header() alongside RecvMsg.
+func (s *Session) awaitSubscribed(ctx context.Context, stream srspb.SRSService_SubscribeToUpdatesClient) error {
+	acked := make(chan bool, 1)
+	go func() {
+		// clientStream.Header never returns an error: a stream that ended
+		// without headers yields (nil, nil) and its status is on Recv.
+		md, err := stream.Header()
+		acked <- err == nil && md != nil
+	}()
+	bound := s.postDialTimeout()
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case ok := <-acked:
+		if ok {
+			return nil
+		}
+		if _, err := stream.Recv(); err != nil && err != io.EOF {
+			return err
+		}
+		return errors.New("update stream ended before the server acknowledged the subscription")
+	case <-timer.C:
+		slog.Default().Warn("session: server did not acknowledge the update subscription; resyncing without the ordering guarantee (server predates SV2 C17?)",
+			"after", bound)
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

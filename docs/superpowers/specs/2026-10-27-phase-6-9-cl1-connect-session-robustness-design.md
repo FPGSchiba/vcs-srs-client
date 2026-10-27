@@ -170,7 +170,9 @@ The helper returns as soon as the handshake fails, however loaded the machine is
 4. On success, publish `ConnConnected` again. `useClientStateSync` rehydrates on every `connected`, the monitor and the SFX gate dedupe a repeated state, and there is no `reconnecting` flash.
 5. On failure, `classifyRPCError` decides: session ended → `endSession`; otherwise → `markControlLost(currentGen)` (ConnBanner RECONNECT).
 
-There is no rate cap. The server only sends C13 after more than its buffer size of events stalled behind a slow `Send`, so a resync cannot hot-loop on its own (SV2 R1 owns storm sizing). The ordering "resubscribe, then SyncClient" is client-side best effort: the client cannot observe the server registering the subscription, so an event published in the gap between the server receiving the stream and registering it is the residual risk SV2 accepts (R9). C13 is not produced by the server at `dcce3ad` (SV2 unmerged), so it is covered by fake-server tests only.
+There is no rate cap. The server only sends C13 after more than its buffer size of events stalled behind a slow `Send`, so a resync cannot hot-loop on its own (SV2 R1 owns storm sizing). C13 is not produced by the server at `dcce3ad` (SV2 unmerged), so it is covered by fake-server tests only.
+
+**Subscription ack (SV2 C17, user decision 2026-10-27, after CI exposed the gap).** grpc-go returns from a server-streaming call once the request is sent, so "resubscribe, then SyncClient" was only the client's call order: the server could serve `SyncClient` before registering the new subscriber, losing an event published in between (CI hit this on ubuntu-latest). The server now sends empty response headers (`stream.SendHeader`) right after it registers the subscriber (C17, server PR #230), and step 2 waits on `stream.Header()` (`Session.awaitSubscribed`) before `SyncClient`, which turns the order into a guarantee. The wait is bounded by `postDialTimeout`. A stream that ends without headers is a failed subscribe (step 5). Past the bound, a server that predates C17 (`dcce3ad`) gets a Warn and the pre-C17 behaviour (proceed to `SyncClient`). Such a server sends headers with its first update, which releases the wait early. Only the resync waits on the ack; Connect and Reconnect are unchanged.
 
 ## 4. Files
 
@@ -300,7 +302,7 @@ There is no rate cap. The server only sends C13 after more than its buffer size 
   - a blip under 120 s reconnects with the session kept;
   - Enter submits in the real Wails webview;
   - the remembered address survives a restart.
-- **R9 C13 ordering.** The client opens the new stream before `SyncClient`, but it cannot observe the server registering it. An event in that sub-RTT gap is the residual SV2 accepts. A C13 storm on a slow link is SV2's R1.
+- **R9 C13 ordering.** Closed by the SV2 C17 subscription ack (§3.12): the resync waits for the server to register the new stream before `SyncClient`. The residual is a pre-C17 server, where the wait falls back after `postDialTimeout` to the old best-effort order. A C13 storm on a slow link is SV2's R1.
 - **R8 CLAUDE.md Welcome rule.** The layout, classNames, two stages and disabled SSO are pinned by test. The only structural change is `div` → `form` on one element with an identical className and style. A before/after screenshot is a manual item.
 
 ## 10. Cross-track contracts
