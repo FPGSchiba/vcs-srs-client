@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import React from "react";
 import { History } from "./History";
@@ -6,6 +6,19 @@ import { useHistory } from "../../../shared/store/history";
 import type { HistoryEntry } from "../../../shared/api/client";
 
 let mockHistoryEntries: HistoryEntry[] = [];
+
+// vitest attaches its own handlers to every promise a vi.fn returns (to
+// record settled results), which would mark a rejection as handled. Calls
+// that a test checks for unhandled rejections go through this, so the
+// component receives a promise nobody else has observed.
+const fresh = <T,>(p: Promise<T>): Promise<T> => p.then((v) => v);
+const exportHistoryCsv = vi.fn(async () => {});
+
+// Node's process, typed locally: the project has no @types/node.
+type Listener = (reason: unknown) => void;
+const proc = (globalThis as unknown as {
+  process: { on(e: string, f: Listener): void; off(e: string, f: Listener): void };
+}).process;
 
 const { mockEventHandlers, unsubscribers } = vi.hoisted(() => {
   return {
@@ -22,7 +35,7 @@ vi.mock("../../../shared/api/client", async (orig) => {
       ...actual.api,
       getHistory: vi.fn(async () => mockHistoryEntries),
       clearHistory: vi.fn(async () => {}),
-      exportHistoryCsv: vi.fn(async () => {}),
+      exportHistoryCsv: () => fresh(exportHistoryCsv()),
     },
   };
 });
@@ -246,5 +259,49 @@ describe("History screen", () => {
     appendedHandler?.(row({ sender: "AfterUnmount" }));
     expect(useHistory.getState().entries).toHaveLength(lenBefore);
     expect(useHistory.getState().entries.some((e) => e.sender === "AfterUnmount")).toBe(false);
+  });
+
+  // FE08: history is a DELTA channel. An append during the hydrate must not
+  // vanish under the (older) hydrate result, and must not be duplicated by
+  // the re-fetch that already contains it.
+  it("an append during the hydrate re-fetches and shows no duplicate", async () => {
+    const { api } = await import("../../../shared/api/client");
+    const getHistory = vi.mocked(api.getHistory);
+    const e = row({ sender: "RaceSender" });
+    let resolveFirst!: (v: HistoryEntry[]) => void;
+    getHistory
+      .mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)))
+      .mockImplementationOnce(async () => [e]);
+    render(<History />);
+    const appended = (mockEventHandlers.get("history:appended") ?? []).find((h) => h.live)!;
+    act(() => appended.handler(e));
+    await act(async () => {
+      resolveFirst([]);
+    });
+    await waitFor(() => expect(getHistory).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText("RaceSender")).toHaveLength(1));
+    expect(useHistory.getState().entries).toHaveLength(1);
+  });
+
+  // FE09: Go raises history:export on a write failure; the screen only
+  // logs, and must not leave the rejection unhandled.
+  it("a rejected export produces no unhandled rejection", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const unhandled = vi.fn();
+    proc.on("unhandledRejection", unhandled);
+    try {
+      exportHistoryCsv.mockImplementationOnce(async () => {
+        throw new Error("disk full");
+      });
+      render(<History />);
+      fireEvent.click(screen.getByRole("button", { name: /export csv/i }));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      expect(exportHistoryCsv).toHaveBeenCalled();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      proc.off("unhandledRejection", unhandled);
+    }
   });
 });

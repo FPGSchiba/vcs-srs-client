@@ -665,7 +665,9 @@ func (a *App) clearTXTargetsIfStillIdle() {
 // survived a restart but which radio was selected did not -- global.ptt
 // resolved to nothing on every fresh launch until the user clicked a radio
 // card again.
-func (a *App) SelectRadio(id uint32) error {
+// Failures are reported through reportAction (Phase 6.9 CL3, FE09).
+func (a *App) SelectRadio(id uint32) (err error) {
+	defer func() { a.reportAction(actRadioSelect, err) }()
 	a.st.SetSelectedRadio(id)
 	return a.persistSelectedRadio(id)
 }

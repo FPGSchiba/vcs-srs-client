@@ -212,6 +212,22 @@ describe("state", () => {
     expect(spy).toHaveBeenCalledWith(1);
   });
 
+  // FE09: SelectRadio applies the selection in Go before the persist that
+  // can fail, so the right undo is to re-read what the backend targets.
+  it("a rejected selectRadio re-reads voiceState and shows the backend's selection", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "selectRadio").mockRejectedValue(new Error("save failed"));
+    const vs = vi.spyOn(api, "voiceState").mockResolvedValue({ selected_radio: 2, connected: true } as never);
+    show();
+    fireEvent.click(screen.getByRole("group", { name: /^R\d+ / }));
+    expect(useRadios.getState().selectedRadioId).toBe(1); // optimistic
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(vs).toHaveBeenCalledTimes(1);
+    expect(useRadios.getState().selectedRadioId).toBe(2);
+  });
+
   it("does not update the radios store optimistically on an edit", () => {
     vi.spyOn(api, "updateRadioInfo").mockResolvedValue(undefined as never);
     const before = useRadios.getState().radios;

@@ -128,7 +128,9 @@ func AudioStateDTOFrom(st audio.State) AudioStateDTO {
 
 // StartMicTest turns on mic passthrough so the user can hear their own
 // input, without touching the persisted MicPassthrough setting.
-func (a *App) StartMicTest() error {
+// Failures are reported through reportAction (Phase 6.9 CL3, FE09).
+func (a *App) StartMicTest() (err error) {
+	defer func() { a.reportAction(actAudioMicTest, err) }()
 	sb := a.settings
 	sb.mu.Lock()
 	m := sb.audio
@@ -160,7 +162,9 @@ func (a *App) StopMicTest() error {
 
 // PreviewEffect plays one Radio Effects slot once, for the settings screen's
 // preview buttons.
-func (a *App) PreviewEffect(id string) error {
+// Failures are reported through reportAction (Phase 6.9 CL3, FE09).
+func (a *App) PreviewEffect(id string) (err error) {
+	defer func() { a.reportAction(actAudioPreview, err) }()
 	m := a.audioManager()
 	if m == nil {
 		return ErrAudioUnavailable

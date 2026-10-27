@@ -192,4 +192,45 @@ describe("useSettingsSync", () => {
       }),
     );
   });
+  // FE08: a push that lands while the mount hydrate is still in flight is
+  // at least as new as that hydrate, so the late hydrate result must not
+  // roll the store back over it.
+  const hydrated = {
+    settings: { ...settings, show_transmitter_name: true },
+    pushedSettings: { ...settings, show_transmitter_name: false },
+  };
+  it.each([
+    ["settings", getSettings, EV.settingsChanged, hydrated.settings, hydrated.pushedSettings,
+      () => useSettings.getState().settings],
+    ["keybinds", getKeybinds, EV.keybindsChanged, [], [{ action_id: "pushed" }],
+      () => useSettings.getState().keybinds],
+    ["hotkeyState", getHotkeyState, EV.hotkeysState,
+      { registered: true, error: "", failed: {}, permission: "not_applicable" },
+      { registered: false, error: "pushed", failed: {}, permission: "not_applicable" },
+      () => useSettings.getState().hotkeys],
+    ["joystickState", getJoystickState, EV.joystickState,
+      { supported: false, error: "", devices: [] },
+      { supported: true, error: "", devices: [{ id: "pushed", name: "Pushed" }] },
+      () => useSettings.getState().joystick],
+    ["audioDevices", getAudioDevices, EV.audioDevicesChanged,
+      { inputs: [], outputs: [] },
+      { inputs: [{ id: "pushed", name: "Pushed" }], outputs: [] },
+      () => useSettings.getState().audioDevices],
+    ["audioState", getAudioState, EV.audioState,
+      { running: false, input_error: "", output_error: "", overruns: 0, underruns: 0 },
+      { running: true, input_error: "", output_error: "", overruns: 0, underruns: 0 },
+      () => useSettings.getState().audioState],
+  ] as const)(
+    "a %s push during the hydrate survives the late hydrate result",
+    async (_name, apiFn, event, hydrateValue, pushedValue, select) => {
+      let resolve!: (v: unknown) => void;
+      apiFn.mockReset().mockReturnValue(new Promise((r) => (resolve = r)));
+      render(<Probe />);
+      emit(event, pushedValue);
+      expect(select()).toEqual(pushedValue);
+      resolve(hydrateValue);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(select()).toEqual(pushedValue);
+    },
+  );
 });

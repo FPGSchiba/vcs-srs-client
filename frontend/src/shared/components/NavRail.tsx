@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Icon } from "./Icon";
 import { useSession } from "../store/session";
+import { activatable } from "./activatable";
 
 interface NavRailProps {
   activeKey: string;
@@ -33,6 +34,12 @@ const NAV_ITEMS: NavItem[] = [
  * collapse toggle keeps its local UI state. The footer user-chip shows the
  * local client's callsign/FFID from the session store. classNames are kept
  * byte-identical to the design so the ported CSS applies unchanged.
+ *
+ * Keyboard (Phase 6.9 CL3, FE04): the items and Logout keep the design's
+ * `div` markup but spread `activatable`, so they are tabbable buttons that
+ * Enter and Space activate. The active item carries `aria-current="page"`,
+ * and every item an `aria-label`, so the rail stays named when collapsed to
+ * icons.
  */
 export function NavRail({ activeKey, onSelect, onLogout }: NavRailProps) {
   const [collapsed, setCollapsed] = useState(false);
@@ -43,9 +50,11 @@ export function NavRail({ activeKey, onSelect, onLogout }: NavRailProps) {
       <div className="nav-header">
         <span className="cap">Console</span>
         <button
+          type="button"
           className="nav-toggle"
           onClick={() => setCollapsed((c) => !c)}
           title={collapsed ? "Expand" : "Collapse"}
+          aria-label={collapsed ? "Expand" : "Collapse"}
         >
           <Icon name={collapsed ? "chevron" : "chevronD"} size={12} />
         </button>
@@ -56,7 +65,9 @@ export function NavRail({ activeKey, onSelect, onLogout }: NavRailProps) {
             <div
               key={it.key}
               className={`nav-item ${it.key === activeKey ? "active" : ""}`}
-              onClick={() => onSelect(it.key)}
+              {...activatable(() => onSelect(it.key))}
+              aria-current={it.key === activeKey ? "page" : undefined}
+              aria-label={it.label}
               title={collapsed ? it.label : undefined}
             >
               <span className="ic"><Icon name={it.icon} size={16} /></span>
@@ -69,7 +80,7 @@ export function NavRail({ activeKey, onSelect, onLogout }: NavRailProps) {
         <div style={{ borderTop: "1px solid var(--bd-1)", padding: "6px" }}>
           <div
             className="nav-item"
-            onClick={onLogout}
+            {...activatable(onLogout)}
             title={collapsed ? "Logout" : undefined}
             style={{ color: "var(--ac-alert)" }}
           >

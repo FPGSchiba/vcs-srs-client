@@ -3,7 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Effects } from "./Effects";
 import { useSettings } from "../../../../../shared/store/settings";
+import { usePendingSettings } from "../../../../../shared/store/settingsCommit";
 import type { AudioEffect } from "../../../../../shared/store/settings";
+
+// Node's process, typed locally: the project has no @types/node.
+type Listener = (reason: unknown) => void;
+const proc = (globalThis as unknown as {
+  process: { on(e: string, f: Listener): void; off(e: string, f: Listener): void };
+}).process;
 
 const setSettings = vi.fn();
 const previewEffect = vi.fn((_id: string) => Promise.resolve());
@@ -73,7 +80,8 @@ function seed() {
 describe("Radio Effects settings", () => {
   beforeEach(() => {
     setSettings.mockClear();
-    previewEffect.mockClear();
+    previewEffect.mockReset().mockImplementation(() => Promise.resolve());
+    usePendingSettings.setState({ pending: null });
     seed();
   });
 
@@ -134,5 +142,34 @@ describe("Radio Effects settings", () => {
     const patched = setSettings.mock.calls[0][0].audio.effects;
     expect(patched.tx_start.enabled).toBe(false);
     expect(patched.tx_end.enabled).toBe(true);
+  });
+
+  it("a rejected preview leaves no unhandled rejection and clears the in-flight label", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const unhandled = vi.fn();
+    proc.on("unhandledRejection", unhandled);
+    try {
+      previewEffect.mockImplementation(() => Promise.reject(new Error("audio unavailable")));
+      useSettings.setState((state) => ({
+        settings: state.settings && {
+          ...state.settings,
+          audio: {
+            ...state.settings.audio,
+            effects: {
+              ...state.settings.audio.effects,
+              tx_start: { ...state.settings.audio.effects.tx_start, available: true },
+            },
+          },
+        },
+      }));
+      render(<Effects />);
+      const button = screen.getByRole("button", { name: /preview tx start/i });
+      await userEvent.click(button);
+      await waitFor(() => expect(button).toHaveTextContent("PREVIEW"));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      proc.off("unhandledRejection", unhandled);
+    }
   });
 });

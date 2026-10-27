@@ -1,15 +1,14 @@
 import { useEffect, useState, type ReactElement } from "react";
 import { api } from "../../shared/api/client";
-import type { ClientInfoDTO, RadioInfoDTO } from "../../shared/api/client";
 import { on, EV } from "../../shared/api/events";
 import { useSession } from "../../shared/store/session";
 import type { Conn } from "../../shared/store/session";
-import { useClients } from "../../shared/store/clients";
-import { useRadios } from "../../shared/store/radios";
 import { useWindows } from "../../shared/store/windows";
 import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { useConnectionSync } from "../../shared/store/useConnectionSync";
 import { useNotificationsSync } from "../../shared/store/useNotificationsSync";
+import { useClientStateSync } from "../../shared/store/useClientStateSync";
+import { hydrateSnapshot } from "../../shared/store/hydrate";
 import { TopBar } from "../../shared/components/TopBar";
 import { NavRail } from "../../shared/components/NavRail";
 import { StatusBar } from "../../shared/components/StatusBar";
@@ -22,41 +21,6 @@ import { History } from "./screens/History";
 import { Profiles } from "./screens/Profiles";
 import { Placeholder } from "./screens/Placeholder";
 import { SettingsScreen } from "./screens/settings/SettingsScreen";
-
-interface ClientUpdatePayload {
-  guid: string;
-  info: ClientInfoDTO;
-}
-interface ClientLeftPayload {
-  guid: string;
-}
-interface RadioUpdatePayload {
-  guid: string;
-  radio: RadioInfoDTO;
-}
-
-/**
- * Pull the full snapshot (clients, radios, self) and replace the stores.
- * Called on mount and again once the control link reports `connected`,
- * because SyncClient populates the Go store during connect without emitting
- * per-client events.
- */
-function hydrate() {
-  api
-    .getClientState()
-    .then((snap) => {
-      useClients.getState().replaceAll(snap.clients ?? {});
-      useRadios.getState().replaceAll(snap.radios ?? {});
-      useSession.getState().setSelf(
-        snap.self
-          ? { callsign: snap.self.name, ffid: snap.self.unit_id, coalition: snap.self.coalition }
-          : null,
-      );
-    })
-    .catch(() => {
-      /* not connected yet — ignore */
-    });
-}
 
 /** The console screen for a nav key; anything unmapped is the placeholder.
  * `nav` switches the active screen, for screens that link to another one. */
@@ -74,9 +38,10 @@ const SCREENS = (nav: (view: string) => void): Record<string, () => ReactElement
  * connected it renders the console (TopBar + NavRail + screen + StatusBar) with
  * lightweight view-state navigation held in local state (no router this phase).
  *
- * On mount it hydrates the client/radio stores from a one-shot snapshot and
- * subscribes to the backend state/auth/control events, mapping each into the
- * relevant Zustand store. Logout disconnects the control link; the resulting
+ * Client state (clients, radios, self, the selection) is owned by
+ * `useClientStateSync`, which hydrates it, keeps it live and clears it on
+ * logout. This shell keeps only the session phase/connection state and the
+ * open-window list. Logout disconnects the control link; the resulting
  * `auth:session_changed` -> "logged_out" event returns the UI to Welcome.
  */
 export function MainApp() {
@@ -93,37 +58,36 @@ export function MainApp() {
   // this store, and all are part of the window shell.
   useNotificationsSync();
 
+  // Clients, radios, self and the selection: hydrated, kept live, and
+  // cleared on logout by the shared hook (FE01, FE02).
+  useClientStateSync();
+
   useEffect(() => {
-    hydrate();
-    api
-      .getOpenWindows()
-      .then((ids) => useWindows.getState().setOpen(ids))
-      .catch(() => {
-        /* ignore */
-      });
+    // FE08: a window:state push during the hydrate is newer, so the late
+    // hydrate answer is dropped.
+    const windowsH = hydrateSnapshot(
+      () => api.getOpenWindows(),
+      (ids) => useWindows.getState().setOpen(ids),
+      (err) => console.error("getOpenWindows failed", err),
+    );
 
     const offs = [
-      on<string[]>(EV.windowState, (ids) => useWindows.getState().setOpen(ids)),
-      on<ClientUpdatePayload>(EV.clientUpdate, (d) => useClients.getState().upsert(d.guid, d.info)),
-      on<ClientLeftPayload>(EV.clientLeft, (d) => useClients.getState().remove(d.guid)),
-      on<RadioUpdatePayload>(EV.radioUpdate, (d) => useRadios.getState().setForGuid(d.guid, d.radio)),
+      on<string[]>(EV.windowState, (ids) => {
+        windowsH.pushed();
+        useWindows.getState().setOpen(ids);
+      }),
       on<Conn>(EV.controlConnection, (c) => {
         useSession.getState().setConn(c);
-        if (c === "connected") {
-          useSession.getState().setPhase("connected");
-          hydrate(); // pull the clients/self the server returned at SyncClient
-        }
+        if (c === "connected") useSession.getState().setPhase("connected");
       }),
       on<string>(EV.authSession, (s) => {
-        if (s === "logged_out") {
-          useSession.getState().setPhase("welcome");
-          useSession.getState().setSelf(null);
-          useClients.getState().replaceAll({});
-          useRadios.getState().replaceAll({});
-        }
+        if (s === "logged_out") useSession.getState().setPhase("welcome");
       }),
     ];
-    return () => offs.forEach((off) => off());
+    return () => {
+      offs.forEach((off) => off());
+      windowsH.dispose();
+    };
   }, []);
 
   if (phase !== "connected") return <Welcome />;

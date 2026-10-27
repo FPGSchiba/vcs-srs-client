@@ -96,12 +96,17 @@ func (a *App) GetClientState() ClientStateSnapshot {
 // OnRadiosChanged. Calling it here closes that window so TX and RX move in
 // lockstep with the local write, and it is a documented no-op while
 // disconnected (see refreshRXContext's own doc).
+// Failures are reported through reportAction (Phase 6.9 CL3, FE09).
 func (a *App) UpdateRadioInfo(info RadioInfoDTO) error {
-	if err := a.persistRadios(info.Radios); err != nil {
+	err := a.persistRadios(info.Radios)
+	a.reportAction(actRadioSave, err)
+	if err != nil {
 		return err
 	}
 	a.refreshRXContext()
-	return a.sess.UpdateRadioInfo(context.Background(), RadioInfoToProto(info))
+	err = a.sess.UpdateRadioInfo(context.Background(), RadioInfoToProto(info))
+	a.reportAction(actRadioSend, err)
+	return err
 }
 
 // OpenWindow opens (or focuses) a window by id.

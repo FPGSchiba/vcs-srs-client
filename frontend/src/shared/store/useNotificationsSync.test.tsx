@@ -115,4 +115,14 @@ describe("useNotificationsSync", () => {
       expect(useNotifications.getState().snap.items).toEqual([]);
     });
   });
+  it("a notifications:changed push during the hydrate survives the late hydrate result", async () => {
+    let resolve!: (v: unknown) => void;
+    getNotifications.mockReset().mockReturnValue(new Promise((r) => (resolve = r)));
+    render(<Harness />);
+    await waitFor(() => expect(listeners[EV.notifications]).toBeDefined());
+    listeners[EV.notifications](snap(0));
+    resolve(snap(5));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(useNotifications.getState().snap.unread).toBe(0);
+  });
 });

@@ -1,15 +1,17 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Audio } from "./Audio";
 import { useSettings } from "../../../../../shared/store/settings";
+import { usePendingSettings } from "../../../../../shared/store/settingsCommit";
 
 const setSettings = vi.fn();
+const startMicTest = vi.fn(() => Promise.resolve());
 vi.mock("../../../../../shared/api/client", () => ({
   api: {
     setSettings: (...a: unknown[]) => setSettings(...a),
     getAudioDevices: () => Promise.resolve({ inputs: [], outputs: [] }),
-    startMicTest: () => Promise.resolve(),
+    startMicTest: () => startMicTest(),
     stopMicTest: () => Promise.resolve(),
   },
 }));
@@ -46,7 +48,12 @@ function seed() {
 }
 
 describe("Audio settings", () => {
-  beforeEach(() => { setSettings.mockClear(); seed(); });
+  beforeEach(() => {
+    setSettings.mockClear();
+    startMicTest.mockReset().mockImplementation(() => Promise.resolve());
+    usePendingSettings.setState({ pending: null });
+    seed();
+  });
 
   it("renders exactly the devices the backend hands it, synthesising none of its own", () => {
     render(<Audio />);
@@ -101,5 +108,128 @@ describe("Audio settings", () => {
     const { container: container2 } = render(<Audio />);
     const lit2 = container2.querySelectorAll('[data-vu-seg][data-lit="true"]');
     expect(lit2.length).toBe(15);
+  });
+
+  it("a rejected startMicTest leaves the button on TEST MIC", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    startMicTest.mockImplementation(() => Promise.reject(new Error("audio unavailable")));
+    render(<Audio />);
+    await userEvent.click(screen.getByRole("button", { name: /test mic/i }));
+    await waitFor(() => expect(startMicTest).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("button", { name: /test mic/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /stop test/i })).not.toBeInTheDocument();
+  });
+});
+
+// FE05: a drag commits live, throttled to 150ms, with a final commit on
+// release -- not one config write per pointer-move frame.
+describe("Audio drag cadence", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setSettings.mockClear();
+    usePendingSettings.setState({ pending: null });
+    seed();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const lastAudio = () => setSettings.mock.calls[setSettings.mock.calls.length - 1][0].audio;
+
+  it("a 2s / 120-move MASTER drag calls setSettings at most 16 times and the last carries the release value", () => {
+    render(<Audio />);
+    const knob = screen.getByRole("slider", { name: /master/i });
+    fireEvent.pointerDown(knob, { clientY: 1000 });
+    for (let i = 1; i <= 120; i++) {
+      act(() => {
+        // 20px of upward travel in total: 75 -> 95 on the 0-100 scale.
+        fireEvent.pointerMove(window, { clientY: 1000 - (i * 20) / 120 });
+        vi.advanceTimersByTime(2000 / 120);
+      });
+    }
+    act(() => {
+      fireEvent.pointerUp(window);
+    });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(setSettings.mock.calls.length).toBeGreaterThan(1);
+    expect(setSettings.mock.calls.length).toBeLessThanOrEqual(16);
+    expect(lastAudio().levels.master).toBeCloseTo(0.95, 5);
+  });
+
+  it("VOX threshold drag is throttled the same way", () => {
+    useSettings.setState((st) => ({
+      settings: st.settings && { ...st.settings, audio: { ...st.settings.audio, vox: true } },
+    }));
+    render(<Audio />);
+    const range = screen.getByRole("slider", { name: /vox threshold/i });
+    for (let i = 1; i <= 120; i++) {
+      act(() => {
+        fireEvent.change(range, { target: { value: String(Math.min(100, 35 + Math.floor(i / 2))) } });
+        vi.advanceTimersByTime(2000 / 120);
+      });
+    }
+    act(() => {
+      fireEvent.pointerUp(range);
+    });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(setSettings.mock.calls.length).toBeGreaterThan(1);
+    expect(setSettings.mock.calls.length).toBeLessThanOrEqual(16);
+    expect(lastAudio().vox_threshold).toBeCloseTo(0.95, 5);
+  });
+
+  it("a VOX threshold pointercancel ends the drag, so a later stored change shows", () => {
+    useSettings.setState((st) => ({
+      settings: st.settings && { ...st.settings, audio: { ...st.settings.audio, vox: true } },
+    }));
+    render(<Audio />);
+    const range = screen.getByRole("slider", { name: /vox threshold/i }) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(range, { target: { value: "60" } });
+    });
+    act(() => {
+      fireEvent.pointerCancel(range);
+    });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(lastAudio().vox_threshold).toBeCloseTo(0.6, 5);
+    // Another window (or a profile load) moves the stored threshold; with
+    // the drag ended, the slider must follow it rather than a stale draft.
+    act(() => {
+      usePendingSettings.setState({ pending: null });
+      useSettings.setState((st) => ({
+        settings: st.settings && {
+          ...st.settings,
+          audio: { ...st.settings.audio, vox: true, vox_threshold: 0.2 },
+        },
+      }));
+    });
+    expect(range.value).toBe("20");
+  });
+
+  it("keyboard auto-repeat on a knob is throttled and commits on keyup", () => {
+    render(<Audio />);
+    const knob = screen.getByRole("slider", { name: /master/i });
+    for (let i = 0; i < 20; i++) {
+      act(() => {
+        fireEvent.keyDown(knob, { key: "ArrowUp" });
+        vi.advanceTimersByTime(33);
+      });
+    }
+    act(() => {
+      fireEvent.keyUp(knob, { key: "ArrowUp" });
+    });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    // 20 presses over ~660ms: the leading send, about one per 150ms, and
+    // the keyup commit -- far fewer than one per press.
+    expect(setSettings.mock.calls.length).toBeLessThanOrEqual(7);
+    expect(lastAudio().levels.master).toBeCloseTo(0.95, 5);
   });
 });

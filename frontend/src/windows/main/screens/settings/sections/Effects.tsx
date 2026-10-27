@@ -6,6 +6,10 @@ import { Icon } from "../../../../../shared/components/Icon";
 import { api } from "../../../../../shared/api/client";
 import { useSettings } from "../../../../../shared/store/settings";
 import type { AudioEffect, AudioSettings } from "../../../../../shared/store/settings";
+import {
+  commitSettings,
+  useEffectiveSettings,
+} from "../../../../../shared/store/settingsCommit";
 
 /**
  * `audio.effects` is nil/empty until the backend or a user touches a slot
@@ -33,14 +37,16 @@ const EMPTY_EFFECT: AudioEffect = { enabled: false, file: "", label: "", availab
  *   file, no PREVIEW -- there is nothing to play, only a processing chain
  *   to toggle.
  *
- * Same single-source-of-truth flow as Audio.tsx and General.tsx: every
- * control calls `api.setSettings` with the full struct (audio patched in)
- * and never writes the store itself -- a row only re-renders once the
- * backend's `settings:changed` event lands and useSettingsSync's
- * subscription writes the new struct into the store. `previewingId` is the
- * one piece of local state, and it holds only the PREVIEW button's own
- * ephemeral in-flight UI feedback -- it is never written back into
- * `settings.audio`.
+ * Same single-source-of-truth flow as Audio.tsx and General.tsx: the store
+ * is written only by the hydrate and the backend's `settings:changed` echo,
+ * and every control goes through `commitSettings`, which patches `audio` on
+ * the newest in-flight request and shows that request as `pending` until it
+ * settles. A failed save clears `pending`, so the control returns to the
+ * stored value; Go reports the failure through the notification channel
+ * (Phase 6.9 CL3, D11). `previewingId` is the one piece of local state, and
+ * it holds only the PREVIEW button's own ephemeral in-flight UI feedback --
+ * it is never written back into `settings.audio`. A failed preview is
+ * likewise reported by Go; here it is only logged.
  *
  * The SFX sample pack does not exist yet -- `internal/audio/assets/`
  * contains only a manifest and a README -- so every slot's `available` is
@@ -50,26 +56,32 @@ const EMPTY_EFFECT: AudioEffect = { enabled: false, file: "", label: "", availab
  * that content is missing.
  */
 export function Effects() {
-  const settings = useSettings((s) => s.settings);
+  const settings = useEffectiveSettings();
   const presets = useSettings((s) => s.audioEffectPresets);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
 
   if (!settings) return null;
   const audio = settings.audio;
 
-  const update = (patch: Partial<AudioSettings>) => {
-    void api.setSettings({ ...settings, audio: { ...audio, ...patch } });
+  // Patches are applied to the BASE commitSettings hands in (the newest
+  // in-flight request, else the store), never to this render's `audio`.
+  const updateAudio = (patch: (a: AudioSettings) => Partial<AudioSettings>) => {
+    void commitSettings((s) => ({ ...s, audio: { ...s.audio, ...patch(s.audio) } }));
   };
+  const update = (patch: Partial<AudioSettings>) => updateAudio(() => patch);
 
   const updateEffect = (id: string, patch: Partial<AudioEffect>) => {
-    const current = audio.effects[id] ?? EMPTY_EFFECT;
-    update({ effects: { ...audio.effects, [id]: { ...current, ...patch } } });
+    updateAudio((a) => ({
+      effects: { ...a.effects, [id]: { ...(a.effects[id] ?? EMPTY_EFFECT), ...patch } },
+    }));
   };
 
   const preview = async (id: string) => {
     setPreviewingId(id);
     try {
       await api.previewEffect(id);
+    } catch (e) {
+      console.error("previewEffect failed", e);
     } finally {
       setPreviewingId((cur) => (cur === id ? null : cur));
     }

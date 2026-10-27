@@ -40,6 +40,17 @@ describe("ToastHost", () => {
     expect(screen.getByText("Global hotkeys unavailable")).toBeInTheDocument();
   });
 
+  // FE14: an error toast is announced to assistive tech.
+  it("an error toast is exposed as an alert", () => {
+    render(<ToastHost />);
+    act(() => {
+      useNotifications.setState({ snap: { items: [item()], unread: 1 } });
+    });
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Global hotkeys unavailable");
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+  });
+
   it("does not toast warn or info", () => {
     render(<ToastHost />);
     act(() => {

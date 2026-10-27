@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api/client";
-import type { Layout, LayoutBlock, ProfileState, RadioInfoDTO } from "../../shared/api/client";
+import type { Layout, LayoutBlock, ProfileState } from "../../shared/api/client";
 import { on, EV } from "../../shared/api/events";
 import type { HotkeyEventPayload } from "../../shared/api/events";
 import { useRadios } from "../../shared/store/radios";
@@ -8,6 +8,8 @@ import { useSession } from "../../shared/store/session";
 import { useProfile } from "../../shared/store/profile";
 import { GRID_GAP, GRID_PAD } from "../../shared/layout";
 import { useSettingsSync } from "../../shared/store/useSettingsSync";
+import { useClientStateSync } from "../../shared/store/useClientStateSync";
+import { hydrateSnapshot } from "../../shared/store/hydrate";
 import { Icon } from "../../shared/components/Icon";
 import { RadioBlock } from "./RadioBlock";
 import { DEFAULT_VARIANT_ID } from "./variants";
@@ -19,17 +21,15 @@ import { DEFAULT_VARIANT_ID } from "./variants";
 const LAYOUT_DEBOUNCE_MS = 300;
 const DEFAULT_WINDOW = { w: 540, h: 720 };
 
-interface RadioUpdatePayload {
-  guid: string;
-  radio: RadioInfoDTO;
-}
-
 /**
- * CommsApp is the Comms pop-out window shell. On mount it hydrates the radios
- * store from a one-shot snapshot and subscribes to the backend `state:radio_update`
- * echo, mapping each into the radios Zustand store (the store is the single source
- * of truth — RadioCard edits round-trip through the server, never mutating the
- * store optimistically). It also mounts `useSettingsSync`, so the shared
+ * CommsApp is the Comms pop-out window shell. Client state -- the radios
+ * store, the session's own GUID and the selected radio -- is owned by
+ * `useClientStateSync`, which hydrates it, keeps it live from the backend's
+ * `state:*` deltas, follows `radio.<n>.select` hotkeys and profile loads, and
+ * clears it on logout so a re-login renders the new session's radios without
+ * reopening the window. The store is the single source of truth: RadioCard
+ * edits round-trip through the server, never mutating the store
+ * optimistically. It also mounts `useSettingsSync`, so the shared
  * settings/keybind store stays live in this window for as long as it is open.
  *
  * Renders the LOCAL client's radios: `radios[selfGuid]`, keyed by the
@@ -43,9 +43,8 @@ interface RadioUpdatePayload {
  * registry via api.closeWindow("comms"), which persists geometry and is
  * more reliable than the in-webview Window.Close().
  *
- * Also hydrates the selected-radio id (api.voiceState) and subscribes to
- * hotkey:pressed/released to track which PTT actions are currently held,
- * both of which RadioCard needs to show live transmit state.
+ * Subscribes to hotkey:pressed/released to track which PTT actions are
+ * currently held, which RadioCard needs to show live transmit state.
  */
 export function CommsApp() {
   const radios = useRadios((s) => s.radios);
@@ -56,6 +55,9 @@ export function CommsApp() {
   // opened with, and a settings or keybind change made in the main window
   // required closing and reopening it (spec DoD 10).
   useSettingsSync();
+  // Owns radios, selfGuid and the selection for this window, and follows
+  // select hotkeys, profile loads and logout/re-login (FE01, FE02).
+  useClientStateSync();
 
   const profile = useProfile((s) => s.state);
 
@@ -73,7 +75,7 @@ export function CommsApp() {
     timer.current = undefined;
     const l = pending.current;
     pending.current = null;
-    if (l) void api.setCommsLayout(l);
+    if (l) api.setCommsLayout(l).catch((e) => console.error("setCommsLayout failed", e));
   }, []);
 
   const commit = useCallback(
@@ -113,41 +115,29 @@ export function CommsApp() {
   // keeps the former from fighting a drag.
   useEffect(() => {
     hydrateLayout();
-    api
-      .getProfileState()
-      .then((s) => useProfile.getState().setState(s))
-      .catch(() => {
-        /* not wired yet -- ignore */
-      });
+    // FE08: a profile:state push during the hydrate is newer, so the late
+    // hydrate answer is dropped.
+    const profileH = hydrateSnapshot(
+      () => api.getProfileState(),
+      (s) => useProfile.getState().setState(s),
+      (err) => console.error("getProfileState failed", err),
+    );
     const off = on<ProfileState>(EV.profileState, (s) => {
+      profileH.pushed();
       useProfile.getState().setState(s);
       hydrateLayout();
     });
-    return () => off();
+    return () => {
+      off();
+      profileH.dispose();
+    };
   }, [hydrateLayout]);
 
+  // Client state (radios, selfGuid, selection) is owned by
+  // useClientStateSync above. This window only adds the PTT half of
+  // hotkey:pressed/released, which RadioCard needs for live transmit state.
   useEffect(() => {
-    api
-      .getClientState()
-      .then((snap) => {
-        useRadios.getState().replaceAll(snap.radios ?? {});
-        useSession.getState().setSelfGuid(snap.self_guid ?? "");
-      })
-      .catch(() => {
-        /* not connected yet — ignore */
-      });
-
-    api
-      .voiceState()
-      .then((vs) => useRadios.getState().setSelectedRadioId(vs.selected_radio))
-      .catch(() => {
-        /* not connected yet — ignore */
-      });
-
     const offs = [
-      on<RadioUpdatePayload>(EV.radioUpdate, (d) =>
-        useRadios.getState().setForGuid(d.guid, d.radio),
-      ),
       on<HotkeyEventPayload>(EV.hotkeyPressed, (d) =>
         useRadios.getState().setPTTHeld(d.action_id, true),
       ),
@@ -230,7 +220,7 @@ export function CommsApp() {
               title="Save changes into the active profile"
               onClick={() => {
                 flush(); // an unsent drag must be part of what is saved
-                void api.saveProfile();
+                api.saveProfile().catch((e) => console.error("saveProfile failed", e));
               }}
             >
               SAVE
@@ -241,7 +231,9 @@ export function CommsApp() {
               type="button"
               className="btn btn-sm"
               title="Discard changes and reload the active profile"
-              onClick={() => void api.revertProfile()}
+              onClick={() =>
+                api.revertProfile().catch((e) => console.error("revertProfile failed", e))
+              }
             >
               REVERT
             </button>
@@ -250,7 +242,7 @@ export function CommsApp() {
             type="button"
             className="btn btn-sm"
             title="Restore the default layout"
-            onClick={() => void api.resetLayout()}
+            onClick={() => api.resetLayout().catch((e) => console.error("resetLayout failed", e))}
           >
             RESET
           </button>
@@ -259,7 +251,9 @@ export function CommsApp() {
             className="close"
             aria-label="close"
             title="Close"
-            onClick={() => void api.closeWindow("comms")}
+            onClick={() =>
+              api.closeWindow("comms").catch((e) => console.error("closeWindow failed", e))
+            }
           >
             <Icon name="close" size={14} />
           </button>

@@ -5,6 +5,7 @@ import { Audio } from "./sections/Audio";
 import { Effects } from "./sections/Effects";
 import { Deferred } from "./sections/Deferred";
 import { Panel } from "../../../../shared/components/Panel";
+import { activatable } from "../../../../shared/components/activatable";
 
 interface SettingsSection {
   key: string;
@@ -88,7 +89,8 @@ export function SettingsScreen({ onNavigate }: { onNavigate?: (view: string) => 
         {SECTIONS.map((s) => (
           <div
             key={s.key}
-            onClick={() => setSection(s.key)}
+            {...activatable(() => setSection(s.key))}
+            aria-current={section === s.key ? "true" : undefined}
             className={`nav-item ${section === s.key ? "active" : ""}`}
             style={{ gridTemplateColumns: "1fr" }}
           >

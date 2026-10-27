@@ -29,6 +29,10 @@ interface RadiosState {
   replaceAll: (all: Record<string, RadioInfoDTO>) => void;
   setSelectedRadioId: (id: number) => void;
   setPTTHeld: (actionId: string, held: boolean) => void;
+  /** Back to the empty, logged-out state: no radios, no selection, nothing
+   * held, no frozen global-PTT target. Called on `logged_out` by
+   * useClientStateSync. */
+  reset: () => void;
 }
 
 export const useRadios = create<RadiosState>((set) => ({
@@ -39,6 +43,7 @@ export const useRadios = create<RadiosState>((set) => ({
   setForGuid: (guid, info) => set((s) => ({ radios: { ...s.radios, [guid]: info } })),
   replaceAll: (radios) => set({ radios }),
   setSelectedRadioId: (selectedRadioId) => set({ selectedRadioId }),
+  reset: () => set({ radios: {}, selectedRadioId: 0, heldPTT: new Set(), globalPttTargetId: 0 }),
   setPTTHeld: (actionId, held) =>
     set((s) => {
       const next = new Set(s.heldPTT);

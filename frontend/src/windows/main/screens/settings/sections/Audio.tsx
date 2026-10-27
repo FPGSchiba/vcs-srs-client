@@ -5,8 +5,13 @@ import { Toggle } from "../../../../../shared/components/Toggle";
 import { Knob } from "../../../../../shared/components/Knob";
 import { VU } from "../../../../../shared/components/VU";
 import { Icon } from "../../../../../shared/components/Icon";
+import { useThrottledCommit } from "../../../../../shared/hooks/useThrottledCommit";
 import { api } from "../../../../../shared/api/client";
 import { useSettings } from "../../../../../shared/store/settings";
+import {
+  commitSettings,
+  useEffectiveSettings,
+} from "../../../../../shared/store/settingsCommit";
 import type {
   AudioSettings,
   AudioLevels,
@@ -19,6 +24,39 @@ import type {
 // this file's own doc comment below.
 const toKnob = (v: number): number => Math.round(v * 100);
 const fromKnob = (v: number): number => v / 100;
+
+/** Drag commit cadence (Phase 6.9 CL3, D2): live, at most once per 150ms. */
+const DRAG_COMMIT_MS = 150;
+
+/**
+ * LevelKnob is one bus knob in the LEVELS panel. Its drag (and keyboard
+ * auto-repeat) commits through its own throttle -- live, at most once per
+ * DRAG_COMMIT_MS, plus a final commit on release -- instead of one
+ * SetSettings (one config write and one broadcast to every window) per
+ * pointer-move frame. Each commit patches only this bus onto the newest
+ * in-flight settings, so concurrent changes are not lost.
+ */
+function LevelKnob({
+  bus,
+  label,
+  value,
+}: Readonly<{ bus: keyof AudioLevels; label: string; value: number }>) {
+  const { push, flush } = useThrottledCommit<number>((v) => {
+    void commitSettings((s) => ({
+      ...s,
+      audio: { ...s.audio, levels: { ...s.audio.levels, [bus]: fromKnob(v) } },
+    }));
+  }, DRAG_COMMIT_MS);
+  return (
+    <Knob
+      value={toKnob(value)}
+      onChange={push}
+      onChangeEnd={flush}
+      label={label}
+      size={48}
+    />
+  );
+}
 
 /**
  * deviceOptions renders one <option> per enumerated device. `disambiguate`
@@ -50,21 +88,34 @@ function deviceOptions(devices: AudioDevice[], disambiguateDefault?: string) {
  * MASTER knob inside MIC TEST -- all four bus knobs now live in their own
  * LEVELS panel instead, leaving MIC TEST with just its button and VU meter.
  *
- * Go is the single source of truth, exactly like General.tsx: every control
- * calls `api.setSettings` with the full settings struct (audio patched in)
- * and never writes the store itself -- a row only re-renders once the
- * backend's `settings:changed` event lands and useSettingsSync's
- * subscription writes the new struct into the store. There is no local
- * mirror of any PERSISTED field here. `testing` below is the one piece of
- * local state, and it holds only the mic-test button's own ephemeral UI
- * state (mirroring Keybinds.tsx's `capturingId`) -- it is never written back
- * into `settings.audio`.
+ * Go is the single source of truth, exactly like General.tsx: the store is
+ * written only by the hydrate and the backend's `settings:changed` echo, and
+ * every control goes through `commitSettings`, which patches `audio` on the
+ * newest in-flight request and shows that request as `pending` until it
+ * settles. A failed save clears `pending`, so the control returns to the
+ * stored value; Go reports the failure through the notification channel
+ * (Phase 6.9 CL3, D11). `testing` below is the one piece of local state, and
+ * it holds only the mic-test button's own ephemeral UI state (mirroring
+ * Keybinds.tsx's `capturingId`) -- it is never written back into
+ * `settings.audio`. It turns on only once `startMicTest` has resolved, so a
+ * failed start leaves the button on TEST MIC.
  */
 export function Audio() {
-  const settings = useSettings((s) => s.settings);
+  const settings = useEffectiveSettings();
   const devices = useSettings((s) => s.audioDevices);
   const vu = useSettings((s) => s.vu);
   const [testing, setTesting] = useState(false);
+  // The VOX threshold slider's value while it is being dragged; null
+  // otherwise. Committed through the same throttle as the knobs.
+  const [voxDraft, setVoxDraft] = useState<number | null>(null);
+  const voxCommit = useThrottledCommit<number>((v) => {
+    void commitSettings((s) => ({ ...s, audio: { ...s.audio, vox_threshold: fromKnob(v) } }));
+  }, DRAG_COMMIT_MS);
+  const endVoxDrag = () => {
+    if (voxDraft === null) return;
+    voxCommit.flush(voxDraft);
+    setVoxDraft(null);
+  };
 
   // Mirrors `testing` for the unmount cleanup below without making the
   // effect re-run (and re-register) on every toggle.
@@ -76,20 +127,19 @@ export function Audio() {
   // override active and no control left on screen to turn it off.
   useEffect(() => {
     return () => {
-      if (testingRef.current) void api.stopMicTest();
+      if (testingRef.current) api.stopMicTest().catch(console.error);
     };
   }, []);
 
   if (!settings) return null;
   const audio = settings.audio;
 
-  const update = (patch: Partial<AudioSettings>) => {
-    void api.setSettings({ ...settings, audio: { ...audio, ...patch } });
+  // Patches are applied to the BASE commitSettings hands in (the newest
+  // in-flight request, else the store), never to this render's `audio`.
+  const updateAudio = (patch: (a: AudioSettings) => Partial<AudioSettings>) => {
+    void commitSettings((s) => ({ ...s, audio: { ...s.audio, ...patch(s.audio) } }));
   };
-
-  const updateLevel = (key: keyof AudioLevels, knobValue: number) => {
-    update({ levels: { ...audio.levels, [key]: fromKnob(knobValue) } });
-  };
+  const update = (patch: Partial<AudioSettings>) => updateAudio(() => patch);
 
   const selectDevice = (kind: "input" | "output", id: string) => {
     const list = kind === "input" ? devices.inputs : devices.outputs;
@@ -103,11 +153,15 @@ export function Audio() {
 
   const toggleMicTest = () => {
     if (testing) {
-      void api.stopMicTest();
-      setTesting(false);
+      api
+        .stopMicTest()
+        .catch(console.error)
+        .finally(() => setTesting(false));
     } else {
-      void api.startMicTest();
-      setTesting(true);
+      api
+        .startMicTest()
+        .then(() => setTesting(true))
+        .catch(console.error);
     }
   };
 
@@ -160,30 +214,10 @@ export function Audio() {
 
       <Panel title="LEVELS">
         <div className="row gap-6" style={{ flexWrap: "wrap" }}>
-          <Knob
-            value={toKnob(audio.levels.master)}
-            onChange={(v) => updateLevel("master", v)}
-            label="MASTER"
-            size={48}
-          />
-          <Knob
-            value={toKnob(audio.levels.voice)}
-            onChange={(v) => updateLevel("voice", v)}
-            label="VOICE"
-            size={48}
-          />
-          <Knob
-            value={toKnob(audio.levels.sfx)}
-            onChange={(v) => updateLevel("sfx", v)}
-            label="SFX"
-            size={48}
-          />
-          <Knob
-            value={toKnob(audio.levels.notification)}
-            onChange={(v) => updateLevel("notification", v)}
-            label="NOTIFICATION"
-            size={48}
-          />
+          <LevelKnob bus="master" label="MASTER" value={audio.levels.master} />
+          <LevelKnob bus="voice" label="VOICE" value={audio.levels.voice} />
+          <LevelKnob bus="sfx" label="SFX" value={audio.levels.sfx} />
+          <LevelKnob bus="notification" label="NOTIFICATION" value={audio.levels.notification} />
         </div>
       </Panel>
 
@@ -243,10 +277,18 @@ export function Audio() {
                   type="range"
                   min={0}
                   max={100}
-                  value={toKnob(audio.vox_threshold)}
+                  value={voxDraft ?? toKnob(audio.vox_threshold)}
                   aria-label="VOX threshold"
                   style={{ width: 200 }}
-                  onChange={(e) => update({ vox_threshold: fromKnob(Number(e.target.value)) })}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setVoxDraft(v);
+                    voxCommit.push(v);
+                  }}
+                  onPointerUp={endVoxDrag}
+                  onPointerCancel={endVoxDrag}
+                  onKeyUp={endVoxDrag}
+                  onBlur={endVoxDrag}
                 />
               }
             />
