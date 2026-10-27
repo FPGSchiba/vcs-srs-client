@@ -390,19 +390,63 @@ func TestTXWriteFrameNeverBlocks(t *testing.T) {
 		t.Fatalf("WriteFrame allocates %v per call on the DSP goroutine (queue full)", allocs)
 	}
 
-	start := time.Now()
-	for i := 0; i < 1000; i++ {
-		s.WriteFrame(frame)
+	// Timing: the best of 10 batches of 1000 calls must fit the 10 ms DSP
+	// tick. A single wall-clock sample is a property of the runner, not of
+	// WriteFrame: one scheduler preemption or GC assist under -race on a
+	// shared runner pushed a lone 1000-call sample to 10.36 ms (client main,
+	// run 40500422701, macos-latest) with nothing in WriteFrame changed. A
+	// real regression (an added lock, syscall, log call or wait) slows EVERY
+	// batch, so the minimum still catches it; a one-off stall slows one
+	// batch and is ignored.
+	//
+	// The clock-free half of the proof is the exact drop count: two 10 ms
+	// frames fill one 20 ms Opus frame, so every second call flushes, and
+	// every one of those flushes must have taken the drop path. A flush that
+	// waited would never return (the watchdog below fails it as "blocked"
+	// rather than hanging until the package timeout), and one that queued
+	// would not be counted.
+	const batches, perBatch = 10, 1000
+	before := s.TXStats().DroppedFull
+	var best time.Duration
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		best = minBatch(batches, perBatch, func() { s.WriteFrame(frame) })
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteFrame blocked against a full queue")
 	}
-	elapsed := time.Since(start)
-	if elapsed >= 10*time.Millisecond {
-		t.Fatalf("1000 WriteFrame calls took %v against a full queue; "+
-			"the whole DSP tick budget is 10 ms", elapsed)
+	if d := s.TXStats().DroppedFull - before; d != batches*perBatch/2 {
+		t.Fatalf("DroppedFull rose by %d over %d calls, want exactly %d "+
+			"(every flush against a full queue must take the drop path)",
+			d, batches*perBatch, batches*perBatch/2)
+	}
+	if best >= 10*time.Millisecond {
+		t.Fatalf("best of %d batches of %d WriteFrame calls took %v against a full queue; "+
+			"the whole DSP tick budget is 10 ms", batches, perBatch, best)
 	}
 	if got := ts.voiceCount(); got != 0 {
 		t.Fatalf("%d datagrams escaped while the encoder was parked", got)
 	}
 	release()
+}
+
+// minBatch runs f n times per batch, batches times, and returns the shortest
+// batch's elapsed time.
+func minBatch(batches, n int, f func()) time.Duration {
+	best := time.Duration(math.MaxInt64)
+	for b := 0; b < batches; b++ {
+		start := time.Now()
+		for i := 0; i < n; i++ {
+			f()
+		}
+		if d := time.Since(start); d < best {
+			best = d
+		}
+	}
+	return best
 }
 
 func TestTXNoTargetsProducesNoPackets(t *testing.T) {
@@ -656,5 +700,18 @@ func TestTXSurvivesClose(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("WriteFrame blocked after Close")
+	}
+}
+
+func TestMinBatchIgnoresOneSlowBatch(t *testing.T) {
+	batch := 0
+	got := minBatch(5, 1, func() {
+		if batch == 2 {
+			time.Sleep(50 * time.Millisecond)
+		}
+		batch++
+	})
+	if got >= 20*time.Millisecond {
+		t.Fatalf("minBatch = %v; one stalled batch must not set the result", got)
 	}
 }
