@@ -169,21 +169,19 @@ func (a *App) applyProfile(d *profile.Document, path string) error {
 		sb.writeMu.Lock()
 		defer sb.writeMu.Unlock()
 
-		sb.mu.Lock()
-		defer sb.mu.Unlock()
-		next := *sb.cfg
-		next.Radios = radios
-		next.SelectedRadioID = selectionFor(radios, next.SelectedRadioID)
-		next.CommsLayout = profileLayoutToConfig(d.Layout)
-		next.ActiveProfile = path
-		var err error
-		if sb.cfgPath != "" {
-			err = config.Save(sb.cfgPath, &next)
-		}
-		if err == nil {
-			sb.cfg = &next
-		}
-		return next.SelectedRadioID, next.CommsLayout, err
+		layout := profileLayoutToConfig(d.Layout)
+		var sel uint32
+		var win config.CommsLayout
+		// mutate runs on the saved snapshot and again at commit; the values
+		// captured on the last run are what sb.cfg now holds.
+		_, err := sb.persistCfg(cfgTxn{mutate: func(c *config.Config) {
+			c.Radios = radios
+			c.SelectedRadioID = selectionFor(radios, c.SelectedRadioID)
+			c.CommsLayout = layout
+			c.ActiveProfile = path
+			sel, win = c.SelectedRadioID, c.CommsLayout
+		}})
+		return sel, win, err
 	}()
 
 	if saveErr != nil {
@@ -463,19 +461,10 @@ func (a *App) DeleteProfile(path string) error {
 		func() {
 			sb.writeMu.Lock()
 			defer sb.writeMu.Unlock()
-			sb.mu.Lock()
-			defer sb.mu.Unlock()
-			if sb.cfg.ActiveProfile != path {
-				return
-			}
-			next := *sb.cfg
-			next.ActiveProfile = ""
-			if sb.cfgPath != "" {
-				if clearErr = config.Save(sb.cfgPath, &next); clearErr != nil {
-					return
-				}
-			}
-			sb.cfg = &next
+			_, clearErr = sb.persistCfg(cfgTxn{
+				check:  func(cur *config.Config) bool { return cur.ActiveProfile == path },
+				mutate: func(c *config.Config) { c.ActiveProfile = "" },
+			})
 		}()
 	}
 	if clearErr != nil {
@@ -517,27 +506,22 @@ func (a *App) ResetLayout() error {
 	saveErr := func() error {
 		sb.writeMu.Lock()
 		defer sb.writeMu.Unlock()
-		sb.mu.Lock()
-		defer sb.mu.Unlock()
-		next := *sb.cfg
-		blocks := make([]config.LayoutBlock, 0, len(next.Radios))
-		for _, r := range next.Radios {
-			blocks = append(blocks, config.LayoutBlock{
-				RadioID: r.ID, Variant: profile.DefaultVariant,
-			})
-		}
-		next.CommsLayout = config.CommsLayout{
-			WindowW: profile.DefaultWindowW,
-			WindowH: profile.DefaultWindowH,
-			Blocks:  blocks,
-		}
-		if sb.cfgPath != "" {
-			if err := config.Save(sb.cfgPath, &next); err != nil {
-				return err
+		_, err := sb.persistCfg(cfgTxn{mutate: func(c *config.Config) {
+			// Built fresh from c's own radios on each run, so nothing is
+			// shared with sb.cfg.
+			blocks := make([]config.LayoutBlock, 0, len(c.Radios))
+			for _, r := range c.Radios {
+				blocks = append(blocks, config.LayoutBlock{
+					RadioID: r.ID, Variant: profile.DefaultVariant,
+				})
 			}
-		}
-		sb.cfg = &next
-		return nil
+			c.CommsLayout = config.CommsLayout{
+				WindowW: profile.DefaultWindowW,
+				WindowH: profile.DefaultWindowH,
+				Blocks:  blocks,
+			}
+		}})
+		return err
 	}()
 	if saveErr != nil {
 		return fmt.Errorf("reset layout: %w", saveErr)
@@ -628,17 +612,9 @@ func (a *App) BrowseProfilesDir() error {
 		return nil
 	}
 	sb.writeMu.Lock()
-	sb.mu.Lock()
-	next := *sb.cfg
-	next.ProfilesDir = dir
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
-	if saveErr == nil {
-		sb.cfg = &next
-	}
-	sb.mu.Unlock()
+	_, saveErr := sb.persistCfg(cfgTxn{
+		mutate: func(c *config.Config) { c.ProfilesDir = dir },
+	})
 	sb.writeMu.Unlock()
 	if saveErr != nil {
 		a.notifyProfileError("Could not save the profiles folder", saveErr)
@@ -707,17 +683,10 @@ func (a *App) SeedBuiltinProfiles() {
 	saveErr := func() error {
 		sb.writeMu.Lock()
 		defer sb.writeMu.Unlock()
-		sb.mu.Lock()
-		defer sb.mu.Unlock()
-		next := *sb.cfg
-		next.BuiltinProfiles = updated
-		if sb.cfgPath != "" {
-			if err := config.Save(sb.cfgPath, &next); err != nil {
-				return err
-			}
-		}
-		sb.cfg = &next
-		return nil
+		_, err := sb.persistCfg(cfgTxn{
+			mutate: func(c *config.Config) { c.BuiltinProfiles = updated },
+		})
+		return err
 	}()
 	if saveErr != nil {
 		// Files are on disk but unrecorded: next startup will treat them as
@@ -881,11 +850,20 @@ func (a *App) flushConfig() error {
 	sb.mu.Unlock()
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
+	// saveMu (inside writeMu, per the writeMu -> saveMu -> mu order) keeps
+	// this write ordered against persistCfg's, which do not all hold writeMu
+	// (rememberDevice).
+	sb.saveMu.Lock()
+	defer sb.saveMu.Unlock()
 	sb.mu.Lock()
 	snapshot := *sb.cfg
 	sb.layoutPending = false
+	save := sb.save
 	sb.mu.Unlock()
-	if err := config.Save(sb.cfgPath, &snapshot); err != nil {
+	if save == nil {
+		save = config.Save
+	}
+	if err := save(sb.cfgPath, &snapshot); err != nil {
 		// Restore the flag on save failure. Safe against concurrent SetCommsLayout
 		// (which would set it true anyway, making the restore idempotent).
 		sb.mu.Lock()

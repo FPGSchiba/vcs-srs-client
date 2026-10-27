@@ -379,20 +379,20 @@ func (a *App) rememberDevice(id, name string) {
 		return
 	}
 	sb.deviceNames[id] = name
-	next := *sb.cfg
-	next.KeybindDevices = map[string]string{}
-	for k, v := range sb.cfg.KeybindDevices {
-		next.KeybindDevices[k] = v
-	}
-	next.KeybindDevices[id] = name
-	if sb.cfgPath != "" {
-		if err := config.Save(sb.cfgPath, &next); err == nil {
-			sb.cfg = &next
-		}
-	} else {
-		sb.cfg = &next
-	}
 	sb.mu.Unlock()
+	// No writeMu: this runs both under it (applyHotkeys/GetKeybinds) and
+	// outside it. persistCfg's saveMu orders the write against every other
+	// writer either way. The error is dropped by design (see above).
+	_, _ = sb.persistCfg(cfgTxn{mutate: func(c *config.Config) {
+		// A fresh map built from c's own entries on each run, so the
+		// commit-time re-apply keeps any entry that landed in between.
+		m := make(map[string]string, len(c.KeybindDevices)+1)
+		for k, v := range c.KeybindDevices {
+			m[k] = v
+		}
+		m[id] = name
+		c.KeybindDevices = m
+	}})
 }
 
 // AddTrigger validates the raw capture, binds it, persists, re-applies OS

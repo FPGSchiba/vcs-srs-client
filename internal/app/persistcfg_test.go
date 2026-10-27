@@ -2,11 +2,15 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/config"
+	"github.com/FPGSchiba/vcs-srs-client/internal/keybinds"
+	"github.com/FPGSchiba/vcs-srs-client/internal/trigger"
 )
 
 // parkedSave installs a save seam that signals entry and then blocks until
@@ -165,5 +169,63 @@ func TestPersistCfgCheckAbortSkipsSave(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("save called %d times after check aborted", calls)
+	}
+}
+
+// Two writers racing to disk -- rememberDevice (which runs with or without
+// writeMu) and persistKeybinds -- must both land: the file on disk ends
+// with the device name AND the binding, every round.
+func TestRememberDeviceAndKeybindsBothReachDisk(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	a, _, _ := newTestAppWithPath(t, cfgPath)
+	sb := a.settings
+
+	for i := 0; i < 50; i++ {
+		dev := fmt.Sprintf("dev-%d", i)
+		name := fmt.Sprintf("Stick %d", i)
+		sb.kb.Add(keybinds.ActionID("global.ptt"), trigger.Joy(trigger.JoyBinding{Device: trigger.DeviceID(dev), Button: trigger.Button(i + 1)}))
+
+		var wg sync.WaitGroup
+		var kbErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); a.rememberDevice(dev, name) }()
+		go func() { defer wg.Done(); kbErr = a.persistKeybinds() }()
+		wg.Wait()
+		if kbErr != nil {
+			t.Fatalf("round %d: persistKeybinds: %v", i, kbErr)
+		}
+
+		got, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("round %d: load: %v", i, err)
+		}
+		if got.KeybindDevices[dev] != name {
+			t.Fatalf("round %d: device %q missing on disk (KeybindDevices = %v)", i, dev, got.KeybindDevices)
+		}
+		want := sb.kb.Snapshot()["global.ptt"]
+		if fmt.Sprint([]string(got.Keybinds["global.ptt"])) != fmt.Sprint(want) {
+			t.Fatalf("round %d: global.ptt on disk = %v, want %v", i, got.Keybinds["global.ptt"], want)
+		}
+	}
+}
+
+// A profile flow's config write must not hold sb.mu either.
+func TestProfileSaveDoesNotHoldMu(t *testing.T) {
+	a, _, _ := newTestAppWithPath(t, filepath.Join(t.TempDir(), "config.toml"))
+	sb := a.settings
+	entered, release := parkedSave(t, sb)
+
+	errc := make(chan error, 1)
+	go func() { errc <- a.ResetLayout() }()
+	waitSaveEntered(t, entered, "ResetLayout to reach the save")
+
+	if !sb.mu.TryLock() {
+		release()
+		t.Fatal("sb.mu is held while ResetLayout writes config.toml")
+	}
+	sb.mu.Unlock()
+	release()
+	if err := <-errc; err != nil {
+		t.Fatalf("ResetLayout: %v", err)
 	}
 }
