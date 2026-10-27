@@ -135,7 +135,25 @@ func TestKeybindRefreshWorkerStopsBeforeHotkeyClose(t *testing.T) {
 
 	a.settings.writeMu.Lock()
 	st.SetRadios("me", radioSet("GUARD")) // job queued, blocked on writeMu
-	st.SetRadios("me", radioSet("GUARD", "FLEET"))
+	// Wait until the worker has dequeued it and is parked on writeMu, so it
+	// is genuinely IN FLIGHT when shutdown starts (a job still queued at
+	// that point is discarded by design, which is not what this pins).
+	r := a.settings.refresh
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.mu.Lock()
+		inFlight := r.running
+		r.mu.Unlock()
+		if inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			a.settings.writeMu.Unlock()
+			t.Fatal("refresh job never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	st.SetRadios("me", radioSet("GUARD", "FLEET")) // stays queued; discarded by shutdown
 
 	shut := make(chan error, 1)
 	go func() { shut <- a.ServiceShutdown() }()
