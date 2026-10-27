@@ -298,7 +298,6 @@ export function Keybinds() {
       ))}
       {capturingId === kb.action_id ? (
         <KeyChip
-          binding=""
           autoListen
           onCapture={handleCapture(kb.action_id)}
           onCancel={handleCancel(kb.action_id)}

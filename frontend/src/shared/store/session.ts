@@ -13,8 +13,6 @@ export interface Self {
 interface SessionState {
   phase: Phase;
   conn: Conn;
-  error: string | null;
-  server: string;
   self: Self | null;
   /**
    * The local client's own GUID within `ClientStateSnapshot.radios` /
@@ -26,8 +24,6 @@ interface SessionState {
   selfGuid: string;
   setPhase: (p: Phase) => void;
   setConn: (c: Conn) => void;
-  setError: (e: string | null) => void;
-  setServer: (s: string) => void;
   setSelf: (s: Self | null) => void;
   setSelfGuid: (guid: string) => void;
 }
@@ -35,14 +31,10 @@ interface SessionState {
 export const useSession = create<SessionState>((set) => ({
   phase: "welcome",
   conn: "disconnected",
-  error: null,
-  server: "",
   self: null,
   selfGuid: "",
   setPhase: (phase) => set({ phase }),
   setConn: (conn) => set({ conn }),
-  setError: (error) => set({ error }),
-  setServer: (server) => set({ server }),
   setSelf: (self) => set({ self }),
   setSelfGuid: (selfGuid) => set({ selfGuid }),
 }));

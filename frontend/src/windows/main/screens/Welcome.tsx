@@ -56,7 +56,6 @@ function errorMessage(e: unknown): string {
  */
 export function Welcome() {
   const setPhase = useSession((s) => s.setPhase);
-  const setSessionServer = useSession((s) => s.setServer);
   const phase = useSession((s) => s.phase);
   const build = useBuildInfo();
   const [stage, setStage] = useState<Stage>("welcome");
@@ -74,7 +73,6 @@ export function Welcome() {
       return;
     }
     try {
-      setSessionServer(server);
       setPhase("connecting");
       await api.connect(server, name, password, ffid);
       // success transitions to the home screen arrive via the control:connection
