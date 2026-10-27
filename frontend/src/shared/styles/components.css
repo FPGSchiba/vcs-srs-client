@@ -4,23 +4,7 @@
    Tokens live in tokens.css; base resets live in global.css.
    ============================================================ */
 
-/* ========== Client panel frame (real OS window) ========== */
-.client {
-  position: absolute;
-  left: 160px;
-  top: 90px;
-  width: 1440px;
-  height: 900px;
-  background: var(--bg-1);
-  border: 1px solid var(--bd-3);
-  border-radius: 4px;
-  box-shadow: 0 20px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(96,165,250,0.05);
-  overflow: hidden;
-  isolation: isolate;
-}
-.client.active {
-  box-shadow: 0 20px 80px rgba(0,0,0,0.8), 0 0 0 1px var(--ac-primary), 0 0 18px var(--ac-primary-glow);
-}
+/* ========== Title bar drag region ========== */
 .topbar { cursor: grab; }
 .topbar.dragging { cursor: grabbing; }
 .topbar > * { cursor: default; }
@@ -37,6 +21,18 @@
   min-width: 360px;
   min-height: 200px;
   overflow: hidden;
+}
+/* A popout rendered as the root of its own OS window (Comms, Notifications):
+   the window is the frame, so the floating-panel chrome is switched off. */
+.popout.native {
+  position: static;
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  min-width: 0;
+  min-height: 0;
 }
 .popout.active { z-index: 50; box-shadow: 0 20px 60px rgba(0,0,0,0.8), 0 0 0 1px var(--ac-primary), 0 0 16px var(--ac-primary-glow); }
 .popout-chrome {

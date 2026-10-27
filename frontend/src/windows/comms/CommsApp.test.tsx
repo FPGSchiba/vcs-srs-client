@@ -98,6 +98,14 @@ describe("CommsApp settings sync", () => {
     useSession.setState({ selfGuid: "" });
   });
 
+  it("renders the native popout shell without inline style", async () => {
+    const { container } = render(<CommsApp />);
+    const root = container.querySelector(".popout")!;
+    expect(root.classList.contains("native")).toBe(true);
+    expect(root.getAttribute("style")).toBeNull();
+    await waitFor(() => expect(useSettings.getState().settings).not.toBeNull());
+  });
+
   it("hydrates the shared settings store when the popout opens", async () => {
     render(<CommsApp />);
     await waitFor(() => expect(useSettings.getState().settings).toEqual(settings));

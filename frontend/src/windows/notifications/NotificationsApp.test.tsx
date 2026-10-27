@@ -47,6 +47,13 @@ describe("NotificationsApp", () => {
     vi.clearAllMocks();
   });
 
+  it("renders the native popout shell without inline style", () => {
+    const { container } = render(<NotificationsApp />);
+    const root = container.querySelector(".popout")!;
+    expect(root.classList.contains("native")).toBe(true);
+    expect(root.getAttribute("style")).toBeNull();
+  });
+
   it("shows the ALL CLEAR empty state with no items", () => {
     render(<NotificationsApp />);
     expect(screen.getByText("ALL CLEAR")).toBeInTheDocument();
