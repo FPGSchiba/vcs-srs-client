@@ -495,7 +495,9 @@ func (a *App) RevertProfile() error {
 // LAYOUT ONLY. It does not touch radios or the selected radio: a control
 // that silently wiped your tuned frequencies while claiming to reset a
 // layout would be a trap. It is the only escape when no profile is loaded.
-func (a *App) ResetLayout() error {
+// Failures are reported through reportAction (Phase 6.9 CL3, FE09).
+func (a *App) ResetLayout() (err error) {
+	defer func() { a.reportAction(actLayoutReset, err) }()
 	sb := a.settings
 	if sb == nil {
 		return nil
