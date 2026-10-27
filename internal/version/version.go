@@ -19,7 +19,13 @@ func Build() string {
 	if !ok {
 		return "dev"
 	}
-	for _, s := range info.Settings {
+	return buildFrom(info.Settings)
+}
+
+// buildFrom extracts the short VCS revision from build settings, or "dev"
+// when none is recorded (e.g. a source-tarball build or `go run`).
+func buildFrom(settings []debug.BuildSetting) string {
+	for _, s := range settings {
 		if s.Key == "vcs.revision" {
 			if len(s.Value) > 7 {
 				return s.Value[:7]
