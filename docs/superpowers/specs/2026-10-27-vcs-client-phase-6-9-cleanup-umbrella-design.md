@@ -358,6 +358,11 @@ No finding is rejected outright — the user kept everything. These are closed o
 | SRV-07 auth failures | AuthService failures return a **body** (`Success:false`, nil error); interceptor failures return **status codes** (`Unauthenticated`/`PermissionDenied`). Revised after the original "status errors everywhere" answer, which rested on an incorrect claim in this spec. | user |
 | Pending-login limits (SRV-17) | 5-min TTL re-armed per step; caps of 10,000 total and 32 per IP; 60s sweep; over the cap → the new InitAuth gets a `Success:false` body. The answer said `ResourceExhausted`; the orchestrator reconciled it with the SRV-07 decision that AuthService failures are bodies. Existing entries are never evicted. | user (reconciled by orchestrator) |
 | Dependency-update secret name | `DEPS_BOT_TOKEN` in both repos | orchestrator |
+| Go 1.27 breaks gqlgen v0.17.89 (found in execution) | Server: `golang.org/x/tools` v0.42.0 → v0.52.0, and gqlgen runs in-module (`go run github.com/99designs/gqlgen generate`); gqlgen itself unchanged. Client CI: the server is generated and built with the **server's own** Go version (separate `setup-go`). | user |
+| SonarCloud S8545 on `go install …buf@v1.47.2` | the user triages it as safe in SonarCloud (same class as `test.yml`'s documented false positive) | user |
+| CL4 neutrality proof | must be produced with a connected browser before #41 leaves draft; not waived | user |
+| Merging | the orchestrator reports each PR as ready; **the user merges**; the orchestrator re-runs the full suite on `main` after each merge | user |
+| `TestTLS_UntrustedCertificateIsRefused` timing flake (seen once during CL4) | assigned to CL1 | orchestrator |
 | Go dependency updates (CI-06) | weekly workflow in both repos that opens PRs with a PAT/GitHub App token (user creates it) | user |
 | Codecov (server) | tokenless OIDC upload; fork/Dependabot PRs skipped; `CODECOV_TOKEN` retired (user rotates it) | user |
 | Tailwind `pulse` collision | design prototype's 40% keyframe wins (the one deliberate visual change in CL4) | user |
