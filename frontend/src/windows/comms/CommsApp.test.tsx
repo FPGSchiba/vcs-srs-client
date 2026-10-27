@@ -205,6 +205,45 @@ describe("CommsApp radio selection", () => {
 
     expect(await screen.findByText(/no radios/i)).toBeInTheDocument();
   });
+
+  // FE02: Comms used to hydrate client state once and never listen to the
+  // session, so a re-login under a new GUID left it on the old (gone) radios.
+  it("re-login with a new guid renders the new radios", async () => {
+    const snap = (guid: string, name: string) => ({
+      self_guid: guid,
+      self: { name: "Me", coalition: "Red", unit_id: "AB12", role_id: 0 },
+      clients: { [guid]: { name: "Me", coalition: "Red", unit_id: "AB12", role_id: 0 } },
+      radios: {
+        [guid]: {
+          muted: false,
+          radios: [{ id: 1, name, frequency: 118.5, enabled: true, is_intercom: false }],
+        },
+      },
+    });
+    getClientState.mockReset().mockResolvedValue(snap("guid-a", "Alpha"));
+    render(<CommsApp />);
+    expect(await screen.findByText("Alpha")).toBeInTheDocument();
+
+    act(() => emit(EV.authSession, "logged_out"));
+    expect(await screen.findByText("No radios — connect first")).toBeInTheDocument();
+
+    getClientState.mockResolvedValue(snap("guid-b", "Fleet"));
+    act(() => emit(EV.controlConnection, "connected"));
+    expect(await screen.findByText("Fleet")).toBeInTheDocument();
+  });
+
+  // R2: the hook subscribes to hotkey:pressed for selection, CommsApp for
+  // PTT; both must keep working.
+  it("select hotkey and PTT both still work", async () => {
+    render(<CommsApp />);
+    await waitFor(() => expect(voiceState).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    act(() => emit(EV.hotkeyPressed, { action_id: "radio.2.select" }));
+    act(() => emit(EV.hotkeyPressed, { action_id: "global.ptt" }));
+    expect(useRadios.getState().globalPttTargetId).toBe(2);
+  });
 });
 
 type PState = { active_path: string; active_name: string; dirty: boolean; dir: string };
