@@ -596,3 +596,9 @@ func TestStateObserverFiresOnChangeOnly(t *testing.T) {
 		t.Errorf("state changes = %d after the device vanished, want 2", states)
 	}
 }
+
+// TestApplyHasNoErrorResult pins Apply's signature: it cannot fail, so it
+// must not offer callers an error to check or discard.
+func TestApplyHasNoErrorResult(t *testing.T) {
+	var _ func(map[string][]Binding) = (&Manager{}).Apply
+}

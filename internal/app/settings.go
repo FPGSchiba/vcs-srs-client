@@ -1250,7 +1250,7 @@ func (a *App) applyHotkeys() {
 	// matching it.
 	_ = sb.hk.Apply(kbBinds) // failures surface via the event below
 	if jm != nil {
-		_ = jm.Apply(joyBinds)
+		jm.Apply(joyBinds)
 	}
 
 	sb.mu.Lock()
