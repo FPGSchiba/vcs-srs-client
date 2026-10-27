@@ -86,16 +86,19 @@ func TestGoModPinsPatchedToolchain(t *testing.T) {
 	}
 }
 
-// CI-04: every workflow that installs Go asserts it got go.mod's toolchain,
-// through the shared assert script (which compares `go env GOVERSION` with
-// go.mod's toolchain directive, pinned above to go1.27.3).
+// CI-04: every workflow that installs the CLIENT's Go asserts it got go.mod's
+// toolchain, through the shared assert script (which compares `go env
+// GOVERSION` with go.mod's toolchain directive, pinned above to go1.27.3).
+// A setup-go reading the checked-out server's go.mod (test.yml) is not ours
+// to assert: that go.mod is pinned by the server repo and, at the pinned SHA,
+// has no toolchain directive for the script to compare against.
 func TestEveryGoWorkflowAssertsToolchain(t *testing.T) {
 	for _, wf := range workflowFiles(t) {
 		text := readRepoFile(t, wf)
 		if !strings.Contains(text, "actions/setup-go") {
 			continue
 		}
-		setups := strings.Count(text, "actions/setup-go")
+		setups := strings.Count(text, "actions/setup-go") - strings.Count(text, "go-version-file: .vcs-srs-server/go.mod")
 		asserts := strings.Count(text, "bash .github/scripts/assert-go-toolchain.sh")
 		if asserts < setups {
 			t.Errorf("%s: %d setup-go steps but only %d assert-go-toolchain.sh calls", wf, setups, asserts)
@@ -356,6 +359,45 @@ func TestServerCheckoutPinnedToSHA(t *testing.T) {
 	}
 	if strings.Contains(text, "alpha.96") {
 		t.Error("test.yml still names Wails alpha.96")
+	}
+}
+
+// CI-04 / CL5 unblock: the checked-out server is generated and built with the
+// SERVER's own Go (its go.mod), and only afterwards does the job switch to the
+// client's pinned toolchain. Running the server's gqlgen under the client's
+// go1.27.3 with GOTOOLCHAIN=local exits 1 silently, so the order matters.
+func TestBackendJobBuildsServerWithServerGo(t *testing.T) {
+	text := readRepoFile(t, ".github/workflows/test.yml")
+	end := strings.Index(text, "\n  frontend:")
+	if end < 0 {
+		t.Fatal("test.yml: no frontend job found")
+	}
+	backend := text[:end]
+	pos := func(needle string) int {
+		t.Helper()
+		i := strings.Index(backend, needle)
+		if i < 0 {
+			t.Fatalf("backend job has no %q", needle)
+		}
+		return i
+	}
+	serverCheckout := pos("repository: FPGSchiba/vcs-srs-server")
+	serverGo := pos("go-version-file: .vcs-srs-server/go.mod")
+	plugins := pos("name: Install protoc plugins for the VCS server")
+	generate := pos("name: Generate the VCS server's protobuf and GraphQL code")
+	build := pos("name: Build the headless VCS server")
+	clientGo := pos("go-version-file: go.mod")
+	assert := pos("bash .github/scripts/assert-go-toolchain.sh")
+	buf := pos("name: Install buf")
+
+	if !(serverCheckout < serverGo && serverGo < plugins && plugins < generate && generate < build) {
+		t.Error("backend job: setup-go from .vcs-srs-server/go.mod must follow the server checkout and precede the server's plugin install, generate and build")
+	}
+	if !(build < clientGo && clientGo < assert && assert < buf) {
+		t.Error("backend job: setup-go from the client's go.mod and the toolchain assert must follow the server build and precede the client steps")
+	}
+	if n := strings.Count(backend, "actions/setup-go"); n != 2 {
+		t.Errorf("backend job has %d setup-go steps, want 2 (server, then client)", n)
 	}
 }
 
