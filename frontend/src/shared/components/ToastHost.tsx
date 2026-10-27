@@ -206,7 +206,9 @@ export function ToastHost() {
   return (
     <div className="toast-stack">
       {visible.map((t) => (
-        <div key={t.id} className="toast alert">
+        // role="alert" (an implicit assertive live region) so an error toast
+        // is announced; aria-atomic reads title and body together (FE14).
+        <div key={t.id} className="toast alert" role="alert" aria-atomic="true">
           <div className="row between acenter">
             <span style={{ fontSize: 12, color: "var(--tx-0)", overflowWrap: "anywhere" }}>
               {t.title}
