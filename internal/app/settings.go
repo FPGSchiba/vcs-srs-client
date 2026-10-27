@@ -265,7 +265,10 @@ func (a *App) GetSettings() SettingsDTO {
 // disagreeing with disk. writeMu is held for the whole call (through the
 // emit) so a concurrent SetKeybind/ClearKeybind cannot interleave with this
 // copy-persist-swap and clobber it, or vice versa.
-func (a *App) SetSettings(s SettingsDTO) error {
+// Failures are reported through reportAction (Phase 6.9 CL3, FE09).
+func (a *App) SetSettings(s SettingsDTO) (err error) {
+	// Registered before writeMu.Lock so it runs after the unlock (LIFO).
+	defer func() { a.reportAction(actSettingsSave, err) }()
 	sb := a.settings
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
