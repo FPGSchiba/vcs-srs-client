@@ -2,14 +2,22 @@ name: Linux GUI deps
 description: >
   Installs the GTK4 / WebKitGTK 6.0 / libsoup3 / X11 dev headers Wails' cgo
   links against (and optionally xvfb) with a retried, per-attempt time-capped
-  apt-get, so a slow or hanging Ubuntu mirror fails fast instead of holding a
-  runner. Composite steps cannot carry timeout-minutes: every CALLING step
-  must set `timeout-minutes: 10`.
+  apt-get, reusing .deb files cached by actions/cache so a slow Ubuntu mirror
+  only has to serve what changed. Composite steps cannot carry
+  timeout-minutes: every CALLING step must set `timeout-minutes: 15`.
 
-# No apt cache: awalsh128's apt-package cache action was tried and removed
-# (2026-10-27). On GitHub runners it never refreshes the package lists, so a
-# stale runner-image list made its install 404 while still exiting 0, it saved
-# an empty cache, and every "hit" restored 0 packages.
+# Why a .deb cache and not awalsh128's apt-package cache action: it was
+# tried and removed (2026-10-27). On GitHub runners it never refreshes the
+# package lists, so a stale runner-image list made its install 404 while still
+# exiting 0, it saved an empty cache, and every "hit" restored 0 packages.
+#
+# Here only the downloaded .debs are cached. `apt-get update` still runs every
+# time (it is fast; the mirror's slow part is the package downloads), and apt
+# checks each cached .deb's size and hash against the fresh index before it
+# uses it, re-downloading anything stale or missing, so a stale or partial
+# cache cannot silently pass. The archive dir lives under $HOME because the
+# system default archive dir has a root-only partial/ and lock the cache tar
+# cannot read.
 
 inputs:
   xvfb:
@@ -20,7 +28,8 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install with apt-get
+    - name: Plan .deb cache
+      id: plan
       shell: bash
       env:
         XVFB: ${{ inputs.xvfb }}
@@ -29,18 +38,71 @@ runs:
         if [ "$XVFB" = "true" ]; then
           pkgs="$pkgs xvfb"
         fi
+        debs_dir="$HOME/.cache/apt-archives"
+        mkdir -p "$debs_dir/partial"
+        pkg_hash=$(printf '%s' "$pkgs" | sha256sum | cut -c1-16)
+        # ImageOS / ImageVersion are set by the GitHub runner image.
+        prefix="apt-debs-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS}-"
+        {
+          echo "pkgs=$pkgs"
+          echo "dir=$debs_dir"
+          echo "restore-prefix=$prefix"
+          echo "key=${prefix}${ImageVersion}-${pkg_hash}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore .deb cache
+      id: restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.plan.outputs.dir }}
+        key: ${{ steps.plan.outputs.key }}
+        restore-keys: ${{ steps.plan.outputs.restore-prefix }}
+
+    - name: Install with apt-get
+      shell: bash
+      env:
+        PKGS: ${{ steps.plan.outputs.pkgs }}
+        DEBS_DIR: ${{ steps.plan.outputs.dir }}
+      run: |
+        # Worst case attempts x (update_cap + install_cap) + (attempts - 1) x
+        # retry_sleep = 830 s, inside the callers' 15-min step timeout.
+        # internal/buildcheck parses these four values and checks that sum.
+        attempts=3
+        update_cap=90
+        install_cap=180
+        retry_sleep=10
+        mkdir -p "$DEBS_DIR/partial"
+        echo "Cached .debs before install: $(find "$DEBS_DIR" -maxdepth 1 -name '*.deb' | wc -l)"
         apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-        for attempt in 1 2 3; do
-          echo "apt-get attempt ${attempt}/3"
-          # shellcheck disable=SC2086 # pkgs is a space-separated list
-          if sudo timeout 120 apt-get "${apt_opts[@]}" update &&
-            sudo DEBIAN_FRONTEND=noninteractive timeout 240 apt-get "${apt_opts[@]}" install -y $pkgs; then
+        dir_opts=(-o "Dir::Cache::Archives=$DEBS_DIR/" -o APT::Keep-Downloaded-Packages=true)
+        for attempt in $(seq 1 "$attempts"); do
+          echo "apt-get attempt ${attempt}/${attempts}"
+          # shellcheck disable=SC2086 # PKGS is a space-separated list
+          if sudo timeout "$update_cap" apt-get "${apt_opts[@]}" update &&
+            sudo DEBIAN_FRONTEND=noninteractive timeout "$install_cap" apt-get "${apt_opts[@]}" "${dir_opts[@]}" install -y $PKGS; then
+            # Drop .debs no longer in the index so the cache does not grow
+            # forever, then make the dir readable for the cache save.
+            sudo apt-get "${dir_opts[@]}" autoclean
+            sudo chown -R "$USER" "$DEBS_DIR"
+            rm -rf "$DEBS_DIR"/partial/* "$DEBS_DIR/lock"
+            echo "Cached .debs after install: $(find "$DEBS_DIR" -maxdepth 1 -name '*.deb' | wc -l)"
             exit 0
           fi
-          sleep 10
+          if [ "$attempt" -lt "$attempts" ]; then
+            sleep "$retry_sleep"
+          fi
         done
-        echo "::error title=Linux GUI deps::apt-get install failed after 3 attempts"
+        echo "::error title=Linux GUI deps::apt-get install failed after ${attempts} attempts"
         exit 1
+
+    # Only after a successful install, and only when the exact key missed
+    # (a restore-key fallback still saves under the new key).
+    - name: Save .deb cache
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.plan.outputs.dir }}
+        key: ${{ steps.plan.outputs.key }}
 
     - name: Verify GUI deps
       shell: bash

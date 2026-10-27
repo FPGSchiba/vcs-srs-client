@@ -72,7 +72,7 @@ jobs:
       # Same packages as test.yml's backend job: GTK4/WebKitGTK 6.0 headers for
       # the Wails application package, xvfb for internal/hotkeys' X11 tests.
       - name: Install Linux GUI deps
-        timeout-minutes: 10
+        timeout-minutes: 15
         uses: ./.github/actions/linux-gui-deps
         with:
           xvfb: "true"
