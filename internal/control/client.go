@@ -76,23 +76,6 @@ func (c *Client) UpdateRadioInfo(ctx context.Context, info *srspb.RadioInfo) err
 	return nil
 }
 
-// UpdateClientInfo pushes the client's metadata to the server.
-func (c *Client) UpdateClientInfo(ctx context.Context, info *srspb.ClientInfo) error {
-	resp, err := c.rpc.UpdateClientInfo(ctx, info, c.callOpts()...)
-	if err != nil {
-		return fmt.Errorf("update client info: %w", err)
-	}
-	if !resp.GetSuccess() {
-		return fmt.Errorf("update client info: %s", resp.GetErrorMessage())
-	}
-	return nil
-}
-
-// GetServerSettings fetches current server settings.
-func (c *Client) GetServerSettings(ctx context.Context) (*srspb.ServerSettings, error) {
-	return c.rpc.GetServerSettings(ctx, &srspb.Empty{}, c.callOpts()...)
-}
-
 // Disconnect notifies the server the client is leaving.
 func (c *Client) Disconnect(ctx context.Context) error {
 	_, err := c.rpc.Disconnect(ctx, &srspb.Empty{}, c.callOpts()...)

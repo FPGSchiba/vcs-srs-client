@@ -12,12 +12,9 @@ type Emitter interface {
 
 // Event names — keep in sync with frontend src/shared/api/events.ts.
 const (
-	EventClientState       = "state:client_state"
 	EventClientUpdate      = "state:client_update"
 	EventClientLeft        = "state:client_left"
 	EventRadioUpdate       = "state:radio_update"
-	EventSettingsUpdate    = "state:settings_update"
-	EventServerAction      = "state:server_action"
 	EventAuthFlowStep      = "auth:flow_step"
 	EventAuthSession       = "auth:session_changed"
 	EventControlConnection = "control:connection"
@@ -207,17 +204,8 @@ func (t *Tagged) RadioUpdate(guid string, info RadioInfoPayload) {
 	t.em.Emit(EventRadioUpdate, RadioUpdateEnvelope{Guid: guid, Radio: info})
 }
 
-// SettingsUpdate emits EventSettingsUpdate with an opaque payload.
-func (t *Tagged) SettingsUpdate(payload any) { t.em.Emit(EventSettingsUpdate, payload) }
-
-// ServerAction emits EventServerAction with an opaque payload.
-func (t *Tagged) ServerAction(payload any) { t.em.Emit(EventServerAction, payload) }
-
 // SessionChanged emits EventAuthSession ("logged_in" | "logged_out").
 func (t *Tagged) SessionChanged(state string) { t.em.Emit(EventAuthSession, state) }
-
-// ClientState emits EventClientState with a full snapshot payload.
-func (t *Tagged) ClientState(snapshot any) { t.em.Emit(EventClientState, snapshot) }
 
 // HotkeyStatePayload is the EventHotkeysState payload.
 type HotkeyStatePayload struct {

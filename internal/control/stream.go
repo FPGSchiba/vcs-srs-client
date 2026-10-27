@@ -61,10 +61,9 @@ func route(upd *srspb.ServerUpdate, st *state.Store, tagged *events.Tagged) {
 	case srspb.ServerUpdate_SERVER_SETTINGS_CHANGED:
 		if s := upd.GetSettingsUpdate(); s != nil {
 			st.SetSettings(s)
-			tagged.SettingsUpdate(struct{}{})
 		}
 	case srspb.ServerUpdate_SERVER_ACTION:
-		tagged.ServerAction(struct{}{})
+		// No client-side consumer; ignored by design -- see Phase 6.9 CL2.
 	case srspb.ServerUpdate_VOICE_ADDRESS_UPDATE:
 		vu := upd.GetVoiceAddressUpdate()
 		if vu == nil {
