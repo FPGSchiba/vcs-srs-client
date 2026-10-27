@@ -176,7 +176,7 @@ jobs:
       - name: Commit, push and open the PR
         if: steps.open.outputs.skip != 'true'
         run: |
-          branch="deps/go-$(date -u +%F)"
+          branch="deps/go-$(date -u +%F)-${GITHUB_RUN_ID}"
           git switch -c "$branch"
           git add go.mod go.sum
           git -c user.name="github-actions[bot]" \

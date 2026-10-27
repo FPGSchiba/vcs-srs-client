@@ -300,6 +300,12 @@ func TestNoUnsupportedPackagingTasks(t *testing.T) {
 			t.Errorf("build/%s/Taskfile.yml: no cross-compile precondition message", os)
 		}
 	}
+	// The Linux precondition compares TARGET_ARCH with the host ARCH, so its
+	// hint must not claim an amd64 host is required.
+	if lin := readRepoFile(t, "build/linux/Taskfile.yml"); strings.Contains(lin, "amd64 host") ||
+		!strings.Contains(lin, "build on a Linux host of the target architecture") {
+		t.Error("build/linux/Taskfile.yml: cross-compile hint does not match its TARGET_ARCH == ARCH check")
+	}
 }
 
 // CI-08/CI-12: the Linux package is the AppImage only, built once.
@@ -427,6 +433,9 @@ func TestGoDepsWorkflowShape(t *testing.T) {
 		"cron:", "workflow_dispatch:", "secrets.DEPS_BOT_TOKEN", "::error", "buf generate",
 		"GO_DEPS_EXCLUDE: github.com/wailsapp/wails/v3", "bash .github/scripts/go-deps-update.sh",
 		"bash .github/scripts/assert-go-toolchain.sh", "-race", "xvfb-run", "gh pr create", "--label go-deps",
+		// The run id keeps a same-day rerun (or a rerun after a closed,
+		// unmerged PR left its branch behind) from colliding on push.
+		`branch="deps/go-$(date -u +%F)-${GITHUB_RUN_ID}"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("go-deps.yml lacks %q", want)

@@ -11,7 +11,7 @@ tasks:
       # on the target OS. The template's docker cross-compile path was
       # removed in Phase 6.9 (track CL5).
       - sh: '[ "{{OS}}" = "linux" ] && [ "{{.HAS_CC}}" = "true" ] && [ "{{.TARGET_ARCH}}" = "{{ARCH}}" ]'
-        msg: "cross-compiling with cgo is not supported; build on Linux (amd64 host, gcc or clang installed)"
+        msg: "cross-compiling with cgo is not supported; build on a Linux host of the target architecture with gcc or clang installed"
     cmds:
       - task: build:native
         vars:

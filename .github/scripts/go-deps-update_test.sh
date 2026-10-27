@@ -47,4 +47,25 @@ rc=$?
 set -e
 check no-requires "$got|$rc" "|0"
 
+# Update mode must request @upgrade, never @latest: @latest resolves to the
+# newest *release* and would downgrade a direct requirement pinned to a newer
+# pre-release (the client pins github.com/robotn/gohook v1.0.0-beta1 while
+# @latest is v0.50.0). A stub `go` records the `go get` arguments; every other
+# subcommand is delegated to the real go, except `mod tidy`, which is a no-op.
+real_go="$(command -v go)"
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/go" <<STUB
+#!/usr/bin/env bash
+case "\$1 \${2:-}" in
+  "get "*) shift; printf '%s\n' "\$@" > "$tmp/get-args"; exit 0 ;;
+  "mod tidy") exit 0 ;;
+esac
+exec "$real_go" "\$@"
+STUB
+chmod +x "$tmp/bin/go"
+rm -f "$tmp/get-args"
+(cd "$tmp/full" && PATH="$tmp/bin:$PATH" GO_DEPS_EXCLUDE="example.com/excluded" bash "$script")
+got="$(tr -d '\r' < "$tmp/get-args" 2>/dev/null || true)"
+check update-uses-upgrade "$got" "$(printf 'example.com/direct/a@upgrade\nexample.com/direct/b@upgrade\nexample.com/excluded/v2@upgrade')"
+
 exit "$fail"
