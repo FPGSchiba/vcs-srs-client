@@ -309,6 +309,7 @@ func newTestAppWithPath(t *testing.T, cfgPath string) (*App, *recordingEmitter, 
 	kb.Load(map[string][]string{})
 	hk := hotkeys.New(reg, a)
 	a.SetSettingsBackend(cfg, cfgPath, kb, hk, em)
+	t.Cleanup(a.stopKeybindRefresh)
 	return a, em, reg
 }
 
@@ -321,6 +322,7 @@ func newTestAppOn(t *testing.T, st *state.Store, reg hotkeys.Registrar) (*App, *
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
 	a.SetSettingsBackend(config.Default(), "", kb, hotkeys.New(reg, a), em)
+	t.Cleanup(a.stopKeybindRefresh)
 	return a, em
 }
 
@@ -1037,6 +1039,7 @@ func TestRadiosArrivingAfterStartupProducePerRadioRows(t *testing.T) {
 		{Id: 2, Name: "FLEET"},
 	}})
 	st.SetSelf("me", &srspb.ClientInfo{Name: "me"})
+	waitKeybindRefreshIdle(t, a) // the refresh is asynchronous (Phase 6.9 CL2)
 
 	rows := perRadioRows(a.GetKeybinds())
 	if len(rows) != 4 { // one PTT + one Select per radio
@@ -1055,13 +1058,14 @@ func TestUnrelatedRadioUpdateDoesNotReEmit(t *testing.T) {
 	st.SetSelf("me", &srspb.ClientInfo{Name: "me"})
 	st.SetRadios("me", &srspb.RadioInfo{Radios: []*srspb.Radio{{Id: 1, Name: "GUARD"}}})
 
+	waitKeybindRefreshIdle(t, a)
 	before := em.count(events.EventKeybindsChanged)
 	st.SetRadios("someone-else", &srspb.RadioInfo{Radios: []*srspb.Radio{{Id: 9, Name: "THEIRS"}}})
+	waitKeybindRefreshIdle(t, a)
 
 	if got := em.count(events.EventKeybindsChanged); got != before {
 		t.Errorf("keybinds:changed fired %d times for another client's radios, want %d", got-before, 0)
 	}
-	_ = a
 }
 
 // perRadioRows filters a keybind list down to the per-radio category.

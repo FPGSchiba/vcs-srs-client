@@ -121,6 +121,10 @@ type settingsBackend struct {
 	// RefreshKeybinds saw, so a radio update that does not change the local
 	// client's radios does not re-emit keybinds:changed.
 	radioSig string
+	// refresh runs keybind refreshes off the store observer's goroutine; see
+	// keybindrefresh.go. Started by SetSettingsBackend, stopped in
+	// ServiceShutdown before the hotkey manager is closed.
+	refresh *keybindRefresher
 
 	// permInterval / permTimeout bound the re-check armed by
 	// RequestHotkeyPermission. Overridable through
@@ -1254,40 +1258,6 @@ func (a *App) applyHotkeys() {
 	// recorded in Manager.Failed(), and never reached the UI, so the row
 	// rendered the chord as if it were live.
 	a.emitHotkeyState()
-}
-
-// RefreshKeybinds recomputes the joined action list against the CURRENT radio
-// set, re-applies OS hotkeys and emits keybinds:changed.
-//
-// Per-radio actions are derived from the local client's radios, which do not
-// exist at startup -- they arrive with SyncClient at connect time and change
-// again on every server-side radio update. Without this the per-radio panel
-// stayed absent and per-radio hotkeys stayed unregistered until the user
-// happened to change some unrelated keybind. Wired to state.Store's radio
-// observer in SetSettingsBackend.
-//
-// Radio updates for OTHER clients flow through the same observer, so this
-// short-circuits unless the LOCAL radio set actually changed; otherwise every
-// remote radio tweak would re-emit the whole keybind list.
-func (a *App) RefreshKeybinds() {
-	sb := a.settings
-	if sb == nil {
-		return // settings backend not wired (tests that only exercise session bindings)
-	}
-	sb.writeMu.Lock()
-	defer sb.writeMu.Unlock()
-
-	sig := radioSignature(a.radioRefs())
-	sb.mu.Lock()
-	unchanged := sb.radioSig == sig
-	sb.radioSig = sig
-	sb.mu.Unlock()
-	if unchanged {
-		return
-	}
-
-	a.applyHotkeys()
-	sb.em.KeybindsChanged(a.GetKeybinds())
 }
 
 // radioSignature renders the local radio set as a comparable string. Both the

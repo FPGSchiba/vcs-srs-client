@@ -201,6 +201,8 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 		deviceNames[id] = name
 	}
 
+	// A re-wire (tests only) must not leak the previous refresh worker.
+	a.stopKeybindRefresh()
 	a.settings = &settingsBackend{
 		cfg:            cfg,
 		cfgPath:        cfgPath,
@@ -224,7 +226,13 @@ func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybind
 	// so the keybind list and the OS registrations follow them (I2); without
 	// it the per-radio panel stays absent for the whole session unless the
 	// user happens to touch an unrelated keybind.
-	a.st.OnRadiosChanged(a.RefreshKeybinds)
+	//
+	// The observer only compares signatures and enqueues; the refresh itself
+	// (writeMu -> applyHotkeys -> keybinds:changed) runs on its own worker,
+	// because store observers run on the update-stream goroutine and must
+	// not block. See keybindrefresh.go.
+	a.settings.refresh = newKeybindRefresher(a.refreshKeybinds)
+	a.st.OnRadiosChanged(a.onRadiosChanged)
 	// Seeds the initial OS registration AND emits the first hotkeys:state, so
 	// a startup registration failure (no backend, denied permission) reaches
 	// the UI without waiting for the user to change something. applyHotkeys
@@ -298,6 +306,10 @@ func (a *App) ServiceShutdown() error {
 	// this is its one closing bracket. It also releases a hotkey still being
 	// HELD at quit: someone hitting Cmd+Q mid-transmission would otherwise
 	// have Pressed emitted with no Released to match it.
+	// The keybind refresh worker stops first: an in-flight refresh finishes
+	// and queued ones are dropped, so nothing registers a hotkey after
+	// hk.Close below.
+	a.stopKeybindRefresh()
 	if a.settings != nil && a.settings.hk != nil {
 		a.settings.hk.Close()
 	}
