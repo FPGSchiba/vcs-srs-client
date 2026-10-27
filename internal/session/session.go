@@ -4,9 +4,11 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc"
@@ -42,13 +44,37 @@ type Deps struct {
 	// Called synchronously on the transitioning goroutine, so it must not
 	// block. connhealth.Monitor.SetControlState satisfies that.
 	OnControlState func(events.ConnectionState)
+
+	// PostDialTimeout bounds everything Connect does after the dial
+	// (InitAuth, the bcrypt hash, GuestLogin, SyncClient) and Reconnect's
+	// SyncClient. 0 means defaultPostDialTimeout. Overridable for tests.
+	PostDialTimeout time.Duration
 }
+
+const (
+	// defaultPostDialTimeout is D1 (user decision): a server that completes
+	// the dial and then never answers fails the connect after 15 s instead
+	// of hanging the Welcome screen forever. The dial keeps its own 10 s
+	// bound (dialTimeout), so the worst case is 25 s.
+	defaultPostDialTimeout = 15 * time.Second
+
+	// cancelDisconnectTimeout bounds the best-effort Disconnect a cancelled
+	// or timed-out Connect sends when GuestLogin had already issued a token
+	// (D3), so the server frees the session at once instead of reaping it.
+	cancelDisconnectTimeout = 2 * time.Second
+)
 
 // Session orchestrates connect/disconnect and owns the live connection.
 type Session struct {
 	st  *state.Store
 	em  events.Emitter
 	dep Deps
+
+	// lifeMu serialises Connect, Reconnect and Disconnect with each other.
+	// Lock order is lifeMu -> mu only. CancelConnect, endSession, resync and
+	// markControlLost never take it: CancelConnect must not wait behind the
+	// attempt it is cancelling.
+	lifeMu sync.Mutex
 
 	mu      sync.Mutex
 	conn    *grpc.ClientConn
@@ -57,6 +83,10 @@ type Session struct {
 
 	lastDialer Dialer
 	lastToken  string
+
+	// attemptCancel cancels the Connect/Reconnect attempt in flight, nil
+	// when none is. Guarded by mu.
+	attemptCancel context.CancelFunc
 
 	// streamGen identifies the current update stream. A goroutine captures
 	// it at launch and compares before reporting termination, so a stale
@@ -222,53 +252,144 @@ func (s *Session) PingOnce(ctx context.Context, lastRTTMs int64) (int64, error) 
 	return cc.PingOnce(ctx, lastRTTMs)
 }
 
+// postDialTimeout is the configured post-dial bound.
+func (s *Session) postDialTimeout() time.Duration {
+	if s.dep.PostDialTimeout > 0 {
+		return s.dep.PostDialTimeout
+	}
+	return defaultPostDialTimeout
+}
+
+// beginAttempt derives the cancellable context of one Connect/Reconnect
+// attempt and publishes its cancel for CancelConnect. Caller holds lifeMu.
+// The returned func unpublishes and releases it.
+func (s *Session) beginAttempt(ctx context.Context) (context.Context, func()) {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.attemptCancel = cancel
+	s.mu.Unlock()
+	return attemptCtx, func() {
+		s.mu.Lock()
+		s.attemptCancel = nil
+		s.mu.Unlock()
+		cancel()
+	}
+}
+
+// CancelConnect aborts the Connect or Reconnect in flight: the dial or the
+// post-dial RPC returns at once and the attempt fails with
+// ErrConnectCancelled. A no-op when no attempt is in flight -- in particular
+// once Connect has returned, so a CANCEL that lands the instant a connect
+// succeeded leaves the new session alone.
+//
+// It takes only s.mu, never lifeMu, which the attempt itself holds.
+func (s *Session) CancelConnect() {
+	s.mu.Lock()
+	cancel := s.attemptCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// attemptError maps a failed attempt's error. A cancelled attempt is
+// ErrConnectCancelled whatever the RPC said; an expired post-dial bound is
+// the server-not-responding error (wrapping the RPC error); anything else is
+// returned as is. pctx is nil when the failure was in the dial.
+func (s *Session) attemptError(attemptCtx, pctx context.Context, err error) error {
+	if errors.Is(attemptCtx.Err(), context.Canceled) {
+		return ErrConnectCancelled
+	}
+	if pctx != nil && errors.Is(pctx.Err(), context.DeadlineExceeded) {
+		return &serverNotRespondingError{after: s.postDialTimeout(), cause: err}
+	}
+	return err
+}
+
 // Connect runs the full guest sequence. Returns a typed error synchronously for
 // any pre-connected failure; post-connected transitions flow through events.
-func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID string) error {
+//
+// The dial is bounded by dialTimeout and everything after it by the
+// post-dial timeout; both run under an attempt context that CancelConnect
+// cancels. Every failure ends in a published ConnDisconnected (GO-01).
+func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID string) (err error) {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+
+	attemptCtx, endAttempt := s.beginAttempt(ctx)
+	defer endAttempt()
+
 	tagged := events.New(s.em)
 	s.setConnState(events.ConnReconnecting) // transient "connecting" surfaced to UI
+	defer func() {
+		if err != nil {
+			s.setConnState(events.ConnDisconnected)
+		}
+	}()
 
 	dialer := s.dep.Dialer
 	if dialer == nil {
-		d, err := dialerFor(serverURL, s.dep.TLSCAFile)
-		if err != nil {
-			return err
+		d, derr := dialerFor(serverURL, s.dep.TLSCAFile)
+		if derr != nil {
+			return derr
 		}
 		dialer = d
 	}
 
-	conn, err := dialer(ctx)
+	conn, err := dialer(attemptCtx)
 	if err != nil {
+		if mapped := s.attemptError(attemptCtx, nil, err); mapped != err {
+			return mapped
+		}
 		return fmt.Errorf("dial: %w", err)
 	}
 
-	ac := auth.New(conn)
-	init, err := ac.InitAuth(ctx, s.dep.Version)
-	if err != nil {
+	pctx, pcancel := context.WithTimeout(attemptCtx, s.postDialTimeout())
+	defer pcancel()
+
+	// token is set once GuestLogin has issued one. abort sends the D3
+	// best-effort Disconnect only then, and only for a cancel or timeout:
+	// the server would otherwise hold the session until its reaper runs.
+	var token string
+	abort := func(cause error) error {
+		mapped := s.attemptError(attemptCtx, pctx, cause)
+		if token != "" && mapped != cause {
+			dctx, dcancel := context.WithTimeout(context.Background(), cancelDisconnectTimeout)
+			_ = control.New(conn, token).Disconnect(dctx)
+			dcancel()
+		}
 		_ = conn.Close()
-		return err
+		return mapped
+	}
+
+	ac := auth.New(conn)
+	init, err := ac.InitAuth(pctx, s.dep.Version)
+	if err != nil {
+		return abort(err)
 	}
 	if !init.HasGuest {
-		_ = conn.Close()
-		return auth.ErrGuestUnavailable
+		return abort(auth.ErrGuestUnavailable)
 	}
 	// The server matches the coalition by bcrypt-comparing the client-supplied
 	// hash against its stored coalition passwords, so we never send plaintext.
 	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("hash password: %w", err)
+		return abort(fmt.Errorf("hash password: %w", err))
 	}
-	guest, err := ac.GuestLogin(ctx, name, string(hashed), unitID, init.ClientGUID)
+	guest, err := ac.GuestLogin(pctx, name, string(hashed), unitID, init.ClientGUID)
 	if err != nil {
-		_ = conn.Close()
-		return err
+		return abort(err)
 	}
+	token = guest.Token
 
 	cc := control.New(conn, guest.Token)
-	if _, err := cc.SyncClient(ctx, s.st); err != nil {
-		_ = conn.Close()
-		return err
+	if _, err := cc.SyncClient(pctx, s.st); err != nil {
+		return abort(err)
+	}
+	if cerr := pctx.Err(); cerr != nil {
+		// Cancelled or timed out after the last RPC answered: honour it
+		// rather than install a session the user already walked away from.
+		return abort(cerr)
 	}
 
 	// Record the local client identity for the UI (callsign/FFID from the form,
@@ -317,27 +438,45 @@ func (s *Session) Disconnect(ctx context.Context) error {
 }
 
 // Reconnect re-establishes the control session reusing the stored token (no
-// re-auth). Emits reconnecting → connected on success, or disconnected on failure.
-func (s *Session) Reconnect(ctx context.Context) error {
+// re-auth). Emits reconnecting → connected on success, or disconnected on
+// failure (exactly once). Bounded and cancellable exactly like Connect.
+func (s *Session) Reconnect(ctx context.Context) (err error) {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+
+	attemptCtx, endAttempt := s.beginAttempt(ctx)
+	defer endAttempt()
+
 	s.setConnState(events.ConnReconnecting)
+	defer func() {
+		if err != nil {
+			s.setConnState(events.ConnDisconnected)
+		}
+	}()
 
 	s.mu.Lock()
 	dialer, token := s.lastDialer, s.lastToken
 	s.mu.Unlock()
 	if dialer == nil {
-		s.setConnState(events.ConnDisconnected)
 		return fmt.Errorf("cannot reconnect: never connected")
 	}
 
-	conn, err := dialer(ctx)
+	conn, err := dialer(attemptCtx)
 	if err != nil {
-		s.setConnState(events.ConnDisconnected)
+		if mapped := s.attemptError(attemptCtx, nil, err); mapped != err {
+			return mapped
+		}
 		return fmt.Errorf("reconnect dial: %w", err)
 	}
+	pctx, pcancel := context.WithTimeout(attemptCtx, s.postDialTimeout())
+	defer pcancel()
+
 	cc := control.New(conn, token)
-	if _, err := cc.SyncClient(ctx, s.st); err != nil {
+	if _, err := cc.SyncClient(pctx, s.st); err != nil {
 		_ = conn.Close()
-		s.setConnState(events.ConnDisconnected)
+		if mapped := s.attemptError(attemptCtx, pctx, err); mapped != err {
+			return mapped
+		}
 		return fmt.Errorf("reconnect sync: %w", err)
 	}
 
