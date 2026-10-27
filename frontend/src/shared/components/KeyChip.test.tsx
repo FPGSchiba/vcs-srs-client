@@ -109,7 +109,6 @@ describe("KeyChip under StrictMode", () => {
     const [capturing, setCapturing] = useState(false);
     return capturing ? (
       <KeyChip
-       
         autoListen
         onCapture={() => {}}
         onCancel={() => {

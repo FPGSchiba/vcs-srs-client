@@ -17,7 +17,11 @@ describe("dead code stays deleted", () => {
     void s.error;
     // @ts-expect-error removed in CL4 (FE10)
     void w.isOpen;
-    expect(Object.keys(s)).not.toEqual(expect.arrayContaining(["server", "error", "setServer", "setError"]));
-    expect(Object.keys(w)).not.toContain("isOpen");
+    // One assertion per key: a combined arrayContaining check would pass as
+    // soon as any single key was gone.
+    for (const k of ["server", "error", "setServer", "setError"]) {
+      expect(s).not.toHaveProperty(k);
+    }
+    expect(w).not.toHaveProperty("isOpen");
   });
 });
