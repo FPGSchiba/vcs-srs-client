@@ -11,9 +11,9 @@ require (
 	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
 	github.com/robotn/gohook v1.0.0-beta1 // pinned: purego backends exist only from this tag; build with -tags purego
 	github.com/wailsapp/wails/v3 v3.0.0-beta.22
-	golang.org/x/crypto v0.53.0
-	google.golang.org/grpc v1.66.0
-	google.golang.org/protobuf v1.36.6
+	golang.org/x/crypto v0.58.0
+	google.golang.org/grpc v1.85.0
+	google.golang.org/protobuf v1.36.12
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
@@ -28,8 +28,8 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/vcaesar/go-wayland v0.40.0 // indirect
 	github.com/vcaesar/keycode v0.20.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.39.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240604185151-ef581f913117 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
 )
