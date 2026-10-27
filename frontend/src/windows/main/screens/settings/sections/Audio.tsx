@@ -5,6 +5,7 @@ import { Toggle } from "../../../../../shared/components/Toggle";
 import { Knob } from "../../../../../shared/components/Knob";
 import { VU } from "../../../../../shared/components/VU";
 import { Icon } from "../../../../../shared/components/Icon";
+import { useThrottledCommit } from "../../../../../shared/hooks/useThrottledCommit";
 import { api } from "../../../../../shared/api/client";
 import { useSettings } from "../../../../../shared/store/settings";
 import {
@@ -23,6 +24,35 @@ import type {
 // this file's own doc comment below.
 const toKnob = (v: number): number => Math.round(v * 100);
 const fromKnob = (v: number): number => v / 100;
+
+/** Drag commit cadence (Phase 6.9 CL3, D2): live, at most once per 150ms. */
+const DRAG_COMMIT_MS = 150;
+
+/**
+ * LevelKnob is one bus knob in the LEVELS panel. Its drag (and keyboard
+ * auto-repeat) commits through its own throttle -- live, at most once per
+ * DRAG_COMMIT_MS, plus a final commit on release -- instead of one
+ * SetSettings (one config write and one broadcast to every window) per
+ * pointer-move frame. Each commit patches only this bus onto the newest
+ * in-flight settings, so concurrent changes are not lost.
+ */
+function LevelKnob({ bus, label, value }: { bus: keyof AudioLevels; label: string; value: number }) {
+  const { push, flush } = useThrottledCommit<number>((v) => {
+    void commitSettings((s) => ({
+      ...s,
+      audio: { ...s.audio, levels: { ...s.audio.levels, [bus]: fromKnob(v) } },
+    }));
+  }, DRAG_COMMIT_MS);
+  return (
+    <Knob
+      value={toKnob(value)}
+      onChange={push}
+      onChangeEnd={flush}
+      label={label}
+      size={48}
+    />
+  );
+}
 
 /**
  * deviceOptions renders one <option> per enumerated device. `disambiguate`
@@ -71,6 +101,17 @@ export function Audio() {
   const devices = useSettings((s) => s.audioDevices);
   const vu = useSettings((s) => s.vu);
   const [testing, setTesting] = useState(false);
+  // The VOX threshold slider's value while it is being dragged; null
+  // otherwise. Committed through the same throttle as the knobs.
+  const [voxDraft, setVoxDraft] = useState<number | null>(null);
+  const voxCommit = useThrottledCommit<number>((v) => {
+    void commitSettings((s) => ({ ...s, audio: { ...s.audio, vox_threshold: fromKnob(v) } }));
+  }, DRAG_COMMIT_MS);
+  const endVoxDrag = () => {
+    if (voxDraft === null) return;
+    voxCommit.flush(voxDraft);
+    setVoxDraft(null);
+  };
 
   // Mirrors `testing` for the unmount cleanup below without making the
   // effect re-run (and re-register) on every toggle.
@@ -95,10 +136,6 @@ export function Audio() {
     void commitSettings((s) => ({ ...s, audio: { ...s.audio, ...patch(s.audio) } }));
   };
   const update = (patch: Partial<AudioSettings>) => updateAudio(() => patch);
-
-  const updateLevel = (key: keyof AudioLevels, knobValue: number) => {
-    updateAudio((a) => ({ levels: { ...a.levels, [key]: fromKnob(knobValue) } }));
-  };
 
   const selectDevice = (kind: "input" | "output", id: string) => {
     const list = kind === "input" ? devices.inputs : devices.outputs;
@@ -173,30 +210,10 @@ export function Audio() {
 
       <Panel title="LEVELS">
         <div className="row gap-6" style={{ flexWrap: "wrap" }}>
-          <Knob
-            value={toKnob(audio.levels.master)}
-            onChange={(v) => updateLevel("master", v)}
-            label="MASTER"
-            size={48}
-          />
-          <Knob
-            value={toKnob(audio.levels.voice)}
-            onChange={(v) => updateLevel("voice", v)}
-            label="VOICE"
-            size={48}
-          />
-          <Knob
-            value={toKnob(audio.levels.sfx)}
-            onChange={(v) => updateLevel("sfx", v)}
-            label="SFX"
-            size={48}
-          />
-          <Knob
-            value={toKnob(audio.levels.notification)}
-            onChange={(v) => updateLevel("notification", v)}
-            label="NOTIFICATION"
-            size={48}
-          />
+          <LevelKnob bus="master" label="MASTER" value={audio.levels.master} />
+          <LevelKnob bus="voice" label="VOICE" value={audio.levels.voice} />
+          <LevelKnob bus="sfx" label="SFX" value={audio.levels.sfx} />
+          <LevelKnob bus="notification" label="NOTIFICATION" value={audio.levels.notification} />
         </div>
       </Panel>
 
@@ -256,10 +273,17 @@ export function Audio() {
                   type="range"
                   min={0}
                   max={100}
-                  value={toKnob(audio.vox_threshold)}
+                  value={voxDraft ?? toKnob(audio.vox_threshold)}
                   aria-label="VOX threshold"
                   style={{ width: 200 }}
-                  onChange={(e) => update({ vox_threshold: fromKnob(Number(e.target.value)) })}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setVoxDraft(v);
+                    voxCommit.push(v);
+                  }}
+                  onPointerUp={endVoxDrag}
+                  onKeyUp={endVoxDrag}
+                  onBlur={endVoxDrag}
                 />
               }
             />
