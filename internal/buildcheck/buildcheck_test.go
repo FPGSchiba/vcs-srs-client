@@ -276,3 +276,50 @@ func TestPackagingPathsExistWindows(t *testing.T) {
 	}
 	mustNotExist(t, "build/windows/installer")
 }
+
+// CI-08: only the three supported packages remain (Windows NSIS, Linux
+// AppImage, macOS .app); docker cross-builds and deb/rpm/AUR are gone, and a
+// cgo build on the wrong host stops with a clear message.
+func TestNoUnsupportedPackagingTasks(t *testing.T) {
+	files := []string{"Taskfile.yml", "build/Taskfile.yml", "build/windows/Taskfile.yml", "build/linux/Taskfile.yml", "build/darwin/Taskfile.yml"}
+	var all strings.Builder
+	for _, f := range files {
+		all.WriteString(readRepoFile(t, f))
+	}
+	text := all.String()
+	for _, banned := range []string{"build/docker", "wails-cross", "CROSS_IMAGE", "build:docker", "setup:docker", "nfpm", "-format deb", "-format rpm", "-format archlinux", "create:deb", "sign:packages"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("Taskfiles still mention %q", banned)
+		}
+	}
+	if !strings.Contains(readRepoFile(t, "build/linux/Taskfile.yml"), "CATEGORIES: 'AudioVideo;Network;'") {
+		t.Error("build/linux/Taskfile.yml: .desktop categories are not AudioVideo;Network;")
+	}
+	for _, os := range []string{"darwin", "linux", "windows"} {
+		if !strings.Contains(readRepoFile(t, "build/"+os+"/Taskfile.yml"), "cross-compiling with cgo is not supported") {
+			t.Errorf("build/%s/Taskfile.yml: no cross-compile precondition message", os)
+		}
+	}
+}
+
+// CI-08/CI-12: the Linux package is the AppImage only, built once.
+func TestPackagingPathsExistLinuxDarwin(t *testing.T) {
+	for _, rel := range []string{"build/appicon.png", "build/darwin/Info.plist", "build/darwin/icons.icns"} {
+		if _, err := os.Stat(repoPath(t, rel)); err != nil {
+			t.Errorf("%s: %v", rel, err)
+		}
+	}
+	pkg := taskBlock(t, readRepoFile(t, "build/linux/Taskfile.yml"), "package")
+	if n := strings.Count(pkg, "create:appimage"); n != 1 {
+		t.Errorf("linux package task references create:appimage %d times, want 1:\n%s", n, pkg)
+	}
+	if strings.Contains(pkg, "deps:") {
+		t.Errorf("linux package task has deps (create:appimage already builds):\n%s", pkg)
+	}
+}
+
+func TestVendorDocHasNoDanglingDockerPath(t *testing.T) {
+	if strings.Contains(readRepoFile(t, "internal/audio/opus/VENDOR.md"), "wails-cross") {
+		t.Error("internal/audio/opus/VENDOR.md still describes the removed wails-cross docker path")
+	}
+}
