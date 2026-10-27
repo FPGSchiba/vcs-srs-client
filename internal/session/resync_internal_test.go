@@ -61,3 +61,32 @@ func TestResync_StaleGenerationIgnored(t *testing.T) {
 		t.Fatal("a stale-generation stream end tore down the live connection")
 	}
 }
+
+// Review finding (CL1): a unary RPC that captured an OLDER session's control
+// client and then sees Unauthenticated must not end the session a later
+// Connect installed. checkSessionEnded is handed the token the caller's
+// control client was built with, and is a no-op when it is no longer current.
+func TestCheckSessionEnded_StaleTokenLeavesCurrentSession(t *testing.T) {
+	f := grpctest.NewFake()
+	f.SyncVoiceSecret = "secret"
+	dial, cleanup := grpctest.Start(t, f)
+	t.Cleanup(cleanup)
+	s := New(state.New(), nopEmitter{}, Deps{Dialer: dial, Version: "test", OnControlState: func(events.ConnectionState) {}})
+	if err := s.Connect(context.Background(), "localhost:0", "n", "p", "u"); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	unauth := status.Error(codes.Unauthenticated, "session not found for /srs.SRSService/Ping: log in again")
+
+	_ = s.checkSessionEnded("a-previous-sessions-token", unauth)
+	if s.Control() == nil {
+		t.Fatal("a stale session's Unauthenticated ended the current session")
+	}
+
+	s.mu.Lock()
+	tok := s.lastToken
+	s.mu.Unlock()
+	_ = s.checkSessionEnded(tok, unauth)
+	if s.Control() != nil {
+		t.Fatal("the current session's Unauthenticated did not end it")
+	}
+}

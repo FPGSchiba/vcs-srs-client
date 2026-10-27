@@ -258,3 +258,57 @@ func TestConnect_EveryFailureEndsDisconnected(t *testing.T) {
 		})
 	}
 }
+
+// Review finding (CL1): a CANCEL that arrives while Connect is still waiting
+// for lifeMu -- here behind a Disconnect whose RPC is stalled -- used to be a
+// no-op, because no attempt cancel was published yet. The connect then went
+// on to log the user in after they pressed CANCEL.
+func TestCancelConnect_WhileConnectWaitsForLifecycleLock(t *testing.T) {
+	f := grpctest.NewFake()
+	h := newBound(t, f, nil, 0)
+	if err := h.connect(); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	release := make(chan struct{})
+	f.Block("Disconnect", release)
+
+	discDone := make(chan struct{})
+	go func() {
+		defer close(discDone)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = h.s.Disconnect(ctx)
+	}()
+	if !waitFor(t, func() bool { return contains(f.Calls(), "Disconnect") }) {
+		t.Fatal("Disconnect RPC never reached")
+	}
+
+	connErr := make(chan error, 1)
+	go func() { connErr <- h.connect() }()
+	time.Sleep(100 * time.Millisecond) // Connect is now parked on lifeMu
+	h.s.CancelConnect()
+	close(release)
+	<-discDone
+
+	select {
+	case err := <-connErr:
+		if !errors.Is(err, session.ErrConnectCancelled) {
+			t.Fatalf("Connect = %v, want ErrConnectCancelled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not return")
+	}
+	if h.s.Control() != nil {
+		t.Fatal("a cancelled connect installed a session")
+	}
+}
+
+// A CancelConnect with no attempt in flight or waiting must not carry over
+// and cancel a later Connect.
+func TestCancelConnect_IdleDoesNotCancelTheNextConnect(t *testing.T) {
+	h := newBound(t, grpctest.NewFake(), nil, 0)
+	h.s.CancelConnect()
+	if err := h.connect(); err != nil {
+		t.Fatalf("connect after an idle CancelConnect: %v", err)
+	}
+}

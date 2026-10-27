@@ -93,6 +93,12 @@ type Session struct {
 	// when none is. Guarded by mu.
 	attemptCancel context.CancelFunc
 
+	// cancelSeq counts CancelConnect calls. An attempt reads it before it
+	// waits for lifeMu; if it has moved by the time the attempt begins, a
+	// CANCEL arrived while the attempt was still queued and it is cancelled
+	// at once. Guarded by mu.
+	cancelSeq uint64
+
 	// streamGen identifies the current update stream. A goroutine captures
 	// it at launch and compares before reporting termination, so a stale
 	// stream from a previous connection cannot report disconnected over a
@@ -288,8 +294,14 @@ func (s *Session) endSession(reason string) error {
 // endSessionOnce is endSession, also reporting whether this call did the
 // work (false: someone else already had).
 func (s *Session) endSessionOnce(reason string) (error, bool) {
+	return s.endSessionIf(reason, nil)
+}
+
+// endSessionIf is endSessionOnce with an extra guard evaluated under s.mu:
+// when still is non-nil and reports false, the call has no side effects.
+func (s *Session) endSessionIf(reason string, still func() bool) (error, bool) {
 	s.mu.Lock()
-	if s.lastToken == "" && s.conn == nil {
+	if (s.lastToken == "" && s.conn == nil) || (still != nil && !still()) {
 		s.mu.Unlock()
 		return sessionEndedError(reason), false
 	}
@@ -322,9 +334,15 @@ func (s *Session) endSessionOnce(reason string) (error, bool) {
 
 // checkSessionEnded routes a unary RPC error: a session-ended verdict ends
 // the session and returns its error; anything else is returned unchanged.
-func (s *Session) checkSessionEnded(err error) error {
+//
+// tok is the token of the session the caller's control client belonged to,
+// captured together with that client. When a later Connect has installed a
+// different session in the meantime, the verdict is about the old one and
+// the current session is left alone (the error is still returned).
+func (s *Session) checkSessionEnded(tok string, err error) error {
 	if v, reason := classifyRPCError(err); v == verdictSessionEnded {
-		return s.endSession(reason)
+		e, _ := s.endSessionIf(reason, func() bool { return s.lastToken == tok })
+		return e
 	}
 	return err
 }
@@ -409,7 +427,7 @@ func (s *Session) markControlLost(gen uint64) {
 // racing a teardown sees.
 func (s *Session) PingOnce(ctx context.Context, lastRTTMs int64) (int64, error) {
 	s.mu.Lock()
-	cc := s.control
+	cc, tok := s.control, s.lastToken
 	s.mu.Unlock()
 	if cc == nil {
 		return 0, fmt.Errorf("ping: not connected")
@@ -418,7 +436,7 @@ func (s *Session) PingOnce(ctx context.Context, lastRTTMs int64) (int64, error) 
 	if err != nil {
 		// SV1 C1. Called with no connhealth lock held, so ending the
 		// session from here is safe.
-		return rtt, s.checkSessionEnded(err)
+		return rtt, s.checkSessionEnded(tok, err)
 	}
 	return rtt, nil
 }
@@ -431,13 +449,26 @@ func (s *Session) postDialTimeout() time.Duration {
 	return defaultPostDialTimeout
 }
 
+// queueAttempt is called by Connect/Reconnect BEFORE they wait for lifeMu.
+// It returns the ticket beginAttempt checks for a CANCEL that arrived while
+// the attempt was queued.
+func (s *Session) queueAttempt() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancelSeq
+}
+
 // beginAttempt derives the cancellable context of one Connect/Reconnect
 // attempt and publishes its cancel for CancelConnect. Caller holds lifeMu.
-// The returned func unpublishes and releases it.
-func (s *Session) beginAttempt(ctx context.Context) (context.Context, func()) {
+// If CancelConnect ran since queueAttempt issued ticket, the attempt starts
+// already cancelled. The returned func unpublishes and releases it.
+func (s *Session) beginAttempt(ctx context.Context, ticket uint64) (context.Context, func()) {
 	attemptCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.attemptCancel = cancel
+	if s.cancelSeq != ticket {
+		cancel()
+	}
 	s.mu.Unlock()
 	return attemptCtx, func() {
 		s.mu.Lock()
@@ -453,9 +484,14 @@ func (s *Session) beginAttempt(ctx context.Context) (context.Context, func()) {
 // once Connect has returned, so a CANCEL that lands the instant a connect
 // succeeded leaves the new session alone.
 //
+// An attempt still queued behind lifeMu (for example behind a Disconnect)
+// is cancelled too, through cancelSeq; one that queues after this call is
+// not.
+//
 // It takes only s.mu, never lifeMu, which the attempt itself holds.
 func (s *Session) CancelConnect() {
 	s.mu.Lock()
+	s.cancelSeq++
 	cancel := s.attemptCancel
 	s.mu.Unlock()
 	if cancel != nil {
@@ -505,10 +541,11 @@ func (s *Session) teardownLive() {
 // post-dial timeout; both run under an attempt context that CancelConnect
 // cancels. Every failure ends in a published ConnDisconnected (GO-01).
 func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID string) (err error) {
+	ticket := s.queueAttempt()
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
 
-	attemptCtx, endAttempt := s.beginAttempt(ctx)
+	attemptCtx, endAttempt := s.beginAttempt(ctx, ticket)
 	defer endAttempt()
 
 	tagged := events.New(s.em)
@@ -523,6 +560,11 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 	// exactly as Reconnect replaces one -- otherwise its conn and update
 	// stream leak, one per extra Connect.
 	s.teardownLive()
+	// The replaced (or control-lost) session is forgotten here, not on
+	// success: if this Connect fails, RECONNECT must not resume it.
+	s.mu.Lock()
+	s.lastDialer, s.lastToken = nil, ""
+	s.mu.Unlock()
 
 	dialer := s.dep.Dialer
 	if dialer == nil {
@@ -650,10 +692,11 @@ func (s *Session) Disconnect(ctx context.Context) error {
 // re-auth). Emits reconnecting → connected on success, or disconnected on
 // failure (exactly once). Bounded and cancellable exactly like Connect.
 func (s *Session) Reconnect(ctx context.Context) (err error) {
+	ticket := s.queueAttempt()
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
 
-	attemptCtx, endAttempt := s.beginAttempt(ctx)
+	attemptCtx, endAttempt := s.beginAttempt(ctx, ticket)
 	defer endAttempt()
 
 	s.setConnState(events.ConnReconnecting)
@@ -735,13 +778,13 @@ func (s *Session) Reconnect(ctx context.Context) (err error) {
 // UpdateRadioInfo pushes a radio change via the live control client.
 func (s *Session) UpdateRadioInfo(ctx context.Context, info *srspb.RadioInfo) error {
 	s.mu.Lock()
-	cc := s.control
+	cc, tok := s.control, s.lastToken
 	s.mu.Unlock()
 	if cc == nil {
 		return fmt.Errorf("not connected")
 	}
 	if err := cc.UpdateRadioInfo(ctx, info); err != nil {
-		return s.checkSessionEnded(err) // SV1 C1
+		return s.checkSessionEnded(tok, err) // SV1 C1
 	}
 	return nil
 }

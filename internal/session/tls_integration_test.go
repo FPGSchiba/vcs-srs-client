@@ -3,11 +3,14 @@ package session
 import (
 	"context"
 	"crypto/tls"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
 )
@@ -131,5 +134,35 @@ func TestTLS_PlaintextServerProducesTheExplainedError(t *testing.T) {
 	explained := explainDialError(err, "srs.example.org:5002", "")
 	if !strings.Contains(explained.Error(), "not speaking TLS") {
 		t.Fatalf("expected the plaintext-server diagnosis, got: %v", explained)
+	}
+}
+
+// Review finding (CL1): TestTLS_PlaintextServerProducesTheExplainedError now
+// feeds explainDialError an RPC error from a non-blocking channel. This test
+// keeps one check on the exact shape production's dial path returns:
+// boundedDial (blocking, WithReturnConnectionError) against a plaintext
+// listener, with a bound generous enough that the first handshake has long
+// failed before it expires even under a loaded -race run.
+func TestTLS_BoundedDialAgainstPlaintextIsExplained(t *testing.T) {
+	cert := grpctest.NewTestCert(t, "localhost")
+	lis := bufconn.Listen(1024 * 1024)
+	srv := grpc.NewServer() // plaintext
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(func() { srv.Stop(); _ = lis.Close() })
+
+	creds := credentials.NewTLS(&tls.Config{
+		RootCAs:    cert.Pool(),
+		ServerName: "localhost",
+		MinVersion: tls.VersionTLS12,
+	})
+	conn, err := boundedDial(context.Background(), 3*time.Second, "passthrough:///bufnet", creds,
+		grpc.WithContextDialer(func(c context.Context, _ string) (net.Conn, error) { return lis.DialContext(c) }))
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("expected the dial to fail")
+	}
+	explained := explainDialError(err, "srs.example.org:5002", "")
+	if !strings.Contains(explained.Error(), "not speaking TLS") {
+		t.Fatalf("expected the plaintext-server diagnosis from boundedDial's own error, got: %v", explained)
 	}
 }

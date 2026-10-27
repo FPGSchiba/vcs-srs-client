@@ -284,3 +284,8 @@ func TestSetBackend_InstallsSessionEndedHook(t *testing.T) {
 		t.Fatal("voice still live after the server ended the session")
 	}
 }
+
+// SetBackend wires the session-ended hook through an optional-interface
+// assertion. Pin at compile time that the real Session satisfies it, so a
+// signature drift cannot silently disable the voice stop (spec R3).
+var _ interface{ SetSessionEndedHook(func(string)) } = (*session.Session)(nil)

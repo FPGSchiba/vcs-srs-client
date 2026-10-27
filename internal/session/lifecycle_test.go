@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
 	"github.com/FPGSchiba/vcs-srs-client/internal/session"
@@ -178,5 +181,24 @@ func TestDisconnect_DuringConnectAbortsIt(t *testing.T) {
 	}
 	if h.em.count(events.EventAuthSession, "logged_out") != 1 {
 		t.Fatal("the one auth:session_changed is not logged_out")
+	}
+}
+
+// Review finding (CL1): a second Connect that tears the live session down and
+// then fails must not leave the first session's token behind for RECONNECT
+// to resume.
+func TestConnect_FailedReplacementForgetsTheOldSession(t *testing.T) {
+	f := grpctest.NewFake()
+	h := newBound(t, f, nil, 0)
+	if err := h.connect(); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	f.Fail("InitAuth", status.Error(codes.Internal, "boom"))
+	if err := h.connect(); err == nil {
+		t.Fatal("second connect should have failed")
+	}
+	err := h.s.Reconnect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "never connected") {
+		t.Fatalf("Reconnect after a failed replacement = %v, want the never-connected refusal", err)
 	}
 }
