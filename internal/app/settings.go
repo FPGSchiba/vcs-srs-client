@@ -70,6 +70,15 @@ type settingsBackend struct {
 	// SetSettings itself), so reusing it here would self-deadlock.
 	writeMu sync.Mutex
 
+	// saveMu orders config.toml writes. Lock order: writeMu -> saveMu -> mu.
+	// It is separate from writeMu because rememberDevice persists both with
+	// and without writeMu held, and separate from mu so the disk write
+	// itself never holds mu (the PTT path takes mu on every press). See
+	// persistCfg.
+	saveMu sync.Mutex
+	// save is a test seam for persistCfg; nil means config.Save.
+	save func(path string, c *config.Config) error
+
 	cfg     *config.Config
 	cfgPath string
 	kb      *keybinds.Store
@@ -257,11 +266,7 @@ func (a *App) SetSettings(s SettingsDTO) error {
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
 
-	sb.mu.Lock()
-	// Shallow copy: Keybinds is a map and would be shared with the original,
-	// but this path never touches Keybinds, so that sharing is harmless.
-	next := *sb.cfg
-	next.General = config.General{
+	general := config.General{
 		StartMinimized:         s.StartMinimized,
 		MinimizeToTray:         s.MinimizeToTray,
 		ShowTransmitterName:    s.ShowTransmitterName,
@@ -269,20 +274,16 @@ func (a *App) SetSettings(s SettingsDTO) error {
 		PlayNotificationSounds: s.PlayNotificationSounds,
 		RadioSwitchAsPTT:       s.RadioSwitchAsPTT,
 	}
-	next.Audio = configAudioFromDTO(s.Audio)
-	audioCfg := next.Audio
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
+	audioCfg := configAudioFromDTO(s.Audio)
 	var mgr *audio.Manager
-	if saveErr == nil {
-		sb.cfg = &next
-		mgr = sb.audio
-	}
-	sb.mu.Unlock()
-	if saveErr != nil {
-		return fmt.Errorf("save settings: %w", saveErr)
+	if _, err := sb.persistCfg(cfgTxn{
+		mutate: func(c *config.Config) {
+			c.General = general
+			c.Audio = audioCfg
+		},
+		onCommit: func() { mgr = sb.audio },
+	}); err != nil {
+		return fmt.Errorf("save settings: %w", err)
 	}
 	// Push the newly-persisted audio config into the running engine. Done
 	// AFTER sb.mu.Unlock() -- Manager has its own independent locking, and
@@ -1129,22 +1130,14 @@ func (a *App) labelFor(id keybinds.ActionID) string {
 // caller rolls back on error).
 func (a *App) persistKeybinds() error {
 	sb := a.settings
-	sb.mu.Lock()
-	next := *sb.cfg
-	next.Keybinds = map[string]config.KeybindValue{}
+	binds := map[string]config.KeybindValue{}
 	for id, list := range sb.kb.Snapshot() {
-		next.Keybinds[id] = config.KeybindValue(list)
+		binds[id] = config.KeybindValue(list)
 	}
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
-	if saveErr == nil {
-		sb.cfg = &next
-	}
-	sb.mu.Unlock()
-	if saveErr != nil {
-		return fmt.Errorf("save keybinds: %w", saveErr)
+	if _, err := sb.persistCfg(cfgTxn{
+		mutate: func(c *config.Config) { c.Keybinds = binds },
+	}); err != nil {
+		return fmt.Errorf("save keybinds: %w", err)
 	}
 	return nil
 }

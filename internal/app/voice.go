@@ -1053,19 +1053,10 @@ func (a *App) persistRadios(dtos []RadioDTO) error {
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
 
-	sb.mu.Lock()
-	next := *sb.cfg
-	next.Radios = radios
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
-	if saveErr == nil {
-		sb.cfg = &next
-	}
-	sb.mu.Unlock()
-	if saveErr != nil {
-		return fmt.Errorf("save radios: %w", saveErr)
+	if _, err := sb.persistCfg(cfgTxn{
+		mutate: func(c *config.Config) { c.Radios = radios },
+	}); err != nil {
+		return fmt.Errorf("save radios: %w", err)
 	}
 	return nil
 }
@@ -1162,26 +1153,16 @@ func (a *App) persistSelectedRadioSeq(id uint32, seq uint64) error {
 	sb.writeMu.Lock()
 	defer sb.writeMu.Unlock()
 
-	sb.mu.Lock()
-	if seq != 0 && seq < sb.radioSelectPersistedSeq {
-		sb.mu.Unlock()
-		return nil
-	}
-	next := *sb.cfg
-	next.SelectedRadioID = id
-	var saveErr error
-	if sb.cfgPath != "" {
-		saveErr = config.Save(sb.cfgPath, &next)
-	}
-	if saveErr == nil {
-		sb.cfg = &next
-		if seq != 0 {
-			sb.radioSelectPersistedSeq = seq
-		}
-	}
-	sb.mu.Unlock()
-	if saveErr != nil {
-		return fmt.Errorf("save selected radio: %w", saveErr)
+	if _, err := sb.persistCfg(cfgTxn{
+		check:  func(*config.Config) bool { return seq == 0 || seq >= sb.radioSelectPersistedSeq },
+		mutate: func(c *config.Config) { c.SelectedRadioID = id },
+		onCommit: func() {
+			if seq != 0 {
+				sb.radioSelectPersistedSeq = seq
+			}
+		},
+	}); err != nil {
+		return fmt.Errorf("save selected radio: %w", err)
 	}
 	return nil
 }
