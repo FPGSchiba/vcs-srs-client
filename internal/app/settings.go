@@ -118,7 +118,7 @@ type settingsBackend struct {
 	captureGen int64
 
 	// radioSig is the signature of the per-radio action set the last
-	// RefreshKeybinds saw, so a radio update that does not change the local
+	// keybind refresh observer saw, so a radio update that does not change the local
 	// client's radios does not re-emit keybinds:changed.
 	radioSig string
 	// refresh runs keybind refreshes off the store observer's goroutine; see
@@ -173,7 +173,7 @@ type settingsBackend struct {
 // SetJoystickBackend wires the joystick manager. Optional -- when it is never
 // called, every joystick path degrades to "unsupported" and the keyboard
 // behaviour is exactly what it was before this feature existed.
-func (a *App) SetJoystickBackend(jm *joystick.Manager) {
+func SetJoystickBackend(a *App, jm *joystick.Manager) {
 	sb := a.settings
 	sb.mu.Lock()
 	sb.joy = jm
@@ -1024,7 +1024,7 @@ func (a *App) emitHotkeyState() {
 	a.notifyHotkeyState(dto)
 }
 
-// Pressed implements hotkeys.Handler.
+// pressed handles a hotkey or joystick press edge (via hotkeyHandler.Pressed).
 //
 // The log line alongside the emit is deliberate and deliberately at Info: a
 // hotkey edge is a low-frequency, genuinely diagnostic event, and the log
@@ -1033,7 +1033,7 @@ func (a *App) emitHotkeyState() {
 // never the key, the keycode or the character. The OS layer sees every
 // keystroke on the machine (see internal/hotkeys/registrar_gohook.go), so
 // widening this to key identities would turn the log into a keylog.
-func (a *App) Pressed(actionID string) {
+func (a *App) pressed(actionID string) {
 	if a.settings == nil {
 		return
 	}
@@ -1045,9 +1045,9 @@ func (a *App) Pressed(actionID string) {
 	a.settings.em.HotkeyPressed(actionID)
 }
 
-// Released implements hotkeys.Handler. See Pressed for why this logs the
+// released handles a release edge (via hotkeyHandler.Released). See pressed for why this logs the
 // action ID and nothing about the key itself.
-func (a *App) Released(actionID string) {
+func (a *App) released(actionID string) {
 	if a.settings == nil {
 		return
 	}
@@ -1070,7 +1070,7 @@ func (a *App) isHold(actionID string) bool {
 	return sb.holds[actionID]
 }
 
-// ForceReleased implements hotkeys.StaleReleaser. The OS layer calls it when
+// forceReleased backs hotkeyHandler.ForceReleased (hotkeys.StaleReleaser). The OS layer calls it when
 // its stale-latch watchdog had to release a hotkey that never got its key-up.
 //
 // Warn, not Info: an ordinary edge is routine, but this one means a release
@@ -1085,7 +1085,7 @@ func (a *App) isHold(actionID string) bool {
 //
 // The matching Released arrives immediately after this and does the actual
 // work; this call only annotates it.
-func (a *App) ForceReleased(actionID string) {
+func (a *App) forceReleased(actionID string) {
 	if a.settings == nil {
 		return
 	}

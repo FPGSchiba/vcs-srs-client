@@ -147,11 +147,13 @@ func NewForTest(st *state.Store, sess sessionAPI, windows windowsAPI) *App {
 	return a
 }
 
-// Store exposes the state store for wiring in main.go.
-func (a *App) Store() *state.Store { return a.st }
+// StateStore exposes the state store for wiring in main.go. A package-level
+// function rather than a method so it is not bound to the webview (see
+// surface_test.go).
+func StateStore(a *App) *state.Store { return a.st }
 
 // SetBackend injects the live session + registry (called from main after SetApp).
-func (a *App) SetBackend(sess sessionAPI, windows windowsAPI) {
+func SetBackend(a *App, sess sessionAPI, windows windowsAPI) {
 	a.sess = sess
 	a.windows = windows
 	// A user resize of the Comms window must reach the profile (spec D3). The
@@ -172,20 +174,16 @@ func (a *App) onWindowGeometry(id string, g windowstate.Geometry) {
 }
 
 // SetApp injects the Wails application reference. Must be called before Run().
-func (a *App) SetApp(app *application.App) { a.wailsApp = app }
+func SetApp(a *App, app *application.App) { a.wailsApp = app }
 
 // SetConnHealth injects the connection-health monitor (called from main.go
 // after the session exists). Written once, before anything reads it.
-func (a *App) SetConnHealth(m *connhealth.Monitor) { a.health = m }
-
-// ConnHealth returns the wired monitor, or nil. Used by the voice layer to
-// report lifecycle transitions into the model.
-func (a *App) ConnHealth() *connhealth.Monitor { return a.health }
+func SetConnHealth(a *App, m *connhealth.Monitor) { a.health = m }
 
 // SetSettingsBackend wires the settings/keybind dependencies onto App and
 // seeds kb from cfg.Keybinds, falling back to keybinds.Defaults() when
 // cfg.Keybinds is empty (fresh config, or one written before Phase 3).
-func (a *App) SetSettingsBackend(cfg *config.Config, cfgPath string, kb *keybinds.Store, hk *hotkeys.Manager, em events.Emitter) {
+func SetSettingsBackend(a *App, cfg *config.Config, cfgPath string, kb *keybinds.Store, hk *hotkeys.Manager, em events.Emitter) {
 	src := cfg.Keybinds
 	if len(src) == 0 {
 		src = defaultKeybindsRaw()
@@ -261,9 +259,6 @@ func defaultKeybindsRaw() map[string]config.KeybindValue {
 	}
 	return out
 }
-
-// WailsApp returns the injected Wails app (for main.go window/event wiring).
-func (a *App) WailsApp() *application.App { return a.wailsApp }
 
 // ServiceStartup is the Wails v3 lifecycle hook.
 func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) error {

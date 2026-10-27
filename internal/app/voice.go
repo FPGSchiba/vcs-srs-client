@@ -270,14 +270,15 @@ func (a *App) voiceRTT() time.Duration {
 	return sess.RTT()
 }
 
-// VoiceRTT exposes the live voice session's round trip for main.go's
-// connhealth wiring. Zero means no session or nothing measured.
-func (a *App) VoiceRTT() time.Duration { return a.voiceRTT() }
+// VoiceRTTFunc returns the live voice session's round-trip reader for
+// main.go's connhealth wiring. The reader returns zero when there is no
+// session or nothing has been measured.
+func VoiceRTTFunc(a *App) func() time.Duration { return a.voiceRTT }
 
 // VoiceBridge returns the Sink/Source bridge main.go must register with the
 // audio Manager exactly once, at startup (AddSink AND SetSource -- see this
 // file's package doc for why both calls are required).
-func (a *App) VoiceBridge() *sessionBridge { return a.voice.bridge }
+func VoiceBridge(a *App) *sessionBridge { return a.voice.bridge }
 
 // voiceSession reads the live session under lock (nil while disconnected).
 func (a *App) voiceSession() voiceSessionAPI {

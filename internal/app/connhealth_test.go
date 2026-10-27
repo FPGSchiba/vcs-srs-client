@@ -42,7 +42,7 @@ func TestGetConnectionState_ReturnsTheMonitorsSnapshot(t *testing.T) {
 	m := connhealth.New(connhealth.Options{})
 	m.SetServer("127.0.0.1:5002")
 	m.SetControlState(connhealth.StateConnected)
-	a.SetConnHealth(m)
+	SetConnHealth(a, m)
 
 	got := a.GetConnectionState()
 
@@ -83,7 +83,7 @@ func TestVoiceStateReachesTheMonitor(t *testing.T) {
 	// same transitions, so OnState feeds both.
 	a := NewForTest(state.New(), nil, nil)
 	m := connhealth.New(connhealth.Options{})
-	a.SetConnHealth(m)
+	SetConnHealth(a, m)
 
 	a.reportVoiceState("connected", "")
 
@@ -102,7 +102,7 @@ func TestVoiceClosedReportsUnavailable(t *testing.T) {
 	// alert for a plane nobody asked to be running.
 	a := NewForTest(state.New(), nil, nil)
 	m := connhealth.New(connhealth.Options{})
-	a.SetConnHealth(m)
+	SetConnHealth(a, m)
 
 	a.reportVoiceState("connected", "")
 	a.reportVoiceUnavailable()

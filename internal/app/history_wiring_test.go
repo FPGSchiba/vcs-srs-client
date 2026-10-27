@@ -121,7 +121,7 @@ func realPathApp(t *testing.T, h *boundsHandle) (*App, *Registry) {
 	a := activeProfileApp(t)
 	reg := NewRegistry(&boundsFactory{h: h}, filepath.Join(t.TempDir(), "windows.json"), nil)
 	reg.debounce = 10 * time.Millisecond
-	a.SetBackend(nil, reg)
+	SetBackend(a, nil, reg)
 	reg.Open("comms")
 	return a, reg
 }
@@ -156,7 +156,7 @@ func TestNativeResizeOfAnotherWindowDoesNotTouchLayout(t *testing.T) {
 	h := &boundsHandle{}
 	reg := NewRegistry(&boundsFactory{h: h}, filepath.Join(t.TempDir(), "windows.json"), nil)
 	reg.debounce = 10 * time.Millisecond
-	a.SetBackend(nil, reg)
+	SetBackend(a, nil, reg)
 	reg.Open("settings")
 	a.settings.mu.Lock()
 	a.settings.layoutPending = false

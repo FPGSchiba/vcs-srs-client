@@ -65,4 +65,4 @@ func (a *App) playConnectionSFX(state string) {
 
 // PlayConnectionSFX is playConnectionSFX's exported form, for main.go's
 // control-state observer wiring.
-func (a *App) PlayConnectionSFX(state string) { a.playConnectionSFX(state) }
+func PlayConnectionSFX(a *App, state string) { a.playConnectionSFX(state) }

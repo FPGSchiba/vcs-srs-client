@@ -164,7 +164,7 @@ func (a *App) applyProfile(d *profile.Document, path string) error {
 	// sequence ONLY, via this closure. The store update, window resize and
 	// server push below run with no lock held: the push is an unbounded RPC,
 	// and holding writeMu across it would stall every settings write (and
-	// RefreshKeybinds, which takes writeMu) behind a server that never answers.
+	// the keybind refresh worker, which takes writeMu) behind a server that never answers.
 	selected, window, saveErr := func() (uint32, config.CommsLayout, error) {
 		sb.writeMu.Lock()
 		defer sb.writeMu.Unlock()
@@ -639,7 +639,7 @@ func (a *App) OpenProfilesDir() error {
 //
 // Best-effort: a failure notifies and does not block startup, because one
 // unwritable default must not cost the user the others or the session.
-func (a *App) SeedBuiltinProfiles() {
+func SeedBuiltinProfiles(a *App) {
 	dir, err := a.profilesDir()
 	if err != nil {
 		a.notifyProfileError("Could not seed default profiles", err)

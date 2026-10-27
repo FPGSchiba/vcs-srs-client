@@ -35,7 +35,7 @@ var ErrAudioUnavailable = errors.New("audio: no backend wired")
 // manager immediately, so a manager constructed with NewManager's built-in
 // defaults picks up whatever the user already configured before this app
 // session started, rather than waiting for the next SetSettings call.
-func (a *App) SetAudioBackend(m *audio.Manager) {
+func SetAudioBackend(a *App, m *audio.Manager) {
 	sb := a.settings
 	sb.mu.Lock()
 	sb.audio = m

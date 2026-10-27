@@ -458,7 +458,7 @@ func TestSeedBuiltinProfilesRecordsHashes(t *testing.T) {
 	dir := t.TempDir()
 	a.setProfilesDirForTest(dir)
 
-	a.SeedBuiltinProfiles()
+	SeedBuiltinProfiles(a)
 
 	back, err := config.Load(cfgPath)
 	if err != nil {
@@ -480,12 +480,12 @@ func TestSeedBuiltinProfilesIsIdempotent(t *testing.T) {
 	a, _ := newProfileTestApp(t)
 	dir := t.TempDir()
 	a.setProfilesDirForTest(dir)
-	a.SeedBuiltinProfiles()
+	SeedBuiltinProfiles(a)
 	first, err := profile.List(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.SeedBuiltinProfiles()
+	SeedBuiltinProfiles(a)
 	second, err := profile.List(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -524,7 +524,7 @@ func TestSeedBuiltinProfilesKeepsRecordForUserDeletedBuiltin(t *testing.T) {
 	a, cfgPath := newProfileTestApp(t)
 	dir := t.TempDir()
 	a.setProfilesDirForTest(dir)
-	a.SeedBuiltinProfiles()
+	SeedBuiltinProfiles(a)
 	before, err := config.Load(cfgPath)
 	if err != nil || len(before.BuiltinProfiles) == 0 {
 		t.Fatalf("precondition: %v %+v", err, before)
@@ -535,7 +535,7 @@ func TestSeedBuiltinProfilesKeepsRecordForUserDeletedBuiltin(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a.SeedBuiltinProfiles()
+	SeedBuiltinProfiles(a)
 	after, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
@@ -553,7 +553,7 @@ func TestSeedBuiltinProfilesToleratesNilRecordMap(t *testing.T) {
 	cfg.BuiltinProfiles = nil
 	a := newTestAppWithConfig(t, cfg, filepath.Join(t.TempDir(), "config.toml"))
 	a.setProfilesDirForTest(t.TempDir())
-	a.SeedBuiltinProfiles() // must not panic on a nil map
+	SeedBuiltinProfiles(a) // must not panic on a nil map
 }
 
 func TestProfileDialogBindingsWithoutWailsAppAreNoOps(t *testing.T) {

@@ -32,8 +32,8 @@ func newTestAppWithConfig(t *testing.T, cfg *config.Config, cfgPath string) *App
 	a := NewForTest(state.New(), nil, nil)
 	kb := keybinds.New()
 	kb.Load(map[string][]string{})
-	hk := hotkeys.New(&countingRegistrar{}, a)
-	a.SetSettingsBackend(cfg, cfgPath, kb, hk, &recordingEmitter{})
+	hk := hotkeys.New(&countingRegistrar{}, HotkeyHandler(a))
+	SetSettingsBackend(a, cfg, cfgPath, kb, hk, &recordingEmitter{})
 	return a
 }
 
@@ -243,14 +243,14 @@ func wireTestVoice(t *testing.T, a *App, radios []config.Radio) *fakeVoiceSessio
 func TestPTTRoutesToTheSelectedRadio(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 1, Name: "Radio 1", FrequencyKHz: 30000, Enabled: true},
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 	})
 	a.st.SetSelectedRadio(3)
 
-	a.Pressed("global.ptt")
+	a.pressed("global.ptt")
 
 	if n := sess.txCallCount(); n != 1 {
 		t.Fatalf("SetTXFrequencies called %d times, want 1", n)
@@ -269,7 +269,7 @@ func TestPTTRoutesToTheSelectedRadio(t *testing.T) {
 func TestPerRadioPTTRoutesToThatRadio(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 1, Name: "Radio 1", FrequencyKHz: 30000, Enabled: true},
 		{ID: 7, Name: "Radio 7", FrequencyKHz: 141500, Enabled: true},
@@ -277,7 +277,7 @@ func TestPerRadioPTTRoutesToThatRadio(t *testing.T) {
 	// Selection deliberately points elsewhere: radio.7.ptt must not care.
 	a.st.SetSelectedRadio(1)
 
-	a.Pressed("radio.7.ptt")
+	a.pressed("radio.7.ptt")
 
 	got := sess.lastTX()
 	if len(got) != 1 || got[0].Freq != voice.KHz(141500) {
@@ -291,15 +291,15 @@ func TestPerRadioPTTRoutesToThatRadio(t *testing.T) {
 func TestHoldingBothTransmitsOnBoth(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 		{ID: 7, Name: "Radio 7", FrequencyKHz: 141500, Enabled: true},
 	})
 	a.st.SetSelectedRadio(3)
 
-	a.Pressed("global.ptt")
-	a.Pressed("radio.7.ptt")
+	a.pressed("global.ptt")
+	a.pressed("radio.7.ptt")
 
 	got := sess.lastTX()
 	if len(got) != 2 {
@@ -319,16 +319,16 @@ func TestHoldingBothTransmitsOnBoth(t *testing.T) {
 func TestReleasingOneKeepsTheOther(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 		{ID: 7, Name: "Radio 7", FrequencyKHz: 141500, Enabled: true},
 	})
 	a.st.SetSelectedRadio(3)
 
-	a.Pressed("global.ptt")
-	a.Pressed("radio.7.ptt")
-	a.Released("radio.7.ptt")
+	a.pressed("global.ptt")
+	a.pressed("radio.7.ptt")
+	a.released("radio.7.ptt")
 
 	// The generation bumps once, on the initial press that started the
 	// transmission (M1 fix) -- not on the second press joining it, and not
@@ -350,27 +350,27 @@ func TestReleasingOneKeepsTheOther(t *testing.T) {
 func TestGateStaysOpenWhileAnyTargetIsHeld(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 		{ID: 7, Name: "Radio 7", FrequencyKHz: 141500, Enabled: true},
 	})
 	a.st.SetSelectedRadio(3)
 
-	a.Pressed("global.ptt")
+	a.pressed("global.ptt")
 	// The generation bumps once, right here, on the press that started the
 	// transmission (M1 fix) -- see TestPTTGenerationBumpsOnThePressEdge for
 	// the dedicated coverage.
 	if sess.endCallCount() != 1 {
 		t.Fatalf("EndTransmission called %d times after the first press, want 1", sess.endCallCount())
 	}
-	a.Pressed("radio.7.ptt")
+	a.pressed("radio.7.ptt")
 	// A second action joining an ALREADY-live transmission must not reset
 	// the accumulator out from under the first.
 	if sess.endCallCount() != 1 {
 		t.Fatalf("EndTransmission called %d times after a second concurrent press, want 1", sess.endCallCount())
 	}
-	a.Released("global.ptt")
+	a.released("global.ptt")
 	if !m.PTT() {
 		t.Fatal("PTT gate closed after releasing only ONE of two held actions")
 	}
@@ -378,7 +378,7 @@ func TestGateStaysOpenWhileAnyTargetIsHeld(t *testing.T) {
 		t.Fatalf("EndTransmission called %d times, want 1", sess.endCallCount())
 	}
 
-	a.Released("radio.7.ptt")
+	a.released("radio.7.ptt")
 	if m.PTT() {
 		t.Fatal("PTT gate stayed open after releasing the LAST held action")
 	}
@@ -396,10 +396,10 @@ func TestGateStaysOpenWhileAnyTargetIsHeld(t *testing.T) {
 func TestPTTWithNoSelectionStillOpensTheGateButRoutesNowhere(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, nil)
 
-	a.Pressed("global.ptt")
+	a.pressed("global.ptt")
 
 	if !m.PTT() {
 		t.Fatal("PTT gate did not open even though global.ptt is held")
@@ -415,7 +415,7 @@ func TestPTTWithNoSelectionStillOpensTheGateButRoutesNowhere(t *testing.T) {
 		t.Fatalf("EndTransmission called %d times after the press, want 1", sess.endCallCount())
 	}
 
-	a.Released("global.ptt")
+	a.released("global.ptt")
 	if m.PTT() {
 		t.Error("PTT gate stayed open after releasing the only held action")
 	}
@@ -431,14 +431,14 @@ func TestPTTWithNoSelectionStillOpensTheGateButRoutesNowhere(t *testing.T) {
 func TestHoldingBothOnTheSameFrequencyDeduplicates(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 	})
 	a.st.SetSelectedRadio(3)
 
-	a.Pressed("global.ptt")
-	a.Pressed("radio.3.ptt")
+	a.pressed("global.ptt")
+	a.pressed("radio.3.ptt")
 
 	got := sess.lastTX()
 	if len(got) != 1 || got[0].Freq != voice.KHz(251000) {
@@ -464,7 +464,7 @@ func TestSelectRadioBindingSetsTheStore(t *testing.T) {
 // audio backend to be wired.
 func TestRadioSelectActionSetsTheSelectedRadio(t *testing.T) {
 	a, _, _ := newTestApp(t) // no SetAudioBackend call at all
-	a.Pressed("radio.9.select")
+	a.pressed("radio.9.select")
 	if got := a.st.SelectedRadio(); got != 9 {
 		t.Fatalf("SelectedRadio() = %d, want 9", got)
 	}
@@ -941,7 +941,7 @@ func TestRadioSelectAction_PersistsSelection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	a, _, _ := newTestAppWithPath(t, path)
 
-	a.Pressed("radio.9.select")
+	a.pressed("radio.9.select")
 	if got := a.st.SelectedRadio(); got != 9 {
 		t.Fatalf("SelectedRadio() = %d, want 9", got)
 	}
@@ -1214,7 +1214,7 @@ func TestVoiceDialOptionsOnStateIsANoOpWithoutASettingsBackend(t *testing.T) {
 func TestPTTGenerationBumpsOnThePressEdge(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 	})
@@ -1223,11 +1223,11 @@ func TestPTTGenerationBumpsOnThePressEdge(t *testing.T) {
 	// Simulate an odd-parity tail: the key is up, but the gate (not modelled
 	// here -- this only exercises the App-level generation-bump decision)
 	// would still be feeding WriteFrame for ptt_release_delay_ms after this.
-	a.Pressed("global.ptt")
+	a.pressed("global.ptt")
 	if sess.endCallCount() != 1 {
 		t.Fatalf("EndTransmission called %d times after the first press, want 1", sess.endCallCount())
 	}
-	a.Released("global.ptt")
+	a.released("global.ptt")
 	if sess.endCallCount() != 1 {
 		t.Fatalf("EndTransmission called %d times after release, want 1 (release must never bump -- that is exactly M1)", sess.endCallCount())
 	}
@@ -1235,7 +1235,7 @@ func TestPTTGenerationBumpsOnThePressEdge(t *testing.T) {
 	// A fresh press -- even one that lands WHILE an odd-parity tail from the
 	// previous press would still be live on the wire -- must bump exactly
 	// once more, discarding whatever the accumulator was still holding.
-	a.Pressed("global.ptt")
+	a.pressed("global.ptt")
 	if sess.endCallCount() != 2 {
 		t.Fatalf("EndTransmission called %d times after the second press, want 2", sess.endCallCount())
 	}
@@ -1252,7 +1252,7 @@ func TestPTTGenerationBumpsOnThePressEdge(t *testing.T) {
 func TestVOXStaleTXTargetsAreClearedAfterTheReleaseTail(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 	})
@@ -1261,8 +1261,8 @@ func TestVOXStaleTXTargetsAreClearedAfterTheReleaseTail(t *testing.T) {
 	a.settings.cfg.Audio.PTTReleaseDelayMS = 20
 	a.settings.mu.Unlock()
 
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
 
 	// Immediately after release the targets must still be live: the gate
 	// stays open for the release delay and the tail must keep transmitting
@@ -1290,7 +1290,7 @@ func TestVOXStaleTXTargetsAreClearedAfterTheReleaseTail(t *testing.T) {
 func TestVOXStaleTXTargetsClearIsCancelledByANewPress(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 	})
@@ -1299,10 +1299,10 @@ func TestVOXStaleTXTargetsClearIsCancelledByANewPress(t *testing.T) {
 	a.settings.cfg.Audio.PTTReleaseDelayMS = 30
 	a.settings.mu.Unlock()
 
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
 	time.Sleep(5 * time.Millisecond) // well inside the 30 ms release delay
-	a.Pressed("global.ptt")
+	a.pressed("global.ptt")
 
 	// Give the (cancelled) timer plenty of time to have fired if it were
 	// still armed.
@@ -1333,7 +1333,7 @@ func TestVOXStaleTXTargetsClearIsCancelledByANewPress(t *testing.T) {
 func TestScheduledClearIncludesATailMargin(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 	})
@@ -1343,8 +1343,8 @@ func TestScheduledClearIncludesATailMargin(t *testing.T) {
 	a.settings.cfg.Audio.PTTReleaseDelayMS = int(releaseDelay / time.Millisecond)
 	a.settings.mu.Unlock()
 
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
 	// Captured AFTER Released, not before Pressed: the press itself is a
 	// SetTXFrequencies call, so counting from before it would let that call
 	// alone satisfy the wait below well before the clear ever fires --
@@ -1389,7 +1389,7 @@ func TestScheduledClearIncludesATailMargin(t *testing.T) {
 func TestClearCannotRaceANewPress(t *testing.T) {
 	a, _, _ := newTestApp(t)
 	m := newTestAudioManager(t)
-	a.SetAudioBackend(m)
+	SetAudioBackend(a, m)
 	sess := wireTestVoice(t, a, []config.Radio{
 		{ID: 3, Name: "Radio 3", FrequencyKHz: 251000, Enabled: true},
 	})
@@ -1399,8 +1399,8 @@ func TestClearCannotRaceANewPress(t *testing.T) {
 	// the real timer scheduleTXTargetClear armed -- this test drives
 	// clearTXTargetsIfStillIdle directly (standing in for the timer firing)
 	// so the real one must not ALSO fire and confuse the assertions below.
-	a.Pressed("global.ptt")
-	a.Released("global.ptt")
+	a.pressed("global.ptt")
+	a.released("global.ptt")
 	a.voice.mu.Lock()
 	a.voice.cancelPendingTXClearLocked()
 	a.voice.mu.Unlock()
@@ -1421,7 +1421,7 @@ func TestClearCannotRaceANewPress(t *testing.T) {
 
 	pressDone := make(chan struct{})
 	go func() {
-		a.Pressed("global.ptt") // the race: a press landing "during" the clear
+		a.pressed("global.ptt") // the race: a press landing "during" the clear
 		close(pressDone)
 	}()
 

@@ -457,7 +457,7 @@ func TestConcurrentSuspendNeverReordersReleaseBeforePress(t *testing.T) {
 // next tick and fired a SECOND Pressed with no Released between them.
 //
 // Apply is not a rare event: any server radio-list update reaches
-// App.RefreshKeybinds -> applyHotkeys -> jm.Apply. So a mute-toggle on a
+// the app keybind refresh -> applyHotkeys -> jm.Apply. So a mute-toggle on a
 // HOTAS button, held while routine server traffic lands, toggled twice and
 // did nothing -- "my mute button did nothing". The keyboard path cannot do
 // this at all (it is event-driven and never re-presses), so it was a pure

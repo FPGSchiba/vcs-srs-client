@@ -116,11 +116,11 @@ func main() {
 		},
 	})
 
-	gui.SetApp(wailsApp)
+	app.SetApp(gui, wailsApp)
 
 	// Wire backend: emitter → session → window registry → bindings.
 	emitter := app.NewWailsEmitter(wailsApp)
-	sess := session.New(gui.Store(), emitter, session.Deps{
+	sess := session.New(app.StateStore(gui), emitter, session.Deps{
 		Version:   version.Client,
 		TLSCAFile: cfg.TLSCAFile,
 	})
@@ -131,7 +131,7 @@ func main() {
 		winPath = "windows.json"
 	}
 	registry := app.NewRegistry(app.NewWailsFactory(wailsApp), winPath, emitter)
-	gui.SetBackend(sess, registry)
+	app.SetBackend(gui, sess, registry)
 
 	// Connection health: one model, one ticker, one event, fed from the same
 	// call sites that emit the control lifecycle event (see
@@ -141,7 +141,7 @@ func main() {
 	monitor := connhealth.New(connhealth.Options{
 		Interval: interval, // 0 falls back to connhealth.DefaultInterval
 		Ping:     sess.PingOnce,
-		VoiceRTT: gui.VoiceRTT,
+		VoiceRTT: app.VoiceRTTFunc(gui),
 		// The Monitor does not set disconnected itself: the session emits it
 		// through its single normal path, which comes straight back in via
 		// SetControlState. One emission path, two detectors.
@@ -157,7 +157,7 @@ func main() {
 	// review) -- this call exists purely so a pre-connect window (or a
 	// future persisted-server-URL feature) has something honest to show.
 	monitor.SetServer(cfg.ServerURL)
-	gui.SetConnHealth(monitor)
+	app.SetConnHealth(gui, monitor)
 	monitor.Start()
 	defer monitor.Stop()
 
@@ -204,7 +204,7 @@ func main() {
 	//
 	// sfxGate dedupes the SFX side of this observer (F4 fix, Phase 6
 	// whole-branch review). monitor.SetControlState already dedupes against
-	// the state it already holds, but gui.PlayConnectionSFX does not, and the
+	// the state it already holds, but app.PlayConnectionSFX does not, and the
 	// two calls are not the same question: a known, accepted duplicate
 	// `disconnected` -- Disconnect firing after the probe detector has
 	// already declared loss -- reaches this closure twice with the state
@@ -217,7 +217,7 @@ func main() {
 	sess.SetControlStateObserver(func(st vcsevents.ConnectionState) {
 		monitor.SetControlState(string(st))
 		if sfxGate.shouldPlay(string(st)) {
-			gui.PlayConnectionSFX(string(st))
+			app.PlayConnectionSFX(gui, string(st))
 		}
 	})
 
@@ -225,12 +225,12 @@ func main() {
 	// fresh install), and the OS hotkey manager. App itself implements
 	// hotkeys.Handler, so it receives Pressed/Released directly.
 	kb := keybinds.New()
-	hk := hotkeys.New(hotkeys.NewOSRegistrar(), gui)
-	gui.SetSettingsBackend(cfg, cfgPath, kb, hk, emitter)
+	hk := hotkeys.New(hotkeys.NewOSRegistrar(), app.HotkeyHandler(gui))
+	app.SetSettingsBackend(gui, cfg, cfgPath, kb, hk, emitter)
 
 	// Seed the shipped default radio profiles. Best-effort: a failure notifies
 	// (the notifier is already wired above) and never blocks startup.
-	gui.SeedBuiltinProfiles()
+	app.SeedBuiltinProfiles(gui)
 
 	// Transmission log. Loaded before the voice session exists so an early
 	// transmission is recorded, and given the app's notifier so a failing
@@ -259,8 +259,8 @@ func main() {
 	if joySrc, err := joystick.NewOSSource(appLog); err != nil {
 		appLog.Warn("joystick input unavailable; keyboard binds are unaffected", "err", err)
 	} else {
-		jm := joystick.New(joySrc, gui, appLog)
-		gui.SetJoystickBackend(jm)
+		jm := joystick.New(joySrc, app.HotkeyHandler(gui), appLog)
+		app.SetJoystickBackend(gui, jm)
 		defer jm.Close()
 	}
 
@@ -333,8 +333,8 @@ func main() {
 		// audio is silently discarded (see voice.go's package doc; Task 9's
 		// own RX tests exercise internal/voice directly, not through this
 		// Manager, so nothing there would catch a missing SetSource either).
-		am.AddSink(gui.VoiceBridge())
-		am.SetSource(gui.VoiceBridge())
+		am.AddSink(app.VoiceBridge(gui))
+		am.SetSource(app.VoiceBridge(gui))
 		// SetAudioBackend BEFORE Start, not after: it is what pushes the
 		// user's PERSISTED audio settings (device ids included) into the
 		// manager. Starting first would resolve both devices against
@@ -342,7 +342,7 @@ func main() {
 		// OutputDevice are "" -- i.e. the saved device selection would be
 		// ignored on every single launch, and only take effect after the
 		// poll loop's next tick noticed the mismatch. Configure, then start.
-		gui.SetAudioBackend(am)
+		app.SetAudioBackend(gui, am)
 		if err := am.Start(); err != nil {
 			appLog.Warn("audio engine failed to start; audio features are disabled", "err", err)
 		}
@@ -370,12 +370,12 @@ func main() {
 		BackgroundColour: application.NewRGBA(3, 7, 13, 255), // --bg-0, opaque (no click-through)
 	})
 
-	gui.SetupTray(trayIcon)
+	app.SetupTray(gui, trayIcon)
 
 	// Hide instead of close when close-to-tray applies; OnMainWindowClose
 	// also force-disables this if the tray failed to come up (spec R13).
 	mainWindow.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
-		if gui.OnMainWindowClose() {
+		if app.OnMainWindowClose(gui) {
 			e.Cancel()
 			mainWindow.Hide()
 		}
@@ -418,7 +418,7 @@ type audioVUPayload struct {
 }
 
 // sfxDedup skips a repeated identical control-state transition, so a
-// consumer with no dedup logic of its own (gui.PlayConnectionSFX) does not
+// consumer with no dedup logic of its own (app.PlayConnectionSFX) does not
 // double-fire on a known, accepted duplicate emission of the same state (see
 // its call site's doc, F4 in the Phase 6 whole-branch review).
 //

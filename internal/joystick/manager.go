@@ -541,7 +541,7 @@ func (m *Manager) tick() {
 // so there is no edge to emit for them here -- and clearing them anyway made
 // the next tick see a button that is still physically down as newly active
 // and fire a SECOND Pressed with no Released between. Apply is not rare (any
-// server radio-list update reaches it via App.RefreshKeybinds), so a
+// server radio-list update reaches it via the app keybind refresh), so a
 // mute-toggle held on a HOTAS button toggled twice and netted a no-op.
 //
 // Latching them is the simpler of the two available fixes -- the alternative,
