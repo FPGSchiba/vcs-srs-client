@@ -282,6 +282,7 @@ export function Audio() {
                     voxCommit.push(v);
                   }}
                   onPointerUp={endVoxDrag}
+                  onPointerCancel={endVoxDrag}
                   onKeyUp={endVoxDrag}
                   onBlur={endVoxDrag}
                 />

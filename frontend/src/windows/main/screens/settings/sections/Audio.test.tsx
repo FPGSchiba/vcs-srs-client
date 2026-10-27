@@ -182,6 +182,36 @@ describe("Audio drag cadence", () => {
     expect(lastAudio().vox_threshold).toBeCloseTo(0.95, 5);
   });
 
+  it("a VOX threshold pointercancel ends the drag, so a later stored change shows", () => {
+    useSettings.setState((st) => ({
+      settings: st.settings && { ...st.settings, audio: { ...st.settings.audio, vox: true } },
+    }));
+    render(<Audio />);
+    const range = screen.getByRole("slider", { name: /vox threshold/i }) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(range, { target: { value: "60" } });
+    });
+    act(() => {
+      fireEvent.pointerCancel(range);
+    });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(lastAudio().vox_threshold).toBeCloseTo(0.6, 5);
+    // Another window (or a profile load) moves the stored threshold; with
+    // the drag ended, the slider must follow it rather than a stale draft.
+    act(() => {
+      usePendingSettings.setState({ pending: null });
+      useSettings.setState((st) => ({
+        settings: st.settings && {
+          ...st.settings,
+          audio: { ...st.settings.audio, vox: true, vox_threshold: 0.2 },
+        },
+      }));
+    });
+    expect(range.value).toBe("20");
+  });
+
   it("keyboard auto-repeat on a knob is throttled and commits on keyup", () => {
     render(<Audio />);
     const knob = screen.getByRole("slider", { name: /master/i });
