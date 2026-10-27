@@ -74,7 +74,9 @@ func TestResync_RepeatedFellBehindResyncsAgain(t *testing.T) {
 		t.Fatalf("first resync did not complete; calls %v", f.Calls())
 	}
 	f.EndStream(errFellBehind)
-	if !waitFor(t, func() bool { return countCalls(f.Calls(), "SubscribeToUpdates") == 3 && countCalls(f.Calls(), "SyncClient") == 3 }) {
+	if !waitFor(t, func() bool {
+		return countCalls(f.Calls(), "SubscribeToUpdates") == 3 && countCalls(f.Calls(), "SyncClient") == 3
+	}) {
 		t.Fatalf("calls = %v, want three SubscribeToUpdates and three SyncClient", f.Calls())
 	}
 	time.Sleep(50 * time.Millisecond)

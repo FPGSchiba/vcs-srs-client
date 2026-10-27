@@ -17,11 +17,6 @@ const (
 	EventRadioUpdate       = "state:radio_update"
 	EventAuthFlowStep      = "auth:flow_step"
 	EventAuthSession       = "auth:session_changed"
-	// EventAuthSessionEnded is emitted when the SERVER ended this client's
-	// session (removed, kicked, banned, restarted, token expired), always
-	// immediately followed by EventAuthSession = "logged_out". Payload:
-	// SessionEndedPayload.
-	EventAuthSessionEnded = "auth:session_ended"
 	EventControlConnection = "control:connection"
 	EventWindowGeometry    = "window:geometry_changed"
 	EventWindowState       = "window:state" // payload: []string of open window ids
@@ -30,6 +25,11 @@ const (
 	EventHotkeyPressed     = "hotkey:pressed"
 	EventHotkeyReleased    = "hotkey:released"
 	EventHotkeysState      = "hotkeys:state"
+	// EventAuthSessionEnded is emitted when the SERVER ended this client's
+	// session (removed, kicked, banned, restarted, token expired), always
+	// immediately followed by EventAuthSession = "logged_out". Payload:
+	// SessionEndedPayload.
+	EventAuthSessionEnded = "auth:session_ended"
 	// EventJoystickCaptured is emitted when a joystick capture completed and bound
 	// itself.
 	EventJoystickCaptured = "keybinds:joy_captured"
