@@ -115,6 +115,7 @@ func TestReconnect_StaleStreamCannotReportOverTheNewOne(t *testing.T) {
 	// new one; without the guard the old goroutine's termination lands on
 	// the fresh, healthy connection and reports it dead.
 	f := grpctest.NewFake()
+	f.SyncVoiceSecret = "secret" // a live session always has one; "" on Reconnect means it ended
 	dial, cleanup := grpctest.Start(t, f)
 	defer cleanup()
 

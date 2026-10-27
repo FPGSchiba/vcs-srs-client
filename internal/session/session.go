@@ -45,6 +45,11 @@ type Deps struct {
 	// block. connhealth.Monitor.SetControlState satisfies that.
 	OnControlState func(events.ConnectionState)
 
+	// OnSessionEnded is called (no Session lock held) when the server has
+	// ended this session, before the store is cleared. Optional; set late
+	// through SetSessionEndedHook.
+	OnSessionEnded func(reason string)
+
 	// PostDialTimeout bounds everything Connect does after the dial
 	// (InitAuth, the bcrypt hash, GuestLogin, SyncClient) and Reconnect's
 	// SyncClient. 0 means defaultPostDialTimeout. Overridable for tests.
@@ -158,10 +163,99 @@ func (s *Session) handleStreamEnd(ctx context.Context, gen uint64, err error) {
 	if ctx.Err() != nil {
 		return
 	}
+	s.mu.Lock()
+	current := gen == s.streamGen
+	s.mu.Unlock()
+	if !current {
+		return // a replaced connection's stream
+	}
 	if err != nil {
 		s.log("update stream ended", err)
 	}
-	s.markControlLost(gen)
+	// Branch on the status code only (classifyRPCError); see spec §3.4.
+	switch v, reason := classifyRPCError(err); v {
+	case verdictSessionEnded:
+		// SV1 C5/C7: removed, kicked, banned, stale, unknown session.
+		_ = s.endSession(reason)
+	case verdictSuperseded:
+		// SV1 C6 (D9): another subscriber took our stream with our token.
+		// Not a logout: an ordinary control loss the user can RECONNECT from.
+		slog.Default().Warn("session: update stream superseded by another subscriber", "err", err)
+		s.markControlLost(gen)
+	case verdictResync:
+		s.markControlLost(gen) // replaced by the C13 resync in Task 7
+	default:
+		s.markControlLost(gen)
+	}
+}
+
+// SetSessionEndedHook installs the hook endSession calls (with no Session
+// lock held) before it clears the store: App stops the voice session there,
+// so the cleared voice credentials cannot trigger a redial. Same late-binding
+// discipline as SetControlStateObserver: set it before Connect.
+func (s *Session) SetSessionEndedHook(fn func(reason string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dep.OnSessionEnded = fn
+}
+
+// endSession reacts to the server having ended this client's session: it
+// tears the connection down, forgets the token, calls the session-ended hook,
+// clears the session's store state, publishes disconnected, and emits
+// auth:session_ended{reason} followed by auth:session_changed=logged_out.
+// It returns sessionEndedError(reason) either way.
+//
+// It runs at most once per session: if the token and the connection are both
+// already gone (an earlier endSession, or the user's Disconnect), it has no
+// side effects. It never takes lifeMu, so it is safe from the stream
+// goroutine, the ping ticker, and callers inside Reconnect.
+func (s *Session) endSession(reason string) error {
+	err, _ := s.endSessionOnce(reason)
+	return err
+}
+
+// endSessionOnce is endSession, also reporting whether this call did the
+// work (false: someone else already had).
+func (s *Session) endSessionOnce(reason string) (error, bool) {
+	s.mu.Lock()
+	if s.lastToken == "" && s.conn == nil {
+		s.mu.Unlock()
+		return sessionEndedError(reason), false
+	}
+	s.streamGen++
+	conn, cancel := s.conn, s.cancel
+	s.conn, s.control, s.cancel = nil, nil, nil
+	s.lastDialer, s.lastToken = nil, ""
+	hook := s.dep.OnSessionEnded
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
+	slog.Default().Warn("session: the server ended this session", "reason", reason)
+	// Voice stops BEFORE the credentials are cleared (spec §3.3).
+	if hook != nil {
+		hook(reason)
+	}
+	s.st.ResetSession()
+	s.st.ClearSelf()
+	s.setConnState(events.ConnDisconnected)
+	tagged := events.New(s.em)
+	tagged.SessionEnded(reason)
+	tagged.SessionChanged("logged_out")
+	return sessionEndedError(reason), true
+}
+
+// checkSessionEnded routes a unary RPC error: a session-ended verdict ends
+// the session and returns its error; anything else is returned unchanged.
+func (s *Session) checkSessionEnded(err error) error {
+	if v, reason := classifyRPCError(err); v == verdictSessionEnded {
+		return s.endSession(reason)
+	}
+	return err
 }
 
 // log reports a stream-level problem. Session has no logger of its own, and
@@ -249,7 +343,13 @@ func (s *Session) PingOnce(ctx context.Context, lastRTTMs int64) (int64, error) 
 	if cc == nil {
 		return 0, fmt.Errorf("ping: not connected")
 	}
-	return cc.PingOnce(ctx, lastRTTMs)
+	rtt, err := cc.PingOnce(ctx, lastRTTMs)
+	if err != nil {
+		// SV1 C1. Called with no connhealth lock held, so ending the
+		// session from here is safe.
+		return rtt, s.checkSessionEnded(err)
+	}
+	return rtt, nil
 }
 
 // postDialTimeout is the configured post-dial bound.
@@ -486,11 +586,21 @@ func (s *Session) Reconnect(ctx context.Context) (err error) {
 	defer endAttempt()
 
 	s.setConnState(events.ConnReconnecting)
+	// ended is set when this call's endSession did the teardown; it has
+	// already published disconnected, and the one-emission rule holds.
+	ended := false
 	defer func() {
-		if err != nil {
+		if err != nil && !ended {
 			s.setConnState(events.ConnDisconnected)
 		}
 	}()
+	// endWith ends the session (SV1 C1 / an empty voice secret) and returns
+	// its error.
+	endWith := func(reason string) error {
+		e, did := s.endSessionOnce(reason)
+		ended = did
+		return e
+	}
 
 	s.mu.Lock()
 	dialer, token := s.lastDialer, s.lastToken
@@ -510,16 +620,34 @@ func (s *Session) Reconnect(ctx context.Context) (err error) {
 	defer pcancel()
 
 	cc := control.New(conn, token)
-	if _, err := cc.SyncClient(pctx, s.st); err != nil {
+	hadSecret, err := cc.SyncClient(pctx, s.st)
+	if err != nil {
 		_ = conn.Close()
 		if mapped := s.attemptError(attemptCtx, pctx, err); mapped != err {
 			return mapped
 		}
+		if v, reason := classifyRPCError(err); v == verdictSessionEnded {
+			return endWith(reason)
+		}
 		return fmt.Errorf("reconnect sync: %w", err)
+	}
+	if !hadSecret {
+		// The server answered but no longer has a voice secret for us: the
+		// session was removed while the RPC was in flight (SRV-06).
+		_ = conn.Close()
+		return endWith("expired")
 	}
 
 	streamCtx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
+	if s.lastToken != token {
+		// The session ended (stream end, ping) while this Reconnect was
+		// syncing: do not resurrect it.
+		s.mu.Unlock()
+		cancel()
+		_ = conn.Close()
+		return sessionEndedError("expired")
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -541,7 +669,10 @@ func (s *Session) UpdateRadioInfo(ctx context.Context, info *srspb.RadioInfo) er
 	if cc == nil {
 		return fmt.Errorf("not connected")
 	}
-	return cc.UpdateRadioInfo(ctx, info)
+	if err := cc.UpdateRadioInfo(ctx, info); err != nil {
+		return s.checkSessionEnded(err) // SV1 C1
+	}
+	return nil
 }
 
 // Control returns the live control client (nil if not connected).

@@ -48,6 +48,7 @@ func TestConnect_SecondConnectReplacesFirst(t *testing.T) {
 
 func TestConnectRacesReconnect_OneLiveConn(t *testing.T) {
 	f := grpctest.NewFake()
+	f.SyncVoiceSecret = "secret"
 	h := newBound(t, f, nil, 0)
 	if err := h.connect(); err != nil {
 		t.Fatalf("connect: %v", err)
