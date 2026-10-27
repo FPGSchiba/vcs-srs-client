@@ -317,6 +317,10 @@ git rm build/windows/installer/project.nsi build/windows/installer/wails_tools.n
 
 ---
 
+## Review corrections (2026-10-27)
+
+The independent review found that Task 9's literal `go get "$m@latest"` (step 7) would downgrade `github.com/robotn/gohook` v1.0.0-beta1 → v0.50.0. `.github/scripts/go-deps-update.sh` now uses `@upgrade`, and `go-deps-update_test.sh` has a stub-`go` case (`update-uses-upgrade`) that asserts it. Step 9's branch name is now `deps/go-$(date -u +%F)-${GITHUB_RUN_ID}`. The Linux cross-compile hint now says "a Linux host of the target architecture". These three changes are disclosed and were not in the original task diffs: `build/config.yml` `info.comments`, the `.gitattributes` `eol=lf` rules, and the manifest's `trustInfo` block (Task 4).
+
 ## Manual verification items (for the orchestrator to merge into `docs/superpowers/plans/2026-10-27-phase-6-9-manual-verification.md`)
 
 - [ ] **CL5-1 Windows installer:** on Windows 10/11 x64, run `vcs-client-0.1.0-rc.1-windows-amd64-setup.exe`: SmartScreen "More info → Run anyway", UAC prompt appears, installs to `C:\Program Files\FPG Schiba\VCS Client`, Start-menu + desktop shortcuts launch the app; WebView2 bootstrapper runs if WebView2 is missing; uninstall via Settings → Apps removes the folder.

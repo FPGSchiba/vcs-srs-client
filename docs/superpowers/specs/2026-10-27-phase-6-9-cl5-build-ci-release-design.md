@@ -137,6 +137,12 @@ Workflow behaviour beyond these text assertions is verified by pinned `actionlin
 - Developers: docker cross-builds gone (clear precondition message); `task linux:package` → AppImage only; Taskfile uses `npm ci`; CI fails on untidy `go.mod`.
 - Go dependency updates arrive as weekly `go-deps` PRs (once `DEPS_BOT_TOKEN` exists) instead of failing Dependabot runs.
 
+- **Disclosed after review (not in the original list):** `build/config.yml` gains `info.comments` (shown in the exe's Details tab); `.gitattributes` gains `eol=lf` for `*.sh`, `go.mod` and `go.sum` (a CRLF `go.mod` checkout on Windows makes `go mod tidy -diff` fail and breaks the shell scripts); the beta.22-rendered `build/windows/wails.exe.manifest` carries a `trustInfo` / `requestedExecutionLevel level="asInvoker"` block (the app itself never elevates; only the installer does).
+
+## Review corrections (2026-10-27)
+- **`@latest` → `@upgrade` in the Go dependency bump.** Section 3 above says `go get <mod>@latest`. That is wrong for this module: `@latest` is the newest tagged *release*, so it would downgrade `github.com/robotn/gohook` from the pinned `v1.0.0-beta1` (needed for the purego backends) to `v0.50.0`. `.github/scripts/go-deps-update.sh` uses `@upgrade`, which never moves a module below its current version. The script is shared verbatim with the server (SV5), so the server copy needs the same change.
+- **`go-deps` branch name carries the run id** (`deps/go-YYYY-MM-DD-<run id>`), so a same-day rerun, or a rerun after a closed and unmerged PR, does not collide with an existing remote branch.
+
 ## 8. Approval gates
 - **dependency:** `go 1.27.0` + `toolchain go1.27.3`.
 - **ci-cd:** `release.yml` restructure; `test.yml` server pin + Go guard + comment; `dependabot.yml` gomod removal; new `go-deps.yml`; pinned linuxdeploy `1-alpha-20251107-1` + choco NSIS `3.13.0`.
