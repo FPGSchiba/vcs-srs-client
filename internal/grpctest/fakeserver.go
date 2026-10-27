@@ -46,6 +46,12 @@ type Fake struct {
 	SyncVoiceSecret        string
 
 	updates chan *srspb.ServerUpdate // pushed to SubscribeToUpdates
+
+	// Test knobs, all guarded by mu. See Block, Fail, Calls and EndStream.
+	blocks    map[string]chan struct{}
+	fails     map[string]error
+	calls     []string
+	streamEnd chan error
 }
 
 // NewFake returns a Fake with sensible defaults (guest enabled).
@@ -59,7 +65,87 @@ func NewFake() *Fake {
 		SyncRadios:     map[string]*srspb.RadioInfo{},
 		SyncSettings:   &srspb.ServerSettings{},
 		updates:        make(chan *srspb.ServerUpdate, 16),
+		streamEnd:      make(chan error, 4),
 	}
+}
+
+// Block makes every later call to method ("InitAuth", "GuestLogin",
+// "SyncClient", "Disconnect" or "UpdateRadioInfo") wait until ch is closed
+// or the RPC's context is done. Passing nil removes the block.
+func (f *Fake) Block(method string, ch chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.blocks == nil {
+		f.blocks = map[string]chan struct{}{}
+	}
+	if ch == nil {
+		delete(f.blocks, method)
+		return
+	}
+	f.blocks[method] = ch
+}
+
+// Fail makes every later call to method ("SyncClient", "Ping",
+// "UpdateRadioInfo" or "Disconnect") return err. Passing nil removes it.
+func (f *Fake) Fail(method string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fails == nil {
+		f.fails = map[string]error{}
+	}
+	if err == nil {
+		delete(f.fails, method)
+		return
+	}
+	f.fails[method] = err
+}
+
+// Calls returns the ordered names of every RPC handled so far, including
+// "SubscribeToUpdates".
+func (f *Fake) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+// SetSync replaces the clients and voice secret the next SyncClient returns
+// (race-safe, for use while a session is live).
+func (f *Fake) SetSync(clients map[string]*srspb.ClientInfo, secret string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.SyncClients = clients
+	f.SyncVoiceSecret = secret
+}
+
+// EndStream makes the current SubscribeToUpdates handler return err (a nil
+// err ends it cleanly). A stream the client has already cancelled returns on
+// its own context instead, so it cannot consume a later EndStream.
+func (f *Fake) EndStream(err error) {
+	f.mu.Lock()
+	if f.streamEnd == nil {
+		f.streamEnd = make(chan error, 4)
+	}
+	ch := f.streamEnd
+	f.mu.Unlock()
+	ch <- err
+}
+
+// enter records the call and applies any Block/Fail knob for method.
+func (f *Fake) enter(ctx context.Context, method string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, method)
+	block := f.blocks[method]
+	f.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fails[method]
 }
 
 // PushUpdate enqueues a ServerUpdate to be delivered on the open stream.
@@ -68,7 +154,10 @@ func (f *Fake) PushUpdate(u *srspb.ServerUpdate) { f.updates <- u }
 // CloseStream signals SubscribeToUpdates to return (simulates a drop).
 func (f *Fake) CloseStream() { close(f.updates) }
 
-func (f *Fake) InitAuth(_ context.Context, _ *srspb.AuthInitRequest) (*srspb.AuthInitResponse, error) {
+func (f *Fake) InitAuth(ctx context.Context, _ *srspb.AuthInitRequest) (*srspb.AuthInitResponse, error) {
+	if err := f.enter(ctx, "InitAuth"); err != nil {
+		return nil, err
+	}
 	return &srspb.AuthInitResponse{
 		Success: true,
 		InitResult: &srspb.AuthInitResponse_Result{
@@ -80,7 +169,10 @@ func (f *Fake) InitAuth(_ context.Context, _ *srspb.AuthInitRequest) (*srspb.Aut
 	}, nil
 }
 
-func (f *Fake) GuestLogin(_ context.Context, _ *srspb.GuestLoginRequest) (*srspb.GuestLoginResponse, error) {
+func (f *Fake) GuestLogin(ctx context.Context, _ *srspb.GuestLoginRequest) (*srspb.GuestLoginResponse, error) {
+	if err := f.enter(ctx, "GuestLogin"); err != nil {
+		return nil, err
+	}
 	if f.RejectLogin {
 		return &srspb.GuestLoginResponse{
 			Success:     false,
@@ -95,7 +187,12 @@ func (f *Fake) GuestLogin(_ context.Context, _ *srspb.GuestLoginRequest) (*srspb
 	}, nil
 }
 
-func (f *Fake) SyncClient(_ context.Context, _ *srspb.Empty) (*srspb.SyncResponse, error) {
+func (f *Fake) SyncClient(ctx context.Context, _ *srspb.Empty) (*srspb.SyncResponse, error) {
+	if err := f.enter(ctx, "SyncClient"); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return &srspb.SyncResponse{
 		Success: true,
 		Version: "test",
@@ -112,7 +209,10 @@ func (f *Fake) SyncClient(_ context.Context, _ *srspb.Empty) (*srspb.SyncRespons
 	}, nil
 }
 
-func (f *Fake) UpdateRadioInfo(_ context.Context, r *srspb.RadioInfo) (*srspb.ServerResponse, error) {
+func (f *Fake) UpdateRadioInfo(ctx context.Context, r *srspb.RadioInfo) (*srspb.ServerResponse, error) {
+	if err := f.enter(ctx, "UpdateRadioInfo"); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	f.LastRadio = r
 	f.mu.Unlock()
@@ -127,21 +227,40 @@ func (f *Fake) GetServerSettings(_ context.Context, _ *srspb.Empty) (*srspb.Serv
 	return f.SyncSettings, nil
 }
 
-func (f *Fake) Disconnect(_ context.Context, _ *srspb.Empty) (*srspb.ServerResponse, error) {
+func (f *Fake) Disconnect(ctx context.Context, _ *srspb.Empty) (*srspb.ServerResponse, error) {
+	if err := f.enter(ctx, "Disconnect"); err != nil {
+		return nil, err
+	}
 	return &srspb.ServerResponse{Success: true}, nil
 }
 
-func (f *Fake) Ping(_ context.Context, _ *srspb.PingRequest) (*srspb.PingResponse, error) {
+func (f *Fake) Ping(ctx context.Context, _ *srspb.PingRequest) (*srspb.PingResponse, error) {
+	if err := f.enter(ctx, "Ping"); err != nil {
+		return nil, err
+	}
 	return &srspb.PingResponse{ServerTimeMs: 1}, nil
 }
 
 func (f *Fake) SubscribeToUpdates(_ *srspb.Empty, stream srspb.SRSService_SubscribeToUpdatesServer) error {
-	for u := range f.updates {
-		if err := stream.Send(u); err != nil {
+	f.mu.Lock()
+	f.calls = append(f.calls, "SubscribeToUpdates")
+	end := f.streamEnd
+	f.mu.Unlock()
+	for {
+		select {
+		case u, ok := <-f.updates:
+			if !ok {
+				return nil // channel closed → stream ends (simulates drop)
+			}
+			if err := stream.Send(u); err != nil {
+				return err
+			}
+		case err := <-end:
 			return err
+		case <-stream.Context().Done():
+			return stream.Context().Err()
 		}
 	}
-	return nil // channel closed → stream ends (simulates drop)
 }
 
 // LastRadioInfo returns the most recent UpdateRadioInfo payload (race-safe).

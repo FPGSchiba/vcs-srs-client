@@ -11,11 +11,27 @@ import (
 
 // ConsumeUpdates opens SubscribeToUpdates and routes each ServerUpdate into the
 // store and the typed emitter. Returns when the stream ends or ctx is cancelled.
+// It is Subscribe followed by Consume.
 func (c *Client) ConsumeUpdates(ctx context.Context, st *state.Store, em events.Emitter) error {
-	stream, err := c.rpc.SubscribeToUpdates(ctx, &srspb.Empty{}, c.callOpts()...)
+	stream, err := c.Subscribe(ctx)
 	if err != nil {
 		return err
 	}
+	return c.Consume(stream, st, em)
+}
+
+// Subscribe opens SubscribeToUpdates and returns the client stream without
+// reading from it. It is split from Consume so a resync can open the new
+// stream BEFORE it calls SyncClient (an update published between the two is
+// then delivered on the stream rather than lost).
+func (c *Client) Subscribe(ctx context.Context) (srspb.SRSService_SubscribeToUpdatesClient, error) {
+	return c.rpc.SubscribeToUpdates(ctx, &srspb.Empty{}, c.callOpts()...)
+}
+
+// Consume routes every update on an already-open stream into the store and
+// the typed emitter. Returns nil when the server ends the stream cleanly, the
+// stream's error otherwise (including its context's cancellation).
+func (c *Client) Consume(stream srspb.SRSService_SubscribeToUpdatesClient, st *state.Store, em events.Emitter) error {
 	tagged := events.New(em)
 	for {
 		upd, err := stream.Recv()

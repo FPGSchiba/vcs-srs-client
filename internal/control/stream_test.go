@@ -216,3 +216,42 @@ func TestServerActionEmitsNothing(t *testing.T) {
 		t.Fatalf("SERVER_ACTION emitted %v, want no events", em.names)
 	}
 }
+
+func TestSubscribeThenConsume(t *testing.T) {
+	f := grpctest.NewFake()
+	dial, cleanup := grpctest.Start(t, f)
+	defer cleanup()
+	conn, _ := dial(context.Background())
+
+	st := state.New()
+	em := &capEmitter{}
+	c := New(conn, "tok")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := c.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	guid := "g10"
+	f.PushUpdate(&srspb.ServerUpdate{
+		Type: srspb.ServerUpdate_CLIENT_JOINED,
+		Update: &srspb.ServerUpdate_ClientUpdate{ClientUpdate: &srspb.ClientUpdate{
+			ClientGuid: &guid,
+			ClientInfo: &srspb.ClientInfo{Name: "Yan"},
+		}},
+	})
+	go func() { _ = c.Consume(stream, st, em) }()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, ok := st.Client(guid); ok && em.saw("state:client_update") {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("update not routed after Subscribe + Consume")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}

@@ -266,7 +266,7 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 	}
 
 	cc := control.New(conn, guest.Token)
-	if err := cc.SyncClient(ctx, s.st); err != nil {
+	if _, err := cc.SyncClient(ctx, s.st); err != nil {
 		_ = conn.Close()
 		return err
 	}
@@ -335,7 +335,7 @@ func (s *Session) Reconnect(ctx context.Context) error {
 		return fmt.Errorf("reconnect dial: %w", err)
 	}
 	cc := control.New(conn, token)
-	if err := cc.SyncClient(ctx, s.st); err != nil {
+	if _, err := cc.SyncClient(ctx, s.st); err != nil {
 		_ = conn.Close()
 		s.setConnState(events.ConnDisconnected)
 		return fmt.Errorf("reconnect sync: %w", err)

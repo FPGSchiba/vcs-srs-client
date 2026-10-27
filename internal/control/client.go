@@ -38,16 +38,27 @@ func (c *Client) callOpts() []grpc.CallOption {
 	return []grpc.CallOption{grpc.PerRPCCredentials(tokenCreds{c.token})}
 }
 
-// SyncClient fetches the initial snapshot and hydrates the store.
-func (c *Client) SyncClient(ctx context.Context, st *state.Store) error {
+// SyncClient fetches the snapshot and hydrates the store with it.
+//
+// The snapshot REPLACES the roster: st.ResetRoster runs immediately before
+// hydrating, and only on a successful response, so a failed call leaves the
+// roster as it was and a successful one leaves no ghosts.
+//
+// An empty voice_secret never overwrites a stored one -- the same rule
+// stream.go applies to VOICE_ADDRESS_UPDATE. The addresses are still updated
+// (a standalone server legitimately returns "" for both). hadSecret reports
+// whether the response carried a secret, so a caller that expects one (a
+// Reconnect) can treat its absence as the session being gone.
+func (c *Client) SyncClient(ctx context.Context, st *state.Store) (hadSecret bool, err error) {
 	resp, err := c.rpc.SyncClient(ctx, &srspb.Empty{}, c.callOpts()...)
 	if err != nil {
-		return fmt.Errorf("sync client: %w", err)
+		return false, fmt.Errorf("sync client: %w", err)
 	}
 	if !resp.GetSuccess() {
-		return fmt.Errorf("sync client: %s", resp.GetErrorMessage())
+		return false, fmt.Errorf("sync client: %s", resp.GetErrorMessage())
 	}
 	data := resp.GetData()
+	st.ResetRoster()
 	for guid, ci := range data.GetClients() {
 		st.UpdateClient(guid, ci)
 	}
@@ -57,11 +68,15 @@ func (c *Client) SyncClient(ctx context.Context, st *state.Store) error {
 	if data.GetSettings() != nil {
 		st.SetSettings(data.GetSettings())
 	}
-	// voice_secret, coalition_voice_addr and global_voice_addr: the latter
-	// two are "" on a standalone server (no registry to populate them from)
-	// and that is stored as-is -- see Store.SetVoiceCredentials.
-	st.SetVoiceCredentials(data.GetVoiceSecret(), data.GetCoalitionVoiceAddr(), data.GetGlobalVoiceAddr())
-	return nil
+	// coalition_voice_addr and global_voice_addr are "" on a standalone
+	// server (no registry to populate them from) and that is stored as-is --
+	// see Store.SetVoiceCredentials.
+	if secret := data.GetVoiceSecret(); secret != "" {
+		st.SetVoiceCredentials(secret, data.GetCoalitionVoiceAddr(), data.GetGlobalVoiceAddr())
+		return true, nil
+	}
+	st.SetVoiceAddresses(data.GetCoalitionVoiceAddr(), data.GetGlobalVoiceAddr())
+	return false, nil
 }
 
 // UpdateRadioInfo pushes the client's radio config to the server.
