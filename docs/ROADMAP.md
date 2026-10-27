@@ -188,6 +188,43 @@ Found during implementation and review; deliberately **not fixed** as part of Ph
 
 ---
 
+## Phase 6.9 — Cleanup & improvements (umbrella, both repos)
+
+**Status:** `[~]` in progress — umbrella spec approved 2026-10-27. Numbered 6.9 but **runs after 7.3 and before 7.4**: a deliberate step back to fix what the existing code gets wrong before building more on top of it.
+
+**Design doc:** [`2026-10-27-vcs-client-phase-6-9-cleanup-umbrella-design.md`](./superpowers/specs/2026-10-27-vcs-client-phase-6-9-cleanup-umbrella-design.md)
+
+A six-lens read-only scan of the client and `vcs-srs-server` produced 85 findings. Every one is in scope (the user's decision). They are split into 12 tracks, each with its own spec → plan → execute cycle and its own worktree and branch (`chore/cleanup-<track>`):
+
+- **Server:**
+  - **SV1:** session liveness and reaping. Live clients are evicted ~10 min after login today.
+  - **SV2:** state and event correctness.
+  - **SV3:** hardening. Coalition isolation, the nil-deref crash, the deadlock, `go vet`, auth status codes.
+  - **SV4:** voice path and distributed node.
+  - **SV5:** CI and build, including the `pull_request_target` security fix and Go 1.27.
+  - **SV7:** README.
+- **Client:**
+  - **CL1:** connect/session robustness. Covers the Welcome hang, plus CANCEL, Enter-to-submit and the remembered server address.
+  - **CL2:** backend tidy.
+  - **CL3:** frontend correctness.
+  - **CL4:** frontend cleanup, including removing Tailwind, TanStack and zod.
+  - **CL5:** build, CI and release. Go 1.27; NSIS, AppImage and `.app` packages; `SHA256SUMS`.
+  - **DOC:** documentation drift.
+- **Both:** **UP**, the Wails v3 GA upgrade.
+
+**Schedule:** wave 0 is server PR #223. Then:
+1. SV5, SV3, CL2, CL4, CL5
+2. SV1, CL3
+3. SV2, SV4, CL1
+4. UP
+5. DOC, SV7
+
+**Phase 5's four "awaiting the user's decision" issues were found already fixed in code** (Windows audio, `buf generate` in release, the server's semver version floor, the Windows CI leg); only the docs are stale, and the DOC track fixes them.
+
+**Blocking deps:** none. Server tracks branch after `vcs-srs-server` PR #223 merges.
+
+---
+
 ## Phase 7 — Profiles + remaining popouts
 
 **Status:** `[~]` in progress — decomposed into four independent sub-phases, each with its own spec/plan/execution cycle, because the original nine deliverables span four subsystems (radio profiles, four new popouts, transmission history, notification routing, OS-keychain token migration, TLS) that share no data model, code path or risk profile. See `docs/superpowers/specs/2026-09-28-vcs-client-phase-7-decomposition-design.md` for the full rationale and cross-cutting findings. Dependency order: **7.1 → 7.2 → {7.3, 7.4}**; 7.3 and 7.4 are independent of each other and may run in either order, or in parallel in separate worktrees.
