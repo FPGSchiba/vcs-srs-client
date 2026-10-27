@@ -222,8 +222,10 @@ func main() {
 	})
 
 	// Keybind store, seeded from config (falls back to shipped defaults on a
-	// fresh install), and the OS hotkey manager. App itself implements
-	// hotkeys.Handler, so it receives Pressed/Released directly.
+	// fresh install), and the OS hotkey manager. The OS hotkey (and joystick)
+	// layers get app.HotkeyHandler(gui), an unregistered adapter, so
+	// Pressed/Released/ForceReleased stay off the webview-bound App surface:
+	// do not re-export them on App, or any webview script could key PTT.
 	kb := keybinds.New()
 	hk := hotkeys.New(hotkeys.NewOSRegistrar(), app.HotkeyHandler(gui))
 	app.SetSettingsBackend(gui, cfg, cfgPath, kb, hk, emitter)

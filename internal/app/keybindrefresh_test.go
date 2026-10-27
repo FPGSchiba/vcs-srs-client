@@ -200,3 +200,68 @@ func waitKeybindRefreshIdle(t *testing.T, a *App) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// close() must let the in-flight job finish and discard every queued one.
+// Deterministic counterpart to TestKeybindRefreshWorkerStopsBeforeHotkeyClose,
+// which cannot pin the discard without depending on scheduling.
+func TestKeybindRefresherCloseDiscardsQueuedJobs(t *testing.T) {
+	var mu sync.Mutex
+	runs := 0
+	gate := make(chan struct{})
+	r := newKeybindRefresher(func() {
+		<-gate
+		mu.Lock()
+		runs++
+		mu.Unlock()
+	})
+
+	r.enqueue()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.mu.Lock()
+		inFlight := r.running
+		r.mu.Unlock()
+		if inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(gate)
+			t.Fatal("first job never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.enqueue()
+	r.enqueue() // two jobs queued behind the in-flight one
+
+	closed := make(chan struct{})
+	go func() { r.close(); close(closed) }()
+	// Wait until close() has marked the refresher stopped, so the queued
+	// jobs are discarded before the in-flight one is released.
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		r.mu.Lock()
+		stopped := r.stopped
+		r.mu.Unlock()
+		if stopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(gate)
+			t.Fatal("close never marked the refresher stopped")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(gate)
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("close hung waiting for the in-flight job")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if runs != 1 {
+		t.Fatalf("refresh ran %d times, want exactly 1 (the in-flight job); queued jobs must be discarded", runs)
+	}
+	r.enqueue() // no-op after close; must not panic or block
+}

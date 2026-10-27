@@ -407,14 +407,16 @@ func TestTXWriteFrameNeverBlocks(t *testing.T) {
 	// would not be counted.
 	const batches, perBatch = 10, 1000
 	before := s.TXStats().DroppedFull
-	var best time.Duration
-	done := make(chan struct{})
+	// The result travels over a buffered channel rather than a shared
+	// variable, so a run the watchdog has already failed cannot race with
+	// the still-running goroutine.
+	result := make(chan time.Duration, 1)
 	go func() {
-		defer close(done)
-		best = minBatch(batches, perBatch, func() { s.WriteFrame(frame) })
+		result <- minBatch(batches, perBatch, func() { s.WriteFrame(frame) })
 	}()
+	var best time.Duration
 	select {
-	case <-done:
+	case best = <-result:
 	case <-time.After(5 * time.Second):
 		t.Fatal("WriteFrame blocked against a full queue")
 	}
