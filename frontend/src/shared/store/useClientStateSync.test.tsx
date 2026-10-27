@@ -110,6 +110,19 @@ describe("useClientStateSync", () => {
     expect(useRadios.getState().selectedRadioId).toBe(3);
   });
 
+  it("a radio.<n>.select hotkey during the voiceState hydrate is not overwritten by it", async () => {
+    let resolveVoice!: (v: unknown) => void;
+    voiceState.mockReset().mockReturnValueOnce(new Promise((r) => (resolveVoice = r)));
+    render(<Harness />);
+    await waitFor(() => expect(voiceState).toHaveBeenCalledTimes(1));
+    emit(EV.hotkeyPressed, { action_id: "radio.3.select" });
+    expect(useRadios.getState().selectedRadioId).toBe(3);
+    resolveVoice({ selected_radio: 1, connected: true });
+    await tick();
+    await tick();
+    expect(useRadios.getState().selectedRadioId).toBe(3);
+  });
+
   it("profile:state re-reads voiceState", async () => {
     render(<Harness />);
     await waitFor(() => expect(voiceState).toHaveBeenCalledTimes(1));
