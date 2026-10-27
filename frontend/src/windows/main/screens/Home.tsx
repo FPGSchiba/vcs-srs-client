@@ -1,5 +1,6 @@
 import { api } from "../../../shared/api/client";
 import { Icon } from "../../../shared/components/Icon";
+import { activatable } from "../../../shared/components/activatable";
 import { useWindows } from "../../../shared/store/windows";
 
 interface LauncherTile {
@@ -24,6 +25,10 @@ const TILES: LauncherTile[] = [
  * via `api.toggleWindow("comms")` and shows an `is-open` state; the remaining
  * tiles render with the same `.launcher-tile` styling but are inert this phase
  * (their windows arrive later). classNames match the ported design CSS.
+ *
+ * Only the Comms tile is a button (Phase 6.9 CL3, FE04): it spreads
+ * `activatable`, so it is tabbable and Enter/Space toggle it, and keeps
+ * `aria-pressed`. The inert tiles are not focusable.
  */
 export function Home() {
   const openWindows = useWindows((s) => s.open);
@@ -43,7 +48,7 @@ export function Home() {
             <div
               key={t.key}
               className={`launcher-tile${isOpen ? " is-open" : ""}`}
-              onClick={isComms ? toggleComms : undefined}
+              {...(isComms ? activatable(toggleComms) : {})}
               title={
                 isComms
                   ? `Comms · ${isOpen ? "click to close" : "click to open"}`

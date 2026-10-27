@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { SettingsScreen } from "./SettingsScreen";
 import { useSettings } from "../../../../shared/store/settings";
@@ -127,5 +128,29 @@ describe("SettingsScreen", () => {
     }
     fireEvent.click(screen.getByText("Miscellaneous"));
     expect(screen.getByText("Arrives in Phase 10")).toBeInTheDocument();
+  });
+
+  // FE04: the section rail must work from the keyboard.
+  it("every section can be tabbed to, and Enter switches to it", async () => {
+    const labels = ["General", "Keybinds", "Audio & Sounds", "Radio Effects",
+                    "Profiles & Layouts", "Notifications", "Miscellaneous", "Legacy"];
+    render(<SettingsScreen />);
+    const seen: string[] = [];
+    for (let i = 0; i < labels.length; i++) {
+      await userEvent.tab();
+      seen.push((document.activeElement as HTMLElement).textContent ?? "");
+    }
+    expect(seen).toEqual(labels);
+    screen.getByRole("button", { name: "Legacy" }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "Legacy" })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("marks exactly one section with aria-current", () => {
+    const { container } = render(<SettingsScreen />);
+    const current = container.querySelectorAll("[aria-current]");
+    expect(current).toHaveLength(1);
+    expect(current[0]).toHaveAttribute("aria-current", "true");
+    expect(current[0]).toHaveTextContent("General");
   });
 });
