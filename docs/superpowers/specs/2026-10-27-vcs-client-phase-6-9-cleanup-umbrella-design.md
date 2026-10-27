@@ -356,7 +356,8 @@ No finding is rejected outright — the user kept everything. These are closed o
 | Go version, both repos | **1.27**, set in Wave 1 (SV5, CL5) | user |
 | SV1 stream-end grace period | **120 s** | user |
 | SRV-07 auth failures | AuthService failures return a **body** (`Success:false`, nil error); interceptor failures return **status codes** (`Unauthenticated`/`PermissionDenied`). Revised after the original "status errors everywhere" answer, which rested on an incorrect claim in this spec. | user |
-| Pending-login limits (SRV-17) | 5-min TTL re-armed per step; caps of 10,000 total and 32 per IP; 60s sweep; over the cap → `ResourceExhausted` for the new InitAuth | user |
+| Pending-login limits (SRV-17) | 5-min TTL re-armed per step; caps of 10,000 total and 32 per IP; 60s sweep; over the cap → the new InitAuth gets a `Success:false` body. The answer said `ResourceExhausted`; the orchestrator reconciled it with the SRV-07 decision that AuthService failures are bodies. Existing entries are never evicted. | user (reconciled by orchestrator) |
+| Dependency-update secret name | `DEPS_BOT_TOKEN` in both repos | orchestrator |
 | Go dependency updates (CI-06) | weekly workflow in both repos that opens PRs with a PAT/GitHub App token (user creates it) | user |
 | Codecov (server) | tokenless OIDC upload; fork/Dependabot PRs skipped; `CODECOV_TOKEN` retired (user rotates it) | user |
 | Tailwind `pulse` collision | design prototype's 40% keyframe wins (the one deliberate visual change in CL4) | user |
