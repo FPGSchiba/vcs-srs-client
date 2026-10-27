@@ -6,6 +6,7 @@ info:
   productIdentifier: "com.fpgschiba.vcsclient"
   description: "VCS SRS Client"
   copyright: "(c) 2026, FPG Schiba"
+  comments: "Vanguard Communications System voice client"
   version: "0.1.0"
 
 dev_mode:

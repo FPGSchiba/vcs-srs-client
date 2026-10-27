@@ -1,6 +1,7 @@
 package buildcheck
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 )
 
 // repoPath returns the absolute path of rel, relative to the repository root
@@ -185,4 +188,91 @@ func TestTaskfileAvoidsRepeatedWork(t *testing.T) {
 			t.Errorf("go:mod:tidy lacks %q:\n%s", want, tidy)
 		}
 	}
+}
+
+type windowsInfo struct {
+	Info map[string]map[string]string `json:"info"`
+}
+
+func readWindowsInfo(t *testing.T) map[string]string {
+	t.Helper()
+	var wi windowsInfo
+	if err := json.Unmarshal([]byte(readRepoFile(t, "build/windows/info.json")), &wi); err != nil {
+		t.Fatalf("parse build/windows/info.json: %v", err)
+	}
+	return wi.Info["0000"]
+}
+
+// CI-07: the Windows metadata files are rendered from build/config.yml, not
+// left as Wails template placeholders.
+func TestWindowsAssetsRendered(t *testing.T) {
+	for _, rel := range []string{"build/windows/info.json", "build/windows/wails.exe.manifest", "build/windows/nsis/wails_tools.nsh"} {
+		if strings.Contains(readRepoFile(t, rel), "{{") {
+			t.Errorf("%s still contains template placeholders", rel)
+		}
+	}
+	info := readWindowsInfo(t)
+	for k, want := range map[string]string{"ProductName": "VCS Client", "CompanyName": "FPG Schiba", "ProductVersion": "0.1.0"} {
+		if info[k] != want {
+			t.Errorf("info.json %s = %q, want %q", k, info[k], want)
+		}
+	}
+	if c := info["Comments"]; c == "" || c == "This is a comment" {
+		t.Errorf("info.json Comments = %q: Wails template default, set info.comments in build/config.yml", c)
+	}
+	if m := readRepoFile(t, "build/windows/wails.exe.manifest"); !strings.Contains(m, `name="com.fpgschiba.vcsclient" version="0.1.0.0"`) {
+		t.Error(`wails.exe.manifest lacks name="com.fpgschiba.vcsclient" version="0.1.0.0"`)
+	}
+	nsh := readRepoFile(t, "build/windows/nsis/wails_tools.nsh")
+	for _, want := range []string{`!define INFO_PROJECTNAME "vcs-client"`, `!define INFO_PRODUCTVERSION "0.1.0"`} {
+		if !strings.Contains(nsh, want) {
+			t.Errorf("wails_tools.nsh lacks %s", want)
+		}
+	}
+	nsi := readRepoFile(t, "build/windows/nsis/project.nsi")
+	for _, want := range []string{`OutFile "..\..\..\bin\${INFO_PROJECTNAME}-${ARCH}-installer.exe"`, `$PROGRAMFILES64\${INFO_COMPANYNAME}\${INFO_PRODUCTNAME}`} {
+		if !strings.Contains(nsi, want) {
+			t.Errorf("project.nsi lacks %s", want)
+		}
+	}
+}
+
+// CI-07: every place that states the product version agrees.
+func TestVersionsAgree(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^\s+version:\s*"([^"]+)"`).FindStringSubmatch(readRepoFile(t, "build/config.yml"))
+	if m == nil {
+		t.Fatal("build/config.yml: no info.version")
+	}
+	if m[1] != version.Client {
+		t.Errorf("build/config.yml version %q != version.Client %q", m[1], version.Client)
+	}
+	p := regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`).FindStringSubmatch(readRepoFile(t, "build/darwin/Info.plist"))
+	if p == nil || p[1] != version.Client {
+		t.Errorf("Info.plist CFBundleShortVersionString = %v, want %q", p, version.Client)
+	}
+	if got := readWindowsInfo(t)["ProductVersion"]; got != version.Client {
+		t.Errorf("info.json ProductVersion %q != version.Client %q", got, version.Client)
+	}
+	if !strings.Contains(readRepoFile(t, "build/windows/wails.exe.manifest"), `version="`+version.Client+`.0"`) {
+		t.Errorf("wails.exe.manifest assemblyIdentity version != %s.0", version.Client)
+	}
+}
+
+// Guard: the macOS bundle must keep its microphone usage string, or macOS
+// kills the app on first microphone access.
+func TestInfoPlistKeepsMicrophoneUsage(t *testing.T) {
+	if !strings.Contains(readRepoFile(t, "build/darwin/Info.plist"), "<key>NSMicrophoneUsageDescription</key>") {
+		t.Error("build/darwin/Info.plist lost NSMicrophoneUsageDescription")
+	}
+}
+
+// CI-08: the NSIS task's working dir holds the v3 installer sources.
+func TestPackagingPathsExistWindows(t *testing.T) {
+	for _, rel := range []string{"build/windows/nsis/project.nsi", "build/windows/nsis/wails_tools.nsh", "build/windows/icon.ico"} {
+		readRepoFile(t, rel)
+	}
+	if !strings.Contains(readRepoFile(t, "build/windows/Taskfile.yml"), "dir: build/windows/nsis") {
+		t.Error("build/windows/Taskfile.yml: NSIS task no longer runs in build/windows/nsis")
+	}
+	mustNotExist(t, "build/windows/installer")
 }

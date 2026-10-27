@@ -12,6 +12,8 @@ log/
 # generated (not covered above)
 srspb/
 frontend/bindings/
+build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
+*.syso
 
 # Task 12: the real vcs-srs-server, checked out by CI (and optionally by
 # hand, locally) to build VCS_SERVER_BIN for internal/voice's integration
