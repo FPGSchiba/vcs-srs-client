@@ -52,14 +52,28 @@ func TestRegistryDoesNotCallWindowSystemUnderItsLock(t *testing.T) {
 	reg := NewRegistry(&lockProbeFactory{h: h}, filepath.Join(t.TempDir(), "windows.json"), nil)
 	reg.debounce = 5 * time.Millisecond
 	h.reg = reg
+	// Count completed saves so the settle below can be awaited to its end.
+	// The probe's TryLock cannot tell WHO holds r.mu, so a settle still
+	// cloning the geometry map for windows.json (persist, which takes r.mu
+	// briefly after the Bounds call) would read as a false positive against
+	// the SetGeometry call that follows.
+	var saveMu sync.Mutex
+	saves := 0
+	reg.saveFn = func(path string, m map[string]windowstate.Geometry) error {
+		err := windowstate.Save(path, m)
+		saveMu.Lock()
+		saves++
+		saveMu.Unlock()
+		return err
+	}
 	reg.Open("comms")
 
-	// settleBounds path: native event -> debounce -> Bounds.
+	// settleBounds path: native event -> debounce -> Bounds -> persist.
 	h.cb()
-	waitFor(t, 3*time.Second, "settle to read Bounds", func() bool {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		return h.calls >= 1
+	waitFor(t, 3*time.Second, "settle to read Bounds and persist", func() bool {
+		saveMu.Lock()
+		defer saveMu.Unlock()
+		return saves >= 1
 	})
 
 	// SetGeometry path: SetBounds on an open window.
