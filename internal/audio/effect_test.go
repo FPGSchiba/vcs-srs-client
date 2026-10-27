@@ -8,9 +8,9 @@ import (
 )
 
 func TestVoicePresetsIncludeTheDesignsNames(t *testing.T) {
-	got := VoicePresets()
 	want := map[string]bool{"": true, "comms_filter_low": true, "comms_filter_mid": true, "comms_filter_high": true}
-	for _, id := range got {
+	for _, p := range VoicePresetOptions() {
+		id := p.ID
 		if !want[id] {
 			t.Fatalf("unexpected voice preset %q", id)
 		}

@@ -71,27 +71,6 @@ func ClippingPresetOptions() []EffectPreset {
 	return append([]EffectPreset(nil), clippingPresetOptions...)
 }
 
-// VoicePresets returns the selectable voice-effect ids, "" meaning off. The
-// unlabeled counterpart of VoicePresetOptions, kept for callers (and
-// existing tests) that only need the ids.
-func VoicePresets() []string {
-	return presetIDs(voicePresetOptions)
-}
-
-// ClippingPresets returns the selectable clipping ids, "" meaning off. The
-// unlabeled counterpart of ClippingPresetOptions.
-func ClippingPresets() []string {
-	return presetIDs(clippingPresetOptions)
-}
-
-func presetIDs(presets []EffectPreset) []string {
-	ids := make([]string, len(presets))
-	for i, p := range presets {
-		ids[i] = p.ID
-	}
-	return ids
-}
-
 // NewEffect builds the chain. An unrecognised id degrades to passthrough
 // rather than erroring: a config written by a newer version must not stop
 // audio from working.

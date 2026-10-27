@@ -5,7 +5,6 @@ import (
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/version"
-	"github.com/FPGSchiba/vcs-srs-client/internal/windowstate"
 )
 
 // GetBuildInfo returns the client/protocol versions and build identifier.
@@ -116,14 +115,6 @@ func (a *App) ToggleWindow(id string) { a.windows.Toggle(id) }
 
 // GetOpenWindows returns the ids of currently-open windows.
 func (a *App) GetOpenWindows() []string { return a.windows.OpenWindows() }
-
-// GetWindowGeometry returns a window's last geometry.
-func (a *App) GetWindowGeometry(id string) windowstate.Geometry { return a.windows.Geometry(id) }
-
-// SetWindowGeometry records a window's geometry. Nothing in the frontend
-// calls it; real user moves/resizes arrive via the registry's native-event
-// hook (Registry.SetGeometryObserver -> onWindowGeometry).
-func (a *App) SetWindowGeometry(id string, g windowstate.Geometry) { a.windows.SetGeometry(id, g) }
 
 // GetConnectionState returns the current connection-health snapshot, for a
 // window hydrating on mount. The push counterpart is the connection:state
