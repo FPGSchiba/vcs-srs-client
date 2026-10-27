@@ -19,6 +19,7 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       ver: ${{ steps.ver.outputs.ver }}
     steps:
@@ -63,6 +64,7 @@ jobs:
     name: Build ${{ matrix.platform }}
     needs: preflight
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -112,7 +114,8 @@ jobs:
       # nothing: -tags purego selects gohook's pure-Go X11 backend (see the
       # note at the top of Taskfile.yml).
       #
-      # These MUST match test.yml's list. They previously named GTK 3 and
+      # The list lives in the shared linux-gui-deps action, so it can no
+      # longer drift from test.yml's. It previously named GTK 3 and
       # WebKit2GTK 4.1, which Wails v3 beta.22 does not link against -- it
       # wants GTK 4 and WebKitGTK 6.0, so `go install wails3` died at the
       # link step with "cannot find -lgtk-4 / -lwebkitgtk-6.0". Nothing
@@ -120,9 +123,8 @@ jobs:
       # has ever been pushed, so it had never run this far.
       - name: Install Linux GUI deps
         if: matrix.platform == 'linux-amd64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev
+        timeout-minutes: 10
+        uses: ./.github/actions/linux-gui-deps
 
       # windows-latest ships no NSIS. Pinned like test.yml pins protoc via
       # chocolatey. The package does not reliably put makensis on PATH, so
@@ -227,6 +229,7 @@ jobs:
     name: Checksums
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Download packages
         uses: actions/download-artifact@v8
@@ -259,6 +262,7 @@ jobs:
     needs: [preflight, checksums]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:

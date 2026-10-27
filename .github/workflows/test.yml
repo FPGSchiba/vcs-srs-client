@@ -12,6 +12,7 @@ jobs:
   backend:
     name: Backend (Go) · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       # fail-fast: false so one platform's toolchain problem does not hide
       # the other two. The whole point of this job is per-OS signal.
@@ -221,11 +222,15 @@ jobs:
       # unset)". A virtual display makes them RUN rather than skip. Skipping
       # would leave the keyboard hotkey OS layer with no CI coverage at all --
       # the one place a regression is both silent and user-facing.
+      #
+      # Installed via the cached composite action (a hung Ubuntu mirror once
+      # held this step for hours); the step timeout bounds a cache miss.
       - name: Install Linux GUI deps
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev xvfb
+        timeout-minutes: 10
+        uses: ./.github/actions/linux-gui-deps
+        with:
+          xvfb: "true"
 
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
@@ -279,6 +284,7 @@ jobs:
   frontend:
     name: Frontend (React)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -298,9 +304,8 @@ jobs:
       # Wails application package) use cgo against GTK4/WebKitGTK 6.0 headers, so
       # the dev headers must be present even though this job only builds the FE.
       - name: Install Linux GUI deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev
+        timeout-minutes: 10
+        uses: ./.github/actions/linux-gui-deps
 
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
