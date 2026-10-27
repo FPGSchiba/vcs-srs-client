@@ -181,8 +181,18 @@ jobs:
 
       # Switch to the CLIENT's toolchain for everything below (see the
       # "TWO TOOLCHAINS IN ONE JOB" note above the server's setup-go).
+      #
+      # env GOTOOLCHAIN: auto -- the server's setup-go exported
+      # GOTOOLCHAIN=local into $GITHUB_ENV, and setup-go ignores go.mod's
+      # `toolchain` directive whenever GOTOOLCHAIN=local (backwards-compat
+      # branch in its parseGoVersionFile): it would fall back to the `go`
+      # directive and install go1.27.0, failing the assert below. Overriding
+      # it on this step only makes setup-go read `toolchain go1.27.3`; setup-go
+      # then re-exports GOTOOLCHAIN=local for every later step as usual.
       - name: Setup Go (client's go.mod)
         uses: actions/setup-go@v7
+        env:
+          GOTOOLCHAIN: auto
         with:
           go-version-file: go.mod
           cache: true

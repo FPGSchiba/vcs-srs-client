@@ -399,6 +399,21 @@ func TestBackendJobBuildsServerWithServerGo(t *testing.T) {
 	if n := strings.Count(backend, "actions/setup-go"); n != 2 {
 		t.Errorf("backend job has %d setup-go steps, want 2 (server, then client)", n)
 	}
+
+	// The server's setup-go exports GOTOOLCHAIN=local to every later step, and
+	// setup-go (src/installer.ts parseGoVersionFile) ignores go.mod's
+	// `toolchain` directive whenever GOTOOLCHAIN=local -- it falls back to the
+	// `go` directive and installs go1.27.0, not go1.27.3. The client's
+	// setup-go must therefore override GOTOOLCHAIN on its own step.
+	const clientStep = "name: Setup Go (client's go.mod)"
+	start := pos(clientStep)
+	step := backend[start+len(clientStep):]
+	if next := strings.Index(step, "\n      - "); next >= 0 {
+		step = step[:next]
+	}
+	if !regexp.MustCompile(`(?m)^\s+env:\n\s+GOTOOLCHAIN: auto$`).MatchString(step) {
+		t.Error("backend job: the client's setup-go step must set env GOTOOLCHAIN: auto, or setup-go resolves go.mod's go directive (1.27.0) instead of its toolchain directive (1.27.3)")
+	}
 }
 
 var (
