@@ -352,3 +352,54 @@ func TestServerCheckoutPinnedToSHA(t *testing.T) {
 		t.Error("test.yml still names Wails alpha.96")
 	}
 }
+
+var (
+	usesRe   = regexp.MustCompile(`(?m)^\s*-?\s*uses:\s*(\S+)`)
+	pinnedRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
+)
+
+// CI-14: workflows default to read-only tokens, third-party actions are
+// SHA-pinned, and only the release job may write contents.
+func TestWorkflowsLeastPrivilege(t *testing.T) {
+	topRead := regexp.MustCompile(`(?m)^permissions:\n  contents: read$`)
+	for _, wf := range workflowFiles(t) {
+		text := readRepoFile(t, wf)
+		if !topRead.MatchString(text) {
+			t.Errorf("%s: no top-level `permissions: contents: read`", wf)
+		}
+		for _, m := range usesRe.FindAllStringSubmatch(text, -1) {
+			target := strings.Trim(m[1], `"'`)
+			if strings.HasPrefix(target, "actions/") || strings.HasPrefix(target, "./") {
+				continue
+			}
+			if !pinnedRe.MatchString(target) {
+				t.Errorf("%s: third-party action %s is not pinned to a commit SHA", wf, target)
+			}
+		}
+	}
+	if n := strings.Count(readRepoFile(t, ".github/workflows/release.yml"), "contents: write"); n != 1 {
+		t.Errorf("release.yml has %d `contents: write`, want exactly 1 (the release job)", n)
+	}
+}
+
+// CI-09/CI-12: the release packages the three supported formats, checksums
+// them, drafts a release via gh, checks the tag against the code version, and
+// leaves bindings/frontend to the Taskfile.
+func TestReleaseWorkflowShape(t *testing.T) {
+	text := readRepoFile(t, ".github/workflows/release.yml")
+	for _, want := range []string{
+		"wails3 task package", "SHA256SUMS", "gh release create", "--draft", "--verify-tag",
+		"vcs.revision=${GITHUB_SHA}", "CGO_ENABLED=1", "GOARCH=arm64",
+		"1-alpha-20251107-1", "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d",
+		"nsis --version=3.13.0", "ditto -c -k --keepParent", "${GITHUB_REF_NAME#v}",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("release.yml lacks %q", want)
+		}
+	}
+	for _, banned := range []string{"wails3 generate bindings", "npm run build", "npm ci", "softprops"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("release.yml still contains %q", banned)
+		}
+	}
+}

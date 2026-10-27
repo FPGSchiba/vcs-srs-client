@@ -1,16 +1,67 @@
 name: Release
 
+# Builds the three supported packages -- a per-machine Windows NSIS installer,
+# a Linux AppImage and an Apple Silicon macOS .app (zipped) -- plus SHA256SUMS.
+# A `v*` tag additionally creates a DRAFT GitHub release from them; this
+# workflow never publishes. A workflow_dispatch run builds and uploads the
+# bundle as a workflow artifact only.
+
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
+# Read-only by default. Only the `release` job below may write repo contents.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      ver: ${{ steps.ver.outputs.ver }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # build/config.yml feeds the Windows exe metadata, the NSIS installer and
+      # the macOS bundle; internal/version.Client is what the app reports. A
+      # tag must name the same core version, or the artefacts would be
+      # labelled with a version the binary does not report. This fails before
+      # any build starts.
+      - name: Check versions agree
+        id: ver
+        shell: bash
+        run: |
+          CFG=$(sed -nE 's/^[[:space:]]+version:[[:space:]]*"([^"]+)".*/\1/p' build/config.yml | head -n1)
+          CLIENT=$(sed -nE 's/^[[:space:]]*Client[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' internal/version/version.go | head -n1)
+          echo "build/config.yml version: ${CFG}"
+          echo "internal/version.Client:  ${CLIENT}"
+          if [ -z "$CFG" ] || [ -z "$CLIENT" ]; then
+            echo "::error::could not read the version from build/config.yml or internal/version/version.go"
+            exit 1
+          fi
+          if [ "$CFG" != "$CLIENT" ]; then
+            echo "::error::build/config.yml version ${CFG} != internal/version.Client ${CLIENT}"
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # v0.1.0-rc.1 -> 0.1.0-rc.1 -> core 0.1.0
+            VER="${GITHUB_REF_NAME#v}"
+            CORE="${VER%%-*}"
+            if [ "$CORE" != "$CLIENT" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} names version ${CORE}, but the code says ${CLIENT}"
+              exit 1
+            fi
+          else
+            VER="dispatch-${GITHUB_SHA::7}"
+          fi
+          echo "Artefact version: ${VER}"
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: preflight
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -19,12 +70,22 @@ jobs:
           - platform: darwin-arm64
             runner: macos-latest
             binary: vcs-client
+            artifact: bin/vcs-client.app
           - platform: linux-amd64
             runner: ubuntu-latest
             binary: vcs-client
+            artifact: bin/vcs-client-x86_64.AppImage
           - platform: windows-amd64
             runner: windows-latest
             binary: vcs-client.exe
+            artifact: bin/vcs-client-amd64-installer.exe
+    defaults:
+      run:
+        # Windows runners default to pwsh; bash keeps one command form for
+        # all three platforms (git-bash ships on the Windows runner).
+        shell: bash
+    env:
+      VER: ${{ needs.preflight.outputs.ver }}
     steps:
       - uses: actions/checkout@v7
 
@@ -63,12 +124,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev libsoup-3.0-dev libx11-dev
 
+      # windows-latest ships no NSIS. Pinned like test.yml pins protoc via
+      # chocolatey. The package does not reliably put makensis on PATH, so
+      # add its install dir explicitly.
+      - name: Install NSIS · Windows
+        if: matrix.platform == 'windows-amd64'
+        run: |
+          choco install -y nsis --version=3.13.0
+          echo "C:\Program Files (x86)\NSIS" >> "$GITHUB_PATH"
+
+      - name: Show makensis version · Windows
+        if: matrix.platform == 'windows-amd64'
+        run: makensis -VERSION
+
       # srspb/ is gitignored and generated, so a fresh checkout has no Go
-      # bindings at all. This has to run BEFORE `wails3 generate bindings`,
-      # not merely before the build: that step type-checks the Go packages,
-      # so without srspb it fails with "no required module provides package
-      # .../srspb". Mirrors the same pair of steps in test.yml, pinned the
-      # same way.
+      # bindings at all; everything downstream type-checks the Go packages.
+      # Mirrors the same pair of steps in test.yml, pinned the same way.
       - name: Install buf
         run: go install github.com/bufbuild/buf/cmd/buf@v1.47.2
 
@@ -78,32 +149,36 @@ jobs:
       - name: Install wails3 CLI
         run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
 
-      # -f carries the go build flags into the type-check `wails3 generate
-      # bindings` performs; see the note at the top of Taskfile.yml.
-      - name: Generate TypeScript bindings
-        run: wails3 generate bindings -ts -f "-tags purego" -clean=true
+      # Wails downloads linuxdeploy from its rolling `continuous` release
+      # unless the file already exists in the AppImage build dir (beta.22
+      # internal/commands/appimage.go), so pre-seed a pinned, checksummed copy.
+      # Still unpinnable (design R2, re-check in track UP): AppImageKit's
+      # `continuous` AppRun, the AppImage runtime linuxdeploy fetches itself,
+      # and Microsoft's WebView2 bootstrapper on Windows.
+      - name: Pre-seed pinned linuxdeploy · Linux
+        if: matrix.platform == 'linux-amd64'
+        run: |
+          mkdir -p build/linux/appimage/build
+          curl -fsSL --proto '=https' --tlsv1.2 -o build/linux/appimage/build/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          echo "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  build/linux/appimage/build/linuxdeploy-x86_64.AppImage" | sha256sum -c -
 
-      - name: Install frontend deps
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      # Routes through build/{darwin,linux,windows}/Taskfile.yml, whose
-      # BUILD_FLAGS already carry -tags purego unconditionally.
-      - name: Build app
-        run: wails3 task build
+      # The Taskfile owns bindings, the frontend install/build and the Go
+      # build, so none of them is repeated here. GitHub sets CI=true, which
+      # makes the Taskfile's tidy step `go mod tidy -diff`: an untidy go.mod
+      # fails the release instead of being silently rewritten.
+      - name: Package
+        run: wails3 task package
 
       # A cgo-less build succeeds and runs -- it just has no capture, no
       # playback, no noise suppression and no codec, because every one of
       # those is behind `//go:build cgo`. That failure is invisible in a
       # green build, so assert it here rather than trust the Taskfile
       # default to have been picked up. `go version -m` reads the build
-      # settings recorded in the binary itself.
-      - name: Assert the binary was built with cgo
-        shell: bash
+      # settings recorded in the binary itself. The same check proves the
+      # binary carries its git revision (the Welcome screen's BUILD field)
+      # and, on macOS, that it is the Apple Silicon build.
+      - name: Assert the binary was built with cgo, a revision and the right arch
         run: |
           settings=$(go version -m "bin/${{ matrix.binary }}")
           echo "$settings" | grep -E "build\s+CGO_ENABLED=" || {
@@ -114,44 +189,109 @@ jobs:
             echo "::error::bin/${{ matrix.binary }} was built with CGO_ENABLED=0 -- it has no audio and no voice codec"
             exit 1
           }
+          echo "$settings" | grep -E "build\s+vcs\." || true
+          echo "$settings" | grep -qE "build\s+vcs.revision=${GITHUB_SHA}" || {
+            echo "::error::bin/${{ matrix.binary }} has no vcs.revision=${GITHUB_SHA} -- BUILD would show dev"
+            exit 1
+          }
+          if [ "${{ matrix.platform }}" = "darwin-arm64" ]; then
+            echo "$settings" | grep -E "build\s+GOARCH=arm64" || {
+              echo "::error::bin/${{ matrix.binary }} is not an arm64 build"
+              exit 1
+            }
+          fi
 
-      - name: Upload artifact
+      - name: Collect package
+        run: |
+          mkdir -p dist
+          case "${{ matrix.platform }}" in
+            windows-amd64)
+              cp "${{ matrix.artifact }}" "dist/vcs-client-${VER}-windows-amd64-setup.exe" ;;
+            linux-amd64)
+              cp "${{ matrix.artifact }}" "dist/vcs-client-${VER}-linux-x86_64.AppImage" ;;
+            darwin-arm64)
+              # ditto keeps the bundle's symlinks, permissions and ad-hoc
+              # signature intact; plain zip does not.
+              ditto -c -k --keepParent "${{ matrix.artifact }}" "dist/vcs-client-${VER}-macos-arm64.app.zip" ;;
+          esac
+          ls -la dist
+
+      - name: Upload package
         uses: actions/upload-artifact@v7
         with:
-          name: vcs-client-${{ matrix.platform }}
-          path: bin/${{ matrix.binary }}
+          name: pkg-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  checksums:
+    name: Checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: release
+
+      - name: Write SHA256SUMS
+        working-directory: release
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          n=$(ls | wc -l)
+          if [ "$n" -ne 4 ]; then
+            echo "::error::expected 3 packages + SHA256SUMS, found ${n} files"
+            ls -la
+            exit 1
+          fi
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle
+          path: release/*
           if-no-files-found: error
 
   release:
-    name: Draft Release
-    needs: build
-    runs-on: ubuntu-latest
+    name: Draft release
+    needs: [preflight, checksums]
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Download all artifacts
+      - name: Download release bundle
         uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          name: release-bundle
+          path: release
 
-      - name: Rename per-platform binaries
+      - name: Write release notes
         run: |
-          mkdir -p release
-          for dir in artifacts/*/; do
-            name=$(basename "$dir")
-            for file in "$dir"*; do
-              ext="${file##*.}"
-              if [ "$ext" = "exe" ]; then
-                cp "$file" "release/${name}.exe"
-              else
-                cp "$file" "release/${name}"
-              fi
-            done
-          done
-          ls -la release/
+          cat > notes.md <<'EOF'
+          Unsigned pre-release build (code signing is planned for Phase 10).
 
+          - **Windows:** SmartScreen will warn about an unrecognised app: choose *More info* → *Run anyway*. The installer installs per-machine (Program Files) and asks for administrator rights.
+          - **macOS (Apple Silicon only):** unzip, then run `xattr -dr com.apple.quarantine vcs-client.app` before the first launch, or macOS reports the app as damaged.
+          - **Linux:** `chmod +x` the AppImage before running it. It needs glibc 2.39 or newer (Ubuntu 24.04 or newer) and a WebKitGTK 6 runtime.
+
+          Verify downloads with `sha256sum -c SHA256SUMS`.
+          EOF
+
+      # The workflow only ever creates a DRAFT. Publishing it (or deleting it
+      # and the tag) is the maintainer's act, never this workflow's.
       - name: Create draft release
-        uses: softprops/action-gh-release@v3
-        with:
-          draft: true
-          files: release/*
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            pre=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag "${pre[@]}" \
+            --title "VCS Client $GITHUB_REF_NAME" \
+            --notes-file notes.md --generate-notes \
+            release/*
