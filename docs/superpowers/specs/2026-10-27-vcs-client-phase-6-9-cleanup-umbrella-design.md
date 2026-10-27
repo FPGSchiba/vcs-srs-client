@@ -266,6 +266,59 @@ Approval gates (CLAUDE.md) are hard stops at **plan approval**. The user's "leav
 - **Gates:** none.
 - **Depends on:** everything (it documents the end state). Runs with SV7 in the final wave.
 
+### SEC — GitHub security alerts (both repos), Wave 5
+*Added 2026-10-27 at the user's request, after Wave 1 merged.* Sources, collected 2026-10-27 on both `main` branches. The evidence is the `gh api` alert listings and `govulncheck` output, both kept with the orchestrator's run notes.
+- **Dependabot alerts:**
+  - **Server:** 22 open, all in `go.mod` apart from one npm entry:
+    - `google.golang.org/grpc`: #38 critical, #93/#118/#121 high, #120 medium
+    - `github.com/go-git/go-git/v5` and `github.com/go-git/go-billy/v5`: 13 alerts, 5 of them high
+    - `github.com/quic-go/quic-go`: #15 high, #23/#67 medium
+    - `github.com/cloudflare/circl`: #30 low
+    - npm `esbuild` in `frontend/package-lock.json`: #2 medium
+  - **Client:** **Dependabot alerts are disabled** for the repo (`403 Dependabot alerts are disabled`), so GitHub shows nothing.
+- **`govulncheck` v1.9.0 (reachable-code analysis):**
+  - **Server:** **10 reachable vulnerabilities in 3 modules.**
+    - `grpc` v1.77.0, 4 of them, including **GO-2026-4762, an authorization bypass via a missing leading slash in `:path`**, reachable through `control.Server.serveControl`. Fixed in v1.79.3.
+    - `golang.org/x/net` v0.56.0, 4 (fixed in v0.60.0).
+    - `quic-go` v0.54.0, 2, via gin's HTTP/3 (fixed in v0.59.1).
+    - go-git, go-billy and circl are present only through Wails and are **not reachable**.
+  - **Client:** **9 reachable**: `grpc` v1.66.0 ×4, one of them only through the `internal/grpctest` fake server, and `x/net` v0.56.0 ×5.
+  - v1.1.4 panics under Go 1.27 (old `x/tools`); use v1.9.0 or later.
+- **Code scanning (SonarCloud):**
+  - **Client, 14 open:**
+    - 6 high S2819 in `design/vcs/project/tweaks-panel.jsx`. This is the design prototype, not shipped code.
+    - 7 S8545 in workflows. This is the false-positive class the user already triages.
+    - 1 S6505 (npm install scripts).
+    - 1 low S4036 (PATH resolution in `internal/hotkeys/permission_darwin_pane.go:73`).
+  - **Server, 6 open:**
+    - 2 S8545.
+    - S6505.
+    - S6506 (`build/linux/appimage/build.sh:18`, redirect without HTTPS).
+    - 2 S2068 (credentials hardcoded in `dev/config/control.yaml:16,20`).
+- **Secret scanning:** not readable with the orchestrator's token (it needs a higher scope). It must be checked by the user or with a suitably scoped token.
+
+**Scope:**
+1. **Dependency bumps (user-approved 2026-10-27):**
+   - Server: `grpc` v1.77.0 → ≥ v1.83.1, `x/net` → ≥ v0.60.0, `quic-go` → ≥ v0.59.1.
+   - Client: `grpc` v1.66.0 → ≥ v1.83.1, `x/net` → ≥ v0.60.0.
+   - Anything Go's version resolution forces is listed in the PR.
+   - Done test-first where behaviour could shift (the client's real-server integration suite and SV3/SV1's interceptor tests are the guard). `govulncheck` must report **0 reachable** before merge.
+2. **Wails-transitive alerts** (go-git, go-billy, circl): re-check after UP (Wails v3 GA) has merged, and bump directly only if UP did not clear them.
+3. **Server frontend `esbuild`** (#2): bump it, or dismiss it with the reason if it only affects the dev server and is not shipped.
+4. **SonarCloud triage:**
+   - **Fix:** S2068 dev credentials (move them to placeholders or env variables, or mark them as dev-only fixtures if they are deliberate), S6506, S4036, and S6505 where `--ignore-scripts` is viable.
+   - **Mark safe, with a written reason:** S8545 (the established false-positive class) and S2819 in the design prototype (or exclude `design/` from analysis, which is a Sonar-config change for the user to approve).
+5. **`govulncheck` as a CI step** in both repos' Test workflows (CI/CD change, approved in the plan).
+6. **User actions, recorded but not done by the track:**
+   - Enable Dependabot alerts on the client repo (user-approved; the user flips it).
+   - Check secret scanning in both repos.
+
+- **Out of scope:** the Phase 10 SonarCloud quality-gate pass and React Doctor (they stay in Phase 10). Any alert that `govulncheck` shows unreachable and that UP clears is not bumped separately.
+- **Files:** `go.mod` and `go.sum` (both repos), `frontend/package*.json` (server), `.github/workflows/test.yml` (both), `dev/config/control.yaml` and `build/linux/appimage/build.sh` (server), `internal/hotkeys/permission_darwin_pane.go` (client), and Sonar config if exclusion is chosen.
+- **Gates:** **dependency** (approved for the listed bumps; any forced extra is shown in the plan), **ci-cd** (the `govulncheck` step), cross-repo.
+- **Depends on:** UP merged (both touch `go.mod`, and UP may clear the Wails-transitive alerts). Runs in Wave 5 alongside DOC and SV7, and before DOC finishes, so DOC documents the final state.
+- **Accepted risk (the user's decision, 2026-10-27):** the orchestrator recommended doing the `grpc`/`x/net`/`quic-go` bumps immediately as a separate small PR per repo. The user chose to keep **everything in Wave 5**. Until SEC merges, server `main` remains exposed to the reachable `grpc` authorization bypass GO-2026-4762 and the server-crash GO-2026-6443 on its internet-facing control port.
+
 ## 4. Conflict matrix & schedule
 
 The file overlaps that force serialisation, computed from each finding's touched files:
@@ -275,12 +328,12 @@ The file overlaps that force serialisation, computed from each finding's touched
 | **SV1** | | srs_service | srs_service, control/server | voice/server | | *(semantic)* | | | | | all | |
 | **SV2** | | | srs_service | | | | | | | | all | |
 | **SV3** | | | | voice/server | *(vet gate)* | *(semantic)* | | | | | all | PROTO_GAPS |
-| **CL1** | | | | | | | bindings, profiles, session, control/client | | | | all | bindings |
+| **CL1** | | | | | | | bindings, profiles, session, control/client | bindings, profiles *(CL3's notification reporting, added in CL3's design)* | | | all | bindings |
 | **CL2** | | | | | | | | | | | all | bindings, voice |
 | **CL3** | | | | | | | | | CommsApp, SettingsScreen | | all | |
 | **CL5** | | | | | | | | | | | workflows, go.mod | |
 
-*"all"*: UP touches go.mod, the bindings and the workflows of both repos, so it conflicts with every code track. *"semantic"*: no shared file, but CL1 reacts to wire behaviour that SV1/SV3 define.
+*SEC* (added later) touches `go.mod`/`go.sum` and `test.yml` in both repos, so it serialises after UP; it shares no files with DOC or SV7. *"all"*: UP touches go.mod, the bindings and the workflows of both repos, so it conflicts with every code track. *"semantic"*: no shared file, but CL1 reacts to wire behaviour that SV1/SV3 define.
 
 **Waves** (tracks within a wave run concurrently in separate worktrees; a wave starts when its dependencies have **merged**):
 
@@ -291,7 +344,7 @@ The file overlaps that force serialisation, computed from each finding's touched
 | 2 | **SV1** (after SV3), **CL3** (after CL4) | |
 | 3 | **SV2**, **SV4** (after SV1), **CL1** (after SV1 + SV3 + CL2) | SV2 and SV4 don't share files. |
 | 4 | **UP** | Alone. |
-| 5 | **DOC**, **SV7** | Final state documented. |
+| 5 | **SEC**, then **DOC**, **SV7** | SEC (after UP) lands first; DOC and SV7 document the final state. |
 
 **Merges:** one track at a time into `main` of its repo, via PR. Re-run that repo's full suite on `main` after each merge. There are no direct pushes to `main` and no force-pushes. Each track gets `superpowers:requesting-code-review` before merge.
 
@@ -309,6 +362,7 @@ The file overlaps that force serialisation, computed from each finding's touched
 | CL4 | Settings stub text; Tailwind removal (must be visually neutral) | user (text only) |
 | CL5 | BUILD shows a real revision; exe metadata; release artefacts | user, operators |
 | UP | Whatever GA changes — enumerated in UP's design | potentially user |
+| SEC | gRPC/x/net/quic-go upgrades (security fixes; any behaviour shift is caught by the integration suites); dev config credentials replaced | wire (implementation only), operators |
 
 The C# peer (`VNGD-SimpleRadioStandalone`) shares the server, so SV1–SV4 change what it sees too. Interop is already blocked on PR #253 (no voice secret), so this cannot be tested here; it is noted on the checklist.
 
@@ -370,6 +424,22 @@ No finding is rejected outright — the user kept everything. These are closed o
 | Token revocation | SRV-06's unknown-GUID check; no denylist; kicked clients may log in again | orchestrator |
 | Distributed-mode kick | existing `kick_client` ControlMessage; no proto change | orchestrator |
 | Tailwind | removed entirely; baseline is the current rendering; before/after screenshots | orchestrator |
+| Go 1.27 breaks gqlgen v0.17.89 (found in Wave 1 execution) | Server: `golang.org/x/tools` raised to v0.46.0 (the lowest version that works; MVS also raises `x/crypto` and `x/mod`), gqlgen runs in-module via a `tool` directive, and gqlgen itself is unchanged. Client CI builds the server with the **server's own** Go version. *(These rows were committed to the #39 branch after it merged, and are restored here.)* | user |
+| SonarCloud S8545 (`go install …@<exact version>`) | triaged as safe by the user in both projects | user |
+| CL4 neutrality proof | Puppeteer instead of Claude-in-Chrome; 3 non-allow-listed invisible differences accepted (Tailwind-internal variables, placeholder `min-*` on 2 inputs, 0.016 px text width) | user |
+| Merging | the orchestrator reports each PR as ready; **the user merges** (`gh pr merge` is blocked for the orchestrator); the full suite is re-run on `main` after each merge | user |
+| `TestTLS_UntrustedCertificateIsRefused` timing flake (seen once during CL4) | assigned to CL1 | orchestrator |
+| CI hangs in the Linux `apt` step | step timeout + `apt-get` retries + `awalsh128/cache-apt-pkgs-action` (SHA-pinned v1.6.3) in the client; `timeout-minutes` on every job in both repos | user |
+| CON-05 duplicate subscribe (SV1) | newest subscription wins; the old stream ends with `Aborted` "superseded by a newer subscription" | user |
+| SERVER_ACTION delivery (SV1, new finding) | only on the target's own stream; a bug note goes to the C# team (their handler never checks `TargetClientGuid`) | user |
+| Ban (SV1) | goes through the same removal helper as Kick | user |
+| Status of a removed session's live stream (SV1) | `Unauthenticated` "session ended: \<reason\>" | user |
+| Kick/Ban while the control server is stopped (SV1) | fail cleanly, change nothing | user |
+| UI action failures (CL3, FE09) | reported through the notification channel (toast + bell), with errors from the Comms popout shown in the main window | user |
+| Knob/VOX drags (CL3, FE05) | throttled live: at most every 150 ms, plus a final commit on release | user |
+| Security alerts | new **SEC** track in Wave 5 for everything, including the dependency bumps; the orchestrator's recommendation to bump `grpc`/`x/net`/`quic-go` immediately was declined (accepted risk, see SEC) | user |
+| SEC dependency bumps | approved: server `grpc` ≥ v1.83.1, `x/net` ≥ v0.60.0, `quic-go` ≥ v0.59.1; client `grpc` ≥ v1.83.1, `x/net` ≥ v0.60.0 | user |
+| Client Dependabot alerts | to be enabled by the user (repo setting) | user |
 
 ## 10. Left to each track's design step
 
