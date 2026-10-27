@@ -52,8 +52,9 @@ type Deps struct {
 	OnSessionEnded func(reason string)
 
 	// PostDialTimeout bounds everything Connect does after the dial
-	// (InitAuth, the bcrypt hash, GuestLogin, SyncClient) and Reconnect's
-	// SyncClient. 0 means defaultPostDialTimeout. Overridable for tests.
+	// (InitAuth, the bcrypt hash, GuestLogin, the subscription ack,
+	// SyncClient) and Reconnect's subscription ack and SyncClient. 0 means
+	// defaultPostDialTimeout. Overridable for tests.
 	PostDialTimeout time.Duration
 }
 
@@ -68,6 +69,15 @@ const (
 	// or timed-out Connect sends when GuestLogin had already issued a token
 	// (D3), so the server frees the session at once instead of reaping it.
 	cancelDisconnectTimeout = 2 * time.Second
+
+	// pendingUpdateCap bounds the updates a new update stream holds while
+	// the SyncClient snapshot it was opened ahead of is still loading. It
+	// mirrors the server's own per-subscription buffer (vcs-srs-server
+	// srs/session.go updateStreamBuffer = 256, SV2): a client that has had
+	// to hold more than the server itself would queue has fallen behind by
+	// the server's own measure, and is treated exactly like the server's
+	// fell-behind end (C13): resync.
+	pendingUpdateCap = 256
 )
 
 // Session orchestrates connect/disconnect and owns the live connection.
@@ -142,38 +152,88 @@ func (s *Session) SetControlStateObserver(fn func(events.ConnectionState)) {
 	s.dep.OnControlState = fn
 }
 
-// startStreamLocked launches the update-stream consumer under a new
-// generation. A nil stream subscribes inside the goroutine; a non-nil one
-// (resync) is an already-open stream to consume. Caller holds s.mu.
-func (s *Session) startStreamLocked(ctx context.Context, cc *control.Client, stream srspb.SRSService_SubscribeToUpdatesClient) {
-	s.streamGen++
-	gen := s.streamGen
+// pendingStream is an update stream opened AHEAD of the SyncClient snapshot
+// it must not be overtaken by: registered with the server (awaitSubscribed)
+// before the snapshot is requested, so nothing published after the snapshot
+// is lost, and held (control.Held) until the snapshot is applied, so nothing
+// delivered before it is wiped by it.
+//
+// Its goroutine starts at once but owns no stream generation until install
+// hands it one: an end of the stream before install is kept by the Held and
+// reported only after Release, through handleStreamEnd, exactly like the
+// end of an installed stream. An attempt that never installs it calls
+// abandon (or cancels the connection context), and the goroutine exits
+// without reporting anything.
+type pendingStream struct {
+	held    *control.Held
+	gen     chan uint64 // receives the generation install assigns
+	abandon context.CancelFunc
+}
+
+// openHeldStream subscribes on ctx (the connection's stream context, which
+// the installed stream keeps), waits for the server's subscription ack
+// (awaitSubscribed, under waitCtx), and starts holding the stream. On error
+// nothing is left running.
+func (s *Session) openHeldStream(ctx, waitCtx context.Context, cc *control.Client) (*pendingStream, error) {
+	// subCtx is this stream's own: cancelling it on exit ends a stream the
+	// consumer stopped reading (an overflowed hold) without touching the
+	// connection-wide context the next subscription reuses.
+	subCtx, subCancel := context.WithCancel(ctx)
+	stream, err := cc.Subscribe(subCtx)
+	if err != nil {
+		subCancel()
+		return nil, err
+	}
+	if err := s.awaitSubscribed(waitCtx, stream); err != nil {
+		subCancel()
+		return nil, err
+	}
+	p := &pendingStream{
+		held:    control.NewHeld(s.st, s.em, pendingUpdateCap),
+		gen:     make(chan uint64, 1),
+		abandon: subCancel,
+	}
 	go func() {
-		var err error
-		if stream != nil {
-			err = cc.Consume(stream, s.st, s.em)
-		} else {
-			err = cc.ConsumeUpdates(ctx, s.st, s.em)
+		defer subCancel()
+		err := p.held.Consume(subCtx, stream)
+		select {
+		case gen := <-p.gen:
+			s.handleStreamEnd(ctx, gen, err)
+		default:
+			// Never installed: the attempt that opened it failed or was
+			// superseded, and that path owns the state.
 		}
-		s.handleStreamEnd(ctx, gen, err)
 	}()
+	return p, nil
+}
+
+// installLocked gives p the next stream generation. Caller holds s.mu and
+// calls p.held.Release after unlocking: Release routes into the store, whose
+// observers must not run under s.mu.
+func (s *Session) installLocked(p *pendingStream) {
+	s.streamGen++
+	p.gen <- s.streamGen
 }
 
 // resync answers SV2's C13 ("update stream fell behind: resubscribe and call
 // SyncClient") on the same connection, from the ended stream's goroutine:
 //
 //  1. re-check that gen is still current and the connection live;
-//  2. resubscribe FIRST, wait for the server's subscription ack (SV2 C17,
-//     see awaitSubscribed), and start consuming it under a new generation;
+//  2. resubscribe FIRST and wait for the server's subscription ack (SV2 C17,
+//     see awaitSubscribed); the new stream holds what it receives
+//     (pendingStream);
 //  3. then SyncClient, bounded by the post-dial timeout, which replaces the
 //     roster;
-//  4. on success publish connected again (consumers rehydrate on it);
+//  4. on success install the new stream under a new generation, replay what
+//     it held on top of the snapshot, and publish connected again
+//     (consumers rehydrate on it);
 //  5. on failure, a session-ended verdict ends the session, anything else is
 //     an ordinary control loss.
 //
 // streamCtx is the ended stream's context, which the new stream reuses: the
 // connection's stream cancel (s.cancel) still governs it. There is no rate
-// cap; the server sends C13 only after its buffer of stalled events overflows.
+// cap; the server sends C13 only after its buffer of stalled events
+// overflows, and the client's own hold overflows only past the same size.
 func (s *Session) resync(streamCtx context.Context, gen uint64) {
 	s.mu.Lock()
 	if gen != s.streamGen || s.conn == nil || s.control == nil {
@@ -183,7 +243,7 @@ func (s *Session) resync(streamCtx context.Context, gen uint64) {
 	cc := s.control
 	s.mu.Unlock()
 
-	fail := func(err error, current uint64) {
+	fail := func(err error) {
 		if streamCtx.Err() != nil {
 			return // Disconnect/Reconnect/endSession ended it on purpose
 		}
@@ -192,39 +252,42 @@ func (s *Session) resync(streamCtx context.Context, gen uint64) {
 			return
 		}
 		s.log("resync failed", err)
-		s.markControlLost(current)
+		s.markControlLost(gen)
+	}
+	// stillCurrent reports whether gen still owns the live connection.
+	stillCurrent := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return gen == s.streamGen && s.conn != nil
 	}
 
-	stream, err := cc.Subscribe(streamCtx)
+	p, err := s.openHeldStream(streamCtx, streamCtx, cc)
 	if err != nil {
-		fail(err, gen)
+		fail(err)
 		return
 	}
-	if err := s.awaitSubscribed(streamCtx, stream); err != nil {
-		fail(err, gen)
+	if !stillCurrent() {
+		p.abandon()
+		return // replaced while subscribing; that path owns the state
+	}
+
+	sctx, cancel := context.WithTimeout(streamCtx, s.postDialTimeout())
+	defer cancel()
+	if _, err := cc.SyncClient(sctx, s.st); err != nil {
+		p.abandon()
+		fail(err)
 		return
 	}
 	s.mu.Lock()
 	if gen != s.streamGen || s.conn == nil {
 		s.mu.Unlock()
-		return // replaced while subscribing; that path owns the state
-	}
-	s.startStreamLocked(streamCtx, cc, stream)
-	newGen := s.streamGen
-	s.mu.Unlock()
-
-	sctx, cancel := context.WithTimeout(streamCtx, s.postDialTimeout())
-	defer cancel()
-	if _, err := cc.SyncClient(sctx, s.st); err != nil {
-		fail(err, newGen)
+		p.abandon()
 		return
 	}
-	s.mu.Lock()
-	current := newGen == s.streamGen
+	s.installLocked(p)
 	s.mu.Unlock()
-	if current {
-		s.setConnState(events.ConnConnected)
-	}
+	p.held.Release()
+	s.setConnState(events.ConnConnected)
 }
 
 // awaitSubscribed waits until the server has registered the subscription
@@ -241,6 +304,11 @@ func (s *Session) resync(streamCtx context.Context, gen uint64) {
 // of wedging. A stream that ends before any header (the server refused it)
 // returns that stream's error, like a failed Subscribe. A cancelled ctx
 // returns its error.
+//
+// Connect and Reconnect pass their post-dial context, which started before
+// this wait and so expires first: against a pre-C17 server with nothing to
+// publish, their attempt fails with "server not responding" rather than
+// falling back (design §3.12, R9).
 //
 // On the fallback, the Header goroutine outlives this call until the first
 // update or the stream's end; grpc-go permits Header() alongside RecvMsg.
@@ -673,12 +741,25 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 	token = guest.Token
 
 	cc := control.New(conn, guest.Token)
+	// Subscribe BEFORE SyncClient and wait for the server to register the
+	// subscription (SV2 C17), so an update published after the snapshot is
+	// taken reaches the stream; the stream holds it until the snapshot is
+	// applied. A refusal fails the Connect the way a failed SyncClient did
+	// when SyncClient was the first call after GuestLogin.
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	p, err := s.openHeldStream(streamCtx, pctx, cc)
+	if err != nil {
+		streamCancel()
+		return abort(fmt.Errorf("subscribe to updates: %w", err))
+	}
 	if _, err := cc.SyncClient(pctx, s.st); err != nil {
+		streamCancel()
 		return abort(err)
 	}
 	if cerr := pctx.Err(); cerr != nil {
 		// Cancelled or timed out after the last RPC answered: honour it
 		// rather than install a session the user already walked away from.
+		streamCancel()
 		return abort(cerr)
 	}
 
@@ -690,13 +771,14 @@ func (s *Session) Connect(ctx context.Context, serverURL, name, password, unitID
 		UnitId:    unitID,
 	})
 
-	streamCtx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
-	s.conn, s.control, s.cancel = conn, cc, cancel
+	s.conn, s.control, s.cancel = conn, cc, streamCancel
 	s.lastDialer = dialer
 	s.lastToken = guest.Token
-	s.startStreamLocked(streamCtx, cc, nil)
+	s.installLocked(p)
 	s.mu.Unlock()
+	// The snapshot is applied: replay what the stream held, then connected.
+	p.held.Release()
 
 	s.setConnState(events.ConnConnected)
 	tagged.SessionChanged("logged_in")
@@ -785,8 +867,24 @@ func (s *Session) Reconnect(ctx context.Context) (err error) {
 	defer pcancel()
 
 	cc := control.New(conn, token)
+	// Subscribe first and hold, exactly as Connect does. A refusal is routed
+	// like a failed SyncClient: Unauthenticated ends the session.
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	p, err := s.openHeldStream(streamCtx, pctx, cc)
+	if err != nil {
+		streamCancel()
+		_ = conn.Close()
+		if mapped := s.attemptError(attemptCtx, pctx, err); mapped != err {
+			return mapped
+		}
+		if v, reason := classifyRPCError(err); v == verdictSessionEnded {
+			return endWith(reason)
+		}
+		return fmt.Errorf("reconnect subscribe: %w", err)
+	}
 	hadSecret, err := cc.SyncClient(pctx, s.st)
 	if err != nil {
+		streamCancel()
 		_ = conn.Close()
 		if mapped := s.attemptError(attemptCtx, pctx, err); mapped != err {
 			return mapped
@@ -799,17 +897,17 @@ func (s *Session) Reconnect(ctx context.Context) (err error) {
 	if !hadSecret {
 		// The server answered but no longer has a voice secret for us: the
 		// session was removed while the RPC was in flight (SRV-06).
+		streamCancel()
 		_ = conn.Close()
 		return endWith("expired")
 	}
 
-	streamCtx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	if s.lastToken != token {
 		// The session ended (stream end, ping) while this Reconnect was
 		// syncing: do not resurrect it.
 		s.mu.Unlock()
-		cancel()
+		streamCancel()
 		_ = conn.Close()
 		return sessionEndedError("expired")
 	}
@@ -819,9 +917,10 @@ func (s *Session) Reconnect(ctx context.Context) (err error) {
 	if s.conn != nil {
 		_ = s.conn.Close()
 	}
-	s.conn, s.control, s.cancel = conn, cc, cancel
-	s.startStreamLocked(streamCtx, cc, nil)
+	s.conn, s.control, s.cancel = conn, cc, streamCancel
+	s.installLocked(p)
 	s.mu.Unlock()
+	p.held.Release()
 	s.setConnState(events.ConnConnected)
 	return nil
 }

@@ -54,12 +54,17 @@ type Fake struct {
 	calls     []string
 	streamEnd chan error
 	active    int // SubscribeToUpdates handlers currently running
+	sent      int // updates every SubscribeToUpdates handler has Sent; see Sent
 
 	// subDelay delays SubscribeToUpdates before it records and registers
 	// the subscription; noSubHeader suppresses the subscription ack (the
 	// pre-SV2-C17 server). See SetSubscribeDelay and SetSubscribeAck.
 	subDelay    time.Duration
 	noSubHeader bool
+
+	// onNextSync runs once, inside the next SyncClient, after its snapshot
+	// has been taken and before the response is sent. See OnNextSync.
+	onNextSync func()
 }
 
 // NewFake returns a Fake with sensible defaults (guest enabled).
@@ -169,6 +174,42 @@ func (f *Fake) EndStream(err error) {
 	ch <- err
 }
 
+// OnNextSync makes the next SyncClient call fn once, after it has taken its
+// snapshot and before it answers. Together with Publish it lands an update
+// in the window a real server leaves open: published after the snapshot, so
+// it is not in it, and delivered on the stream while the client is still
+// waiting for the snapshot.
+func (f *Fake) OnNextSync(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onNextSync = fn
+}
+
+// Publish delivers u the way the real server's event bus does: to the
+// subscription registered right now, or to nobody. It reports whether a
+// subscriber was registered. Unlike PushUpdate, an update published while
+// no SubscribeToUpdates handler is registered is dropped, not queued for the
+// next one.
+func (f *Fake) Publish(u *srspb.ServerUpdate) bool {
+	f.mu.Lock()
+	live := f.active > 0
+	f.mu.Unlock()
+	if !live {
+		return false
+	}
+	f.updates <- u
+	return true
+}
+
+// Sent returns how many updates the SubscribeToUpdates handlers have handed
+// to stream.Send so far. Send returning means the update is in the
+// transport, not that the client has read it.
+func (f *Fake) Sent() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sent
+}
+
 // enter records the call and applies any Block/Fail knob for method.
 func (f *Fake) enter(ctx context.Context, method string) error {
 	f.mu.Lock()
@@ -231,8 +272,7 @@ func (f *Fake) SyncClient(ctx context.Context, _ *srspb.Empty) (*srspb.SyncRespo
 		return nil, err
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return &srspb.SyncResponse{
+	resp := &srspb.SyncResponse{
 		Success: true,
 		Version: "test",
 		SyncResult: &srspb.SyncResponse_Data{
@@ -245,7 +285,14 @@ func (f *Fake) SyncClient(ctx context.Context, _ *srspb.Empty) (*srspb.SyncRespo
 				VoiceSecret:        f.SyncVoiceSecret,
 			},
 		},
-	}, nil
+	}
+	hook := f.onNextSync
+	f.onNextSync = nil
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return resp, nil
 }
 
 func (f *Fake) UpdateRadioInfo(ctx context.Context, r *srspb.RadioInfo) (*srspb.ServerResponse, error) {
@@ -324,6 +371,9 @@ func (f *Fake) SubscribeToUpdates(_ *srspb.Empty, stream srspb.SRSService_Subscr
 			if err := stream.Send(u); err != nil {
 				return err
 			}
+			f.mu.Lock()
+			f.sent++
+			f.mu.Unlock()
 		case err := <-end:
 			return err
 		case <-stream.Context().Done():
