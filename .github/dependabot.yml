@@ -1,15 +1,9 @@
 # See https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 version: 2
+#
+# Go modules are updated by .github/workflows/go-deps.yml: Dependabot cannot
+# resolve the gitignored generated srspb/ package, so every Go-module run failed.
 updates:
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
-      go-deps:
-        patterns:
-          - "*"
-
   - package-ecosystem: npm
     directory: /frontend
     schedule:

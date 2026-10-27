@@ -403,3 +403,39 @@ func TestReleaseWorkflowShape(t *testing.T) {
 		}
 	}
 }
+
+// CI-06: Dependabot cannot resolve the gitignored generated srspb/ package,
+// so Go modules are updated by go-deps.yml instead.
+func TestDependabotHasNoGomod(t *testing.T) {
+	text := readRepoFile(t, ".github/dependabot.yml")
+	if strings.Contains(text, "gomod") {
+		t.Error("dependabot.yml still has a gomod ecosystem")
+	}
+	for _, want := range []string{"package-ecosystem: npm", "package-ecosystem: github-actions"} {
+		if !strings.Contains(strings.ReplaceAll(text, `"`, ""), want) {
+			t.Errorf("dependabot.yml lacks %q", want)
+		}
+	}
+}
+
+// CI-06: the weekly Go dependency workflow regenerates code, bumps direct
+// requirements (Wails excluded), runs the race suite, and opens a PR with a
+// token whose absence fails loudly.
+func TestGoDepsWorkflowShape(t *testing.T) {
+	text := readRepoFile(t, ".github/workflows/go-deps.yml")
+	for _, want := range []string{
+		"cron:", "workflow_dispatch:", "secrets.DEPS_BOT_TOKEN", "::error", "buf generate",
+		"GO_DEPS_EXCLUDE: github.com/wailsapp/wails/v3", "bash .github/scripts/go-deps-update.sh",
+		"bash .github/scripts/assert-go-toolchain.sh", "-race", "xvfb-run", "gh pr create", "--label go-deps",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("go-deps.yml lacks %q", want)
+		}
+	}
+	// The job that runs third-party Go code (go get, tests) must not hold the
+	// token: secrets may appear only before the `update:` job or after it.
+	upd := taskBlock(t, text, "update")
+	if strings.Contains(upd, "secrets.") {
+		t.Errorf("go-deps.yml: the update job references a secret:\n%s", upd)
+	}
+}
