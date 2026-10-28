@@ -300,33 +300,33 @@ func (r *Runner) joinOne(ctx context.Context, i int, full bool) (*runnerBot, err
 	start := time.Now()
 	ctl, err := r.joiner.Join(ctx, r.botName(i), r.cfg.Scenario.Coalition, full)
 	if err != nil {
-		return nil, err
+		return nil, &JoinError{Bot: i, Stage: StageControl, Err: err}
 	}
 	r.joinHist.Record(time.Since(start))
-	fail := func(err error) (*runnerBot, error) {
+	fail := func(stage JoinStage, tries int, what string, err error) (*runnerBot, error) {
 		_ = ctl.Close(context.Background())
-		return nil, fmt.Errorf("bot %d: %w", i, err)
+		return nil, &JoinError{Bot: i, GUID: ctl.GUID, Stage: stage, Tries: tries, Err: err, what: what, bare: what == "-"}
 	}
 	if i == 0 {
 		if err := r.resolveVoiceAddr(ctl); err != nil {
-			return fail(err)
+			return fail(StageRadio, 0, "-", err)
 		}
 	}
 	id, err := uuid.Parse(ctl.GUID)
 	if err != nil {
-		return fail(fmt.Errorf("client guid %q: %w", ctl.GUID, err))
+		return fail(StageRadio, 0, fmt.Sprintf("client guid %q", ctl.GUID), err)
 	}
 	if err := ctl.UpdateRadio(ctx, r.freq.MHz32()); err != nil {
-		return fail(fmt.Errorf("update radio: %w", err))
+		return fail(StageRadio, 0, "", err)
 	}
 	vc, err := DialVoice(r.voiceAddr, id)
 	if err != nil {
-		return fail(fmt.Errorf("dial voice: %w", err))
+		return fail(StageVoiceDial, 0, "", err)
 	}
 	tries, err := vc.Hello(ctx, ctl.Secret, DefaultHelloLadder)
 	if err != nil {
 		vc.Close()
-		return fail(fmt.Errorf("hello: %w", err))
+		return fail(StageHello, tries, "", err)
 	}
 	// The receive loop outlives this call; Close ends it.
 	vc.Start(context.Background())

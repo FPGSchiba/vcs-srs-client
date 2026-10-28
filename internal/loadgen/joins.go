@@ -2,6 +2,7 @@ package loadgen
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -21,6 +22,51 @@ const (
 	// StageHello is Hello exhausting its ladder or the socket failing.
 	StageHello JoinStage = "hello"
 )
+
+// JoinError is a failed join tagged with the stage it failed at. Error()
+// reproduces the v1 error text exactly, so log readers that match it keep
+// working: a control failure is the Joiner's own text, every later stage reads
+// "bot N: <what>: <err>".
+type JoinError struct {
+	Bot   int
+	GUID  string
+	Stage JoinStage
+	Tries int
+	Err   error
+	// what overrides the stage's default text prefix (for example the GUID
+	// parse failure, which belongs to the radio stage but reads differently).
+	what string
+	// bare drops the prefix altogether: "bot N: <err>".
+	bare bool
+}
+
+func (e *JoinError) Error() string {
+	if e.Stage == StageControl {
+		return e.Err.Error()
+	}
+	if e.bare {
+		return fmt.Sprintf("bot %d: %v", e.Bot, e.Err)
+	}
+	what := e.what
+	if what == "" {
+		switch e.Stage {
+		case StageRadio:
+			what = "update radio"
+		case StageVoiceDial:
+			what = "dial voice"
+		default:
+			what = "hello"
+		}
+	}
+	return fmt.Sprintf("bot %d: %s: %v", e.Bot, what, e.Err)
+}
+
+func (e *JoinError) Unwrap() error { return e.Err }
+
+// failure converts the error to its JoinsReport entry.
+func (e *JoinError) failure() JoinFailure {
+	return JoinFailure{Bot: e.Bot, GUID: e.GUID, Stage: e.Stage, Tries: e.Tries, Error: e.Err.Error()}
+}
 
 // JoinsSchema is the value of every joins line's schema key.
 const JoinsSchema = "loadbot-joins/1"

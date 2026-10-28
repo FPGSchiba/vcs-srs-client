@@ -2,6 +2,8 @@ package loadgen
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -211,5 +213,32 @@ func TestJoinTallyOkClampsTriesBelowOne(t *testing.T) {
 	}
 	if sum != r.Joined || r.Joined != 3 {
 		t.Fatalf("hist sums to %d, joined %d, want 3", sum, r.Joined)
+	}
+}
+
+func TestJoinErrorKeepsV1Text(t *testing.T) {
+	base := errors.New("no HELLO_ACK after 5 tries")
+	cases := []struct {
+		name string
+		err  *JoinError
+		want string
+	}{
+		{"hello", &JoinError{Bot: 1669, Stage: StageHello, Tries: 5, Err: base}, "bot 1669: hello: no HELLO_ACK after 5 tries"},
+		{"radio", &JoinError{Bot: 7, Stage: StageRadio, Err: base}, "bot 7: update radio: no HELLO_ACK after 5 tries"},
+		{"voice_dial", &JoinError{Bot: 7, Stage: StageVoiceDial, Err: base}, "bot 7: dial voice: no HELLO_ACK after 5 tries"},
+		{"control", &JoinError{Bot: 7, Stage: StageControl, Err: errors.New("join LDBT-0042: dial refused")}, "join LDBT-0042: dial refused"},
+	}
+	for _, c := range cases {
+		if got := c.err.Error(); got != c.want {
+			t.Errorf("%s: Error() = %q, want %q", c.name, got, c.want)
+		}
+	}
+	var wrapped error = fmt.Errorf("outer: %w", cases[0].err)
+	var je *JoinError
+	if !errors.As(wrapped, &je) || je.Bot != 1669 || je.Stage != StageHello || je.Tries != 5 {
+		t.Fatalf("errors.As failed: %+v", je)
+	}
+	if !errors.Is(wrapped, base) {
+		t.Fatal("errors.Is does not pass through Unwrap")
 	}
 }
