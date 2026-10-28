@@ -366,7 +366,11 @@ func waitReady(logPath string) (out string, ready bool) {
 			return out, true
 		}
 		if strings.Contains(out, "level=ERROR") {
-			return out, false
+			// The server may be mid-write of the error line; re-read once so
+			// IsBindError sees the whole message.
+			time.Sleep(100 * time.Millisecond)
+			data, _ = os.ReadFile(logPath)
+			return string(data), false
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
