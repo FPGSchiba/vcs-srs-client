@@ -65,7 +65,13 @@ func (e *JoinError) Unwrap() error { return e.Err }
 
 // failure converts the error to its JoinsReport entry.
 func (e *JoinError) failure() JoinFailure {
-	return JoinFailure{Bot: e.Bot, GUID: e.GUID, Stage: e.Stage, Tries: e.Tries, Error: e.Err.Error()}
+	msg := e.Err.Error()
+	if e.what != "" && !e.bare {
+		// A custom context (the GUID parse failure) is kept; the default
+		// stage prefixes are dropped because the stage field carries them.
+		msg = e.what + ": " + msg
+	}
+	return JoinFailure{Bot: e.Bot, GUID: e.GUID, Stage: e.Stage, Tries: e.Tries, Error: msg}
 }
 
 // JoinsSchema is the value of every joins line's schema key.

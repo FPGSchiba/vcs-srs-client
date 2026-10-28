@@ -242,3 +242,19 @@ func TestJoinErrorKeepsV1Text(t *testing.T) {
 		t.Fatal("errors.Is does not pass through Unwrap")
 	}
 }
+
+func TestJoinErrorFailureKeepsGUIDContext(t *testing.T) {
+	base := errors.New("invalid UUID length: 3")
+	guid := &JoinError{Bot: 4, GUID: "abc", Stage: StageRadio, Err: base, what: `client guid "abc"`}
+	if got, want := guid.failure().Error, `client guid "abc": invalid UUID length: 3`; got != want {
+		t.Fatalf("guid failure error = %q, want %q", got, want)
+	}
+	hello := &JoinError{Bot: 4, Stage: StageHello, Tries: 5, Err: errors.New("no HELLO_ACK after 5 tries")}
+	if got, want := hello.failure().Error, "no HELLO_ACK after 5 tries"; got != want {
+		t.Fatalf("hello failure error = %q, want %q", got, want)
+	}
+	bare := &JoinError{Bot: 0, Stage: StageRadio, Err: base, bare: true}
+	if got := bare.failure().Error; got != base.Error() {
+		t.Fatalf("bare failure error = %q", got)
+	}
+}
