@@ -22,6 +22,7 @@
   - execution;
   - one branch dispatch each of `release.yml` and `wails-check.yml`, during the PR step. This widens the plan's original "first `wails-check` dispatch after merge" (the approvals table and checklist §14 item 6). GitHub only accepts a `workflow_dispatch` for a workflow file that already exists on the default branch, and `wails-check.yml` is new in this PR, so the branch dispatch of it is expected to be refused before merge. Task 7 must report that refusal verbatim and must not work around it (for example with a temporary `push` trigger, which would be CI beyond the plan). The first real `wails-check` run is then checklist §14 item 6, after merge, which needs a fresh go-ahead from the user. The `release.yml` branch dispatch is unaffected: that workflow already exists on `main`.
 - Review findings were fixed in follow-up commits on the branch (`git log origin/main..chore/cleanup-up`).
+- Deviation, Task 1b: review moved the Dependabot check out of `TestDependabotHasNoGomod` into its own `TestDependabotIgnoresWailsRuntime` (a line-based helper with five fixtures) instead of extending the existing test as Task 1b says.
 - The client manual items are in `docs/superpowers/plans/2026-09-15-phase-3-manual-verification.md` §14. None of them has been run on real hardware.
 
 ## Global Constraints
@@ -146,9 +147,9 @@ Every gate below was approved by the user with the design on **2026-10-28** ("Lo
 | build metadata: `info.json` `0000` → `0409` (both repos) and `buildcheck_test.go:206` | Tasks 3, S3 | U6 |
 | behaviour accepted, no change: Linux second instance; opaque macOS window | none | U3, U4 |
 | cross-repo: two independent PRs, client first | Parts 1 → 2 | D5, §6.3 |
-| outward-facing: push, open PR | Tasks 7, S6 | Needs the user's go-ahead to execute. The user merges. |
-| outward-facing (optional): branch `workflow_dispatch` of client `release.yml`; first `wails-check` dispatch after merge | Task 7 Step 6, manual list | **Not covered.** Ask the user at that moment. |
-| **NOT approved:** a Dependabot `ignore` for `@wailsio/runtime` | Conditional Tasks 1b / S1b | Needs the user. See "Needs the user before execution". |
+| outward-facing: push, open PR | Tasks 7, S6 | user, 2026-10-28 (execution approved). The user merges. |
+| outward-facing (optional): branch `workflow_dispatch` of client `release.yml` and of `wails-check.yml`, once each | Task 7 Step 6 | user, 2026-10-28 ("(a) Release build dispatch, (b) Wails-check dispatch"). The first `wails-check` run after merge still needs a fresh go-ahead (checklist §14 item 6). |
+| ci-cd: Dependabot `ignore` for `@wailsio/runtime` | Tasks 1b / S1b | user, 2026-10-28 ("Yes, ignore it"). Was not approved when the plan was written; see "Needs the user before execution" item 1. |
 
 ## Out of scope (D6, design §1)
 
@@ -611,11 +612,11 @@ There is no automated test in the server for these files. Each one gets a grep o
 
 ## Needs the user before execution
 
-1. **Dependabot vs the exact runtime pin (not in the approved gates).** Both repos' Dependabot npm config groups `"*"` weekly (client `.github/dependabot.yml:7-14`, server `:21-33`). Once Wails ships a stable 3.1.0, Dependabot will bump the exact `"3.0.0"` pin on its own. The design proposed an `ignore` only for Q5 = B, but under U1 = A with U5 = A:
+1. **Resolved 2026-10-28: approved ("Yes, ignore it"); Tasks 1b / S1b ran.** **Dependabot vs the exact runtime pin (not in the approved gates when written).** Both repos' Dependabot npm config groups `"*"` weekly (client `.github/dependabot.yml:7-14`, server `:21-33`). Once Wails ships a stable 3.1.0, Dependabot will bump the exact `"3.0.0"` pin on its own. The design proposed an `ignore` only for Q5 = B, but under U1 = A with U5 = A:
    - in the **client**, every `frontend-deps` group PR goes red on `TestWailsRuntimeMatchesGoModule`, which blocks all other npm updates in that group until someone drops the runtime bump;
    - in the **server**, the group PR would silently pair runtime 3.1.0 with Go v3.0.0.
 
    Conditional Tasks 1b / S1b add `ignore: @wailsio/runtime` (a CI-config change). Approve them or decline them. If declined, the group PRs need a manual revert of that line each time.
-2. **Go-ahead to execute** and to push and open both PRs. Execution is not authorised yet.
-3. **The optional release `workflow_dispatch`** on the branch (Task 7 Step 6) and the **first `wails-check` dispatch** after each merge (manual items 6 and 13). Both are outward-facing; the dispatch may create a real issue.
+2. **Resolved 2026-10-28: approved.** **Go-ahead to execute** and to push and open both PRs.
+3. **Resolved 2026-10-28 for the branch dispatches (see the Execution record); the post-merge `wails-check` dispatch still needs a fresh go-ahead.** **The optional release `workflow_dispatch`** on the branch (Task 7 Step 6) and the **first `wails-check` dispatch** after each merge (manual items 6 and 13). Both are outward-facing; the dispatch may create a real issue.
 4. **If a `v3.0.x` appears before execution** (R1), the user decides whether to retarget.
