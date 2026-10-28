@@ -94,7 +94,6 @@ func TestServeSetNContinuesPastHelloFailure(t *testing.T) {
 	}
 }
 
-
 // newJoinFailRunner builds a Runner against a real headless server whose
 // voice endpoint is a HELLO-dropping proxy.
 func newJoinFailRunner(t *testing.T, drop func(int) bool) *Runner {
