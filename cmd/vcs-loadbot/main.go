@@ -6,12 +6,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/loadgen"
@@ -182,7 +184,8 @@ func reflectCmd(ctx context.Context, listen string, senders int, in io.Reader, o
 		cancel()
 	}()
 	err = <-served
-	writeJSON(out, map[string]any{"type": "reflector_stats", "send_errors": r.SendErrors(), "senders": senders})
+	writeJSON(out, map[string]any{"type": "reflector_stats", "send_errors": r.SendErrors(),
+		"queue_full_drops": r.QueueFullDrops(), "write_errors": r.WriteErrors(), "senders": senders})
 	if err != nil {
 		fmt.Fprintf(errw, "vcs-loadbot: reflector: %v\n", err)
 		return 1
@@ -224,20 +227,44 @@ func calibrateCmd(ctx context.Context, refl, stepsCSV string, holdS float64, see
 		fmt.Fprintf(errw, "vcs-loadbot: --bounds: %v\n", err)
 		return 2
 	}
-	steps, capy, err := loadgen.Calibrate(ctx, refl, al, seed, ns, time.Duration(holdS*float64(time.Second)), loadgen.WithBounds(b))
-	for _, s := range steps {
-		writeJSON(out, map[string]any{
-			"type": "calibration", "n": s.N, "egress_pps": s.EgressPPS,
-			"valid": s.Valid, "violations": s.Violations,
-			"health": loadgen.NewHealthReport(s.Health), "bounds": loadgen.NewBoundsReport(b),
-			"label": loadgen.ReportLabel, "payload": loadgen.PayloadLabel,
+	var mu sync.Mutex // the step hook and the progress goroutine share out
+	emit := func(v any) {
+		mu.Lock()
+		defer mu.Unlock()
+		writeJSON(out, v)
+	}
+	br, bo := loadgen.NewBoundsReport(b), loadgen.ReportLabel
+	steps, capy, err := loadgen.Calibrate(ctx, refl, al, seed, ns, time.Duration(holdS*float64(time.Second)),
+		loadgen.WithBounds(b),
+		loadgen.WithProgress(5*time.Second, func(p loadgen.ProgressLine) { emit(p) }),
+		loadgen.WithStepHook(func(s loadgen.CalStep) {
+			emit(map[string]any{
+				"type": "calibration", "n": s.N, "bots": s.Bots,
+				"egress_pps": s.EgressPPS, "expected_pps": s.ExpectedPPS,
+				"valid": s.Valid, "violations": s.Violations,
+				"hello_tries_max": s.HelloTriesMax, "hello_retried": s.HelloRetried,
+				"health": loadgen.NewHealthReport(s.Health), "bounds": br,
+				"label": bo, "payload": loadgen.PayloadLabel,
+			})
+		}))
+	var stop *loadgen.CalStoppedError
+	if errors.As(err, &stop) {
+		emit(map[string]any{
+			"type": "calibration_stopped", "n": stop.N, "bots": stop.Bots,
+			"stage": stop.Stage, "bot": stop.Bot, "tries": stop.Tries,
+			"reason": stop.Err.Error(),
 		})
+		if len(steps) == 0 {
+			fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
+			return 1
+		}
+		err = nil // the completed steps are the result
 	}
 	if err != nil {
 		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
 		return 1
 	}
-	writeJSON(out, map[string]any{
+	emit(map[string]any{
 		"type": "receive_capacity", "pps": capy.PPS, "lower_bound": capy.LowerBound,
 		"label": loadgen.ReportLabel,
 	})

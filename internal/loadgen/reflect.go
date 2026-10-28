@@ -68,7 +68,10 @@ type reflJob struct {
 type Reflector struct {
 	conn    *net.UDPConn
 	senders int
-	sendErr atomic.Uint64
+	// jobDepth is each sender's queue depth (default 4096); tests lower it.
+	jobDepth  int
+	queueFull atomic.Uint64 // destinations skipped because a sender queue was full
+	writeErr  atomic.Uint64 // failed WriteToUDPAddrPort calls
 
 	mu    sync.Mutex
 	peers atomic.Pointer[[]reflPeer] // copy-on-write snapshot
@@ -90,7 +93,7 @@ func NewReflector(addr string, senders int) (*Reflector, error) {
 	}
 	_ = c.SetReadBuffer(4 << 20)
 	_ = c.SetWriteBuffer(4 << 20)
-	r := &Reflector{conn: c, senders: senders}
+	r := &Reflector{conn: c, senders: senders, jobDepth: 4096}
 	empty := []reflPeer{}
 	r.peers.Store(&empty)
 	return r, nil
@@ -99,8 +102,15 @@ func NewReflector(addr string, senders int) (*Reflector, error) {
 // Addr is the bound host:port.
 func (r *Reflector) Addr() string { return r.conn.LocalAddr().String() }
 
-// SendErrors counts failed fan-out writes.
-func (r *Reflector) SendErrors() uint64 { return r.sendErr.Load() }
+// SendErrors is every destination the reflector failed to serve:
+// QueueFullDrops() + WriteErrors().
+func (r *Reflector) SendErrors() uint64 { return r.queueFull.Load() + r.writeErr.Load() }
+
+// QueueFullDrops counts destinations skipped because a sender queue was full.
+func (r *Reflector) QueueFullDrops() uint64 { return r.queueFull.Load() }
+
+// WriteErrors counts failed WriteToUDPAddrPort calls.
+func (r *Reflector) WriteErrors() uint64 { return r.writeErr.Load() }
 
 func (r *Reflector) register(id uuid.UUID, ap netip.AddrPort) {
 	r.mu.Lock()
@@ -126,7 +136,7 @@ func (r *Reflector) Serve(ctx context.Context) error {
 	jobs := make([]chan reflJob, r.senders)
 	var wg sync.WaitGroup
 	for i := range jobs {
-		jobs[i] = make(chan reflJob, 4096)
+		jobs[i] = make(chan reflJob, r.jobDepth)
 		wg.Add(1)
 		go func(ch chan reflJob) {
 			defer wg.Done()
@@ -136,7 +146,7 @@ func (r *Reflector) Serve(ctx context.Context) error {
 						continue
 					}
 					if _, err := r.conn.WriteToUDPAddrPort(j.pkt, p.ap); err != nil {
-						r.sendErr.Add(1)
+						r.writeErr.Add(1)
 					}
 				}
 			}
@@ -177,12 +187,12 @@ func (r *Reflector) Serve(ctx context.Context) error {
 			r.register(p.SenderID, from)
 			ack := &voice.Packet{Type: voice.PacketTypeHelloAck, SenderID: p.SenderID}
 			if _, err := r.conn.WriteToUDPAddrPort(ack.AppendTo(nil), from); err != nil {
-				r.sendErr.Add(1)
+				r.writeErr.Add(1)
 			}
 		case voice.PacketTypeKeepalive:
 			ack := voice.NewKeepalive(p.SenderID, time.Now().UnixNano())
 			if _, err := r.conn.WriteToUDPAddrPort(ack.AppendTo(nil), from); err != nil {
-				r.sendErr.Add(1)
+				r.writeErr.Add(1)
 			}
 		case voice.PacketTypeVoice:
 			peers := *r.peers.Load()
@@ -194,7 +204,7 @@ func (r *Reflector) Serve(ctx context.Context) error {
 				select {
 				case jobs[i] <- reflJob{pkt: pkt, peers: peers[rg[0]:rg[1]], from: p.SenderID}:
 				default:
-					r.sendErr.Add(uint64(rg[1] - rg[0])) // queue full: reflector-side loss
+					r.queueFull.Add(uint64(rg[1] - rg[0])) // queue full: reflector-side loss
 				}
 			}
 		}
