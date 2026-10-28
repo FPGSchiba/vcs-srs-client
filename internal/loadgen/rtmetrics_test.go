@@ -49,6 +49,6 @@ func TestDeltaQuantileOutOfRangeQ(t *testing.T) {
 		}
 	}
 	if got := DeltaQuantile(before, after, -1); got != time.Millisecond {
-		t.Fatalf("q=-1: got %v, want 1ms (lowest populated bucket)", got)
+		t.Fatalf("q=-1: got %v, want 1ms (lowest bucket)", got)
 	}
 }

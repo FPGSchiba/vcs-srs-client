@@ -67,6 +67,9 @@ func DeltaQuantile(before, after metrics.Float64Histogram, q float64) time.Durat
 	if math.IsNaN(q) || q > 1 {
 		q = 1
 	}
+	if q < 0 {
+		q = 0
+	}
 	rank := uint64(math.Ceil(q * float64(total)))
 	if rank < 1 {
 		rank = 1
