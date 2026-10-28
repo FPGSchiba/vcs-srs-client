@@ -238,21 +238,21 @@ func calibrateCmd(ctx context.Context, refl, stepsCSV string, holdS float64, see
 		loadgen.WithBounds(b),
 		loadgen.WithProgress(5*time.Second, func(p loadgen.ProgressLine) { emit(p) }),
 		loadgen.WithStepHook(func(s loadgen.CalStep) {
-			emit(map[string]any{
-				"type": "calibration", "n": s.N, "bots": s.Bots,
-				"egress_pps": s.EgressPPS, "expected_pps": s.ExpectedPPS,
-				"valid": s.Valid, "violations": s.Violations,
-				"hello_tries_max": s.HelloTriesMax, "hello_retried": s.HelloRetried,
-				"health": loadgen.NewHealthReport(s.Health), "bounds": br,
-				"label": bo, "payload": loadgen.PayloadLabel,
+			emit(calibrationLine{
+				Type: "calibration", N: s.N, Bots: s.Bots,
+				EgressPPS: s.EgressPPS, ExpectedPPS: s.ExpectedPPS,
+				Valid: s.Valid, Violations: s.Violations,
+				HelloTriesMax: s.HelloTriesMax, HelloRetried: s.HelloRetried,
+				Health: loadgen.NewHealthReport(s.Health), Bounds: br,
+				Label: bo, Payload: loadgen.PayloadLabel,
 			})
 		}))
 	var stop *loadgen.CalStoppedError
 	if errors.As(err, &stop) {
-		emit(map[string]any{
-			"type": "calibration_stopped", "n": stop.N, "bots": stop.Bots,
-			"stage": stop.Stage, "bot": stop.Bot, "tries": stop.Tries,
-			"reason": stop.Err.Error(),
+		emit(calibrationStoppedLine{
+			Type: "calibration_stopped", N: stop.N, Bots: stop.Bots,
+			Stage: stop.Stage, Bot: stop.Bot, Tries: stop.Tries,
+			Reason: stop.Err.Error(),
 		})
 		if len(steps) == 0 {
 			fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
@@ -264,11 +264,47 @@ func calibrateCmd(ctx context.Context, refl, stepsCSV string, holdS float64, see
 		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
 		return 1
 	}
-	emit(map[string]any{
-		"type": "receive_capacity", "pps": capy.PPS, "lower_bound": capy.LowerBound,
-		"label": loadgen.ReportLabel,
+	emit(receiveCapacityLine{
+		Type: "receive_capacity", PPS: capy.PPS, LowerBound: capy.LowerBound,
+		Label: loadgen.ReportLabel,
 	})
 	return 0
+}
+
+// The calibration lines are structs, not maps, so "type" leads every line
+// (encoding/json would sort a map's keys alphabetically) and a raw Actions
+// log reads like the I-7 fixture. Tests compare key sets, not order.
+type calibrationLine struct {
+	Type          string               `json:"type"`
+	N             int                  `json:"n"`
+	Bots          int                  `json:"bots"`
+	EgressPPS     float64              `json:"egress_pps"`
+	ExpectedPPS   float64              `json:"expected_pps"`
+	Valid         bool                 `json:"valid"`
+	Violations    []string             `json:"violations"`
+	HelloTriesMax int                  `json:"hello_tries_max"`
+	HelloRetried  int                  `json:"hello_retried"`
+	Health        loadgen.HealthReport `json:"health"`
+	Bounds        loadgen.BoundsReport `json:"bounds"`
+	Label         string               `json:"label"`
+	Payload       string               `json:"payload"`
+}
+
+type calibrationStoppedLine struct {
+	Type   string `json:"type"`
+	N      int    `json:"n"`
+	Bots   int    `json:"bots"`
+	Stage  string `json:"stage"`
+	Bot    int    `json:"bot"`
+	Tries  int    `json:"tries"`
+	Reason string `json:"reason"`
+}
+
+type receiveCapacityLine struct {
+	Type       string  `json:"type"`
+	PPS        float64 `json:"pps"`
+	LowerBound bool    `json:"lower_bound"`
+	Label      string  `json:"label"`
 }
 
 func writeJSON(w io.Writer, v any) {
