@@ -20,6 +20,8 @@ var DefaultHelloLadder = []time.Duration{
 	6000 * time.Millisecond, 7500 * time.Millisecond,
 }
 
+const recvErrBackoff = 10 * time.Millisecond
+
 // FastHelloStep is the step of the fast ladder used to measure secret
 // propagation (design §4.3).
 const FastHelloStep = 100 * time.Millisecond
@@ -47,6 +49,9 @@ type VoiceConn struct {
 	RTT            *Hist // keepalive round trip
 	Drops          atomic.Uint32
 	Unstamped      atomic.Uint64
+	// KeepaliveLost counts probes whose ack never came within KeepaliveEvery.
+	KeepaliveLost atomic.Uint64
+	RecvErrors    atomic.Uint64 // non-close socket read errors
 
 	conn *net.UDPConn
 
@@ -60,6 +65,8 @@ type VoiceConn struct {
 	lastEcho atomic.Int64 // server timestamp to echo next
 	wg       sync.WaitGroup
 	closed   atomic.Bool
+	done     chan struct{} // closed by Close
+	watcher  sync.WaitGroup
 }
 
 // DialVoice opens a connected UDP socket to addr with receive stamping.
@@ -80,7 +87,7 @@ func DialVoice(addr string, id uuid.UUID) (*VoiceConn, error) {
 	return &VoiceConn{
 		ID: id, KeepaliveEvery: 5 * time.Second,
 		RxLag: &Hist{}, RTT: &Hist{},
-		conn: c, ledgers: map[ledgerKey]*RecvLedger{},
+		done: make(chan struct{}), conn: c, ledgers: map[ledgerKey]*RecvLedger{},
 	}, nil
 }
 
@@ -152,9 +159,14 @@ func (v *VoiceConn) Start(ctx context.Context) {
 	v.wg.Add(2)
 	go v.recvLoop()
 	go v.keepaliveLoop(ctx)
+	v.watcher.Add(1)
 	go func() {
-		<-ctx.Done()
-		v.Close()
+		defer v.watcher.Done()
+		select {
+		case <-ctx.Done():
+			v.Close()
+		case <-v.done:
+		}
 	}()
 }
 
@@ -169,7 +181,15 @@ func (v *VoiceConn) recvLoop() {
 			if v.closed.Load() || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			continue // e.g. ICMP-induced ECONNREFUSED on a connected socket
+			// e.g. ICMP-induced ECONNREFUSED on a connected socket; back off
+			// so a persistent error cannot spin a core.
+			v.RecvErrors.Add(1)
+			select {
+			case <-v.done:
+				return
+			case <-time.After(recvErrBackoff):
+			}
+			continue
 		}
 		if st.DropsSeen {
 			v.Drops.Store(st.Drops)
@@ -222,8 +242,15 @@ func (v *VoiceConn) keepaliveLoop(ctx context.Context) {
 			if v.closed.Load() {
 				return
 			}
-			if v.sentAt.Load() != 0 {
-				continue // one outstanding at a time
+			if s := v.sentAt.Load(); s != 0 {
+				if time.Since(time.Unix(0, s)) < every {
+					continue // one outstanding at a time
+				}
+				// Probe or ack lost: count it and move on, or the bot would
+				// go silent and be reaped by the server.
+				if v.sentAt.CompareAndSwap(s, 0) {
+					v.KeepaliveLost.Add(1)
+				}
 			}
 			pkt := voice.NewKeepalive(v.ID, v.lastEcho.Load()).AppendTo(nil)
 			v.sentAt.Store(time.Now().UnixNano())
@@ -251,6 +278,7 @@ func (v *VoiceConn) Close() {
 	if v.closed.Swap(true) {
 		return
 	}
+	close(v.done)
 	_ = v.conn.Close()
 	v.wg.Wait()
 }

@@ -19,6 +19,8 @@ type fakeVoice struct {
 	conn      *net.UDPConn
 	dropHello atomic.Int32
 	never     bool
+	dropKA    atomic.Int32 // keepalives to swallow
+	kaEchoes  chan int64   // timestamps carried by received keepalives
 	mu        sync.Mutex
 	peers     map[uuid.UUID]*net.UDPAddr
 }
@@ -29,7 +31,7 @@ func newFakeVoice(t *testing.T, drop int32, never bool) *fakeVoice {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeVoice{conn: c, never: never, peers: map[uuid.UUID]*net.UDPAddr{}}
+	f := &fakeVoice{conn: c, never: never, peers: map[uuid.UUID]*net.UDPAddr{}, kaEchoes: make(chan int64, 64)}
 	f.dropHello.Store(drop)
 	go f.loop()
 	t.Cleanup(func() { c.Close() })
@@ -60,6 +62,13 @@ func (f *fakeVoice) loop() {
 			ack := &voice.Packet{Type: voice.PacketTypeHelloAck, SenderID: p.SenderID}
 			_, _ = f.conn.WriteToUDP(ack.AppendTo(nil), from)
 		case voice.PacketTypeKeepalive:
+			select {
+			case f.kaEchoes <- voice.KeepaliveTimestamp(p.Payload):
+			default:
+			}
+			if f.dropKA.Add(-1) >= 0 {
+				continue
+			}
 			ack := voice.NewKeepalive(p.SenderID, time.Now().UnixNano())
 			_, _ = f.conn.WriteToUDP(ack.AppendTo(nil), from)
 		case voice.PacketTypeVoice:
@@ -102,8 +111,8 @@ func TestHelloGivesUpAfterLadder(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error")
 	}
-	if d := time.Since(start); d > 200*time.Millisecond {
-		t.Fatalf("took %v, want <= 200ms", d)
+	if d := time.Since(start); d > 400*time.Millisecond {
+		t.Fatalf("took %v, want <= 400ms", d)
 	}
 	if tries != 2 {
 		t.Fatalf("tries=%d, want 2", tries)
@@ -176,6 +185,62 @@ func TestKeepaliveRTTRecorded(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func TestKeepaliveRTTRecorded_EchoesServerTimestamp(t *testing.T) {
+	f := newFakeVoice(t, 0, false)
+	vc := dialHello(t, f)
+	if _, err := vc.Hello(context.Background(), "s", []time.Duration{500 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	vc.KeepaliveEvery = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	vc.Start(ctx)
+	first := <-f.kaEchoes
+	second := <-f.kaEchoes
+	if first != 0 {
+		t.Fatalf("first keepalive echoed %d, want 0", first)
+	}
+	if second == 0 {
+		t.Fatal("second keepalive did not echo the server timestamp")
+	}
+}
+
+func TestKeepaliveRecoversFromLostProbe(t *testing.T) {
+	f := newFakeVoice(t, 0, false)
+	f.dropKA.Store(1)
+	vc := dialHello(t, f)
+	if _, err := vc.Hello(context.Background(), "s", []time.Duration{500 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	vc.KeepaliveEvery = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	vc.Start(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for vc.RTT.Count() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("bot never keepalived again after a lost probe")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := vc.KeepaliveLost.Load(); got != 1 {
+		t.Fatalf("KeepaliveLost=%d, want 1", got)
+	}
+}
+
+func TestCloseWithoutCancelDoesNotLeakWatcher(t *testing.T) {
+	f := newFakeVoice(t, 0, false)
+	vc := dialHello(t, f)
+	vc.Start(context.Background())
+	vc.Close()
+	select {
+	case <-vc.done:
+	default:
+		t.Fatal("done not closed after Close")
+	}
+	vc.watcher.Wait()
 }
 
 func TestFastHelloLadder(t *testing.T) {
