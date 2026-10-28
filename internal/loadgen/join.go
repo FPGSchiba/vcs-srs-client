@@ -78,6 +78,14 @@ func (j *Joiner) ackTimeout() time.Duration {
 	return DefaultAckTimeout
 }
 
+// count increments the current phase's slot of c; a nil counter set is a no-op
+// (like Phase, the counters are optional).
+func (j *Joiner) count(c *PhaseCounter) {
+	if c != nil {
+		c[j.phase()].Add(1)
+	}
+}
+
 func (j *Joiner) phase() Phase {
 	if j.Phase == nil {
 		return PhaseRamp
@@ -183,6 +191,14 @@ func (j *Joiner) Join(ctx context.Context, name, coalition string, full bool) (*
 // the bot.
 func (j *Joiner) receive(ctx context.Context, bot *ControlBot, st *state.Store, stream srspb.SRSService_SubscribeToUpdatesClient, full bool) {
 	defer close(bot.done)
+	// Cancel for the current resync stream (nil for the initial one, which
+	// Close ends through ctx).
+	var streamCancel context.CancelFunc
+	defer func() {
+		if streamCancel != nil {
+			streamCancel()
+		}
+	}()
 	for {
 		var err error
 		if full {
@@ -200,9 +216,12 @@ func (j *Joiner) receive(ctx context.Context, bot *ControlBot, st *state.Store, 
 			bot.setErr(err)
 			return
 		}
-		j.ResourceExhausted[j.phase()].Add(1)
+		j.count(j.ResourceExhausted)
 
-		next, rerr := bot.cc.Subscribe(ctx)
+		// A per-stream context so a failed resync releases the new stream
+		// instead of holding a server-side subscriber until Close.
+		nctx, ncancel := context.WithCancel(ctx)
+		next, rerr := bot.cc.Subscribe(nctx)
 		if rerr == nil {
 			rerr = j.awaitHeader(ctx, next)
 		}
@@ -212,12 +231,17 @@ func (j *Joiner) receive(ctx context.Context, bot *ControlBot, st *state.Store, 
 			cancel()
 		}
 		if rerr != nil {
+			ncancel()
 			if ctx.Err() == nil && !bot.closing.Load() {
 				bot.setErr(fmt.Errorf("resync: %w", rerr))
 			}
 			return
 		}
-		j.Resyncs[j.phase()].Add(1)
+		j.count(j.Resyncs)
+		if streamCancel != nil {
+			streamCancel()
+		}
+		streamCancel = ncancel
 		stream = next
 	}
 }
