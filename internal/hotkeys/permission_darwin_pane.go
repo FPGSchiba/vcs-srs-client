@@ -65,9 +65,12 @@ func openAccessibilityPane() error {
 	return nil
 }
 
+// openBinary is an absolute path so the lookup never goes through PATH (Sonar S4036).
+const openBinary = "/usr/bin/open"
+
 // openPane is the one-line indirection the tests substitute. Without it the
 // only way to assert that a checker actually ATTEMPTS the deep link is to run
 // it, which would pop System Settings open on whoever ran `go test`; with it,
 // a test can prove the URL that would be dispatched. Never reassigned outside
 // a test.
-var openPane = func(url string) error { return exec.Command("open", url).Run() }
+var openPane = func(url string) error { return exec.Command(openBinary, url).Run() }

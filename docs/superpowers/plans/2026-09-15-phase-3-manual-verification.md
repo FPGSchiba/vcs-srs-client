@@ -449,6 +449,26 @@ The automated suite and CI cannot show them. Design:
 
 ---
 
+### 15. Security alerts — Phase 6.9 SEC design §8
+
+Phase 6.9 SEC bumped client x/net to v0.62.0, made the integration fixture
+UDP-probe its voice port, added a blocking govulncheck step, and ran the Test
+workflow's npm ci with --ignore-scripts. The automated suite cannot show the
+items below. Each is marked **user** (only the user can do it) or
+**after merge** (checkable once the PRs have merged). Design:
+`docs/superpowers/specs/2026-10-28-phase-6-9-sec-security-alerts-design.md` §8.
+
+1. **[after merge]** **After the server PR merges:** Dependabot shows 0 open Go alerts on the server (#38, #93, #118, #120, #121, #15, #23, #67 auto-close) and #2 closes (Q3 = A, decided).
+2. **[user]** **SonarCloud (user, after the next analysis):** re-mark S8545 safe (client 4 incl. any new govulncheck `go run` lines; server 2); mark S2068 safe; exclude `design/**` or mark the 6 S2819 safe; confirm S4036, S6505, S6506 resolved; review S7637/S6471 per Q4.
+3. **[user]** **Secret scanning (user):** check both repos with a suitably scoped login.
+4. **[user]** **Real server, real client:** connect the client to the bumped server over TLS on a non-loopback host (`internal/session/dial.go`), log in as guest, open a voice channel; then kick the client. Confirms grpc v1.85.0 against a real network path, not only the loopback integration suite.
+5. **[user]** **C# peer (when PR #253's voice-secret blocker is resolved):** guest login with its cost-12 hash succeeds against the capped server.
+6. **[after merge]** **Client Windows CI:** the integration leg passes on at least five consecutive Windows runs with no `forbidden by its access permissions` bind error.
+7. **[not applicable: Q4 = A marked S6471 safe and kept the image as root]** **Docker image (only if Q4 takes S6471):** the image starts as UID 65532; the mounted banned-clients file and log folder are writable; port 80 binds; **`/certs` is writable by UID 65532** (`docker-compose.dev.yml:38` mounts `./dev/certs:/certs` writable, and the server generates its key pair and VoiceControl certificate there on first start, `dev/config/control.yaml:38-39,47-48`). This is the likeliest non-root breakage.
+8. **[after merge]** **Dependabot, x/net (Q6 = A):** after both PRs merge, no x/net alert opens once the two GHSAs are reviewed.
+
+---
+
 ## Known, already-documented gaps this checklist is not meant to "fail" on
 
 These are pre-existing, understood limitations — running the checklist above

@@ -255,6 +255,15 @@ jobs:
           mkdir -p frontend/dist
           echo '<!doctype html><title>ci</title>' > frontend/dist/index.html
 
+      # Blocking (Phase 6.9 SEC D5): any reachable advisory fails the leg.
+      # On all three legs on purpose: govulncheck analyses only the host GOOS,
+      # so one leg would silently skip the darwin- and windows-tagged code.
+      # After buf generate and the dist placeholder, which the packages need
+      # to load. Sonar S8545 does not apply: go run checks the module against
+      # sum.golang.org (see the protoc-gen-go-grpc note above).
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -tags purego ./...
+
       # -tags purego selects github.com/robotn/gohook's pure-Go backends,
       # which is what makes global hotkeys pass through to the focused
       # application instead of being consumed. It must be on EVERY Go
@@ -341,7 +350,7 @@ jobs:
 
       - name: Install frontend deps
         working-directory: frontend
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Frontend tests
         working-directory: frontend

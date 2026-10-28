@@ -177,6 +177,25 @@ Requires agreement with the C# peer before either side implements it.
 
 ---
 
+## 12. Server-side cap on the guest password hash cost
+
+**Where it shows up:** `GuestLogin`.
+
+**Today:** The server (Phase 6.9 SEC) rejects a password hash whose bcrypt cost
+exceeds 12, or that does not parse, with `Success:false` and
+`Invalid password hash ...`. It does this to bound a remote CPU-exhaustion
+vector.
+
+**Client requirement:** The Go client hashes at `bcrypt.DefaultCost` (10),
+guarded by `TestGuestHashCostWithinServerCap`. The C# peer uses 12
+(PR #253 head, `VcsClientSyncHandler.cs:140`, unmerged).
+
+**Suggested proto change:** None. A `max_bcrypt_cost` field in the auth-init
+response would let clients adapt to the server's cap. Recorded as an option
+only.
+
+---
+
 ## How to use this document
 
 When the server team wants to extend `srs.proto`, this list is the priority queue. Each item also pairs with a client commit that swaps the local fallback for the wire-backed implementation; those commits should bump the `ClientCapabilities.version` so the server can degrade gracefully for older clients.
