@@ -11,7 +11,7 @@
 
 **Tech Stack:** Go 1.27.3, Wails v3.0.0, `@wailsio/runtime` 3.0.0, buf v1.47.2 (client), protoc 36.2 and gqlgen in-module (server), React 19, TypeScript 7, Vitest, bash (3.2-safe), jq, `gh`, GitHub Actions.
 
-**Spec:** the approved design, scratchpad `design-UP.md` (status: approved 2026-10-28, with D1–D7 and U1–U7). Client Task 6 commits it as `docs/superpowers/specs/2026-10-28-phase-6-9-up-wails-ga-upgrade-design.md`. Executors read §3 (the change table), §5 (plan shape), §6 (gates) and §9 (manual list). Umbrella: client `docs/superpowers/specs/2026-10-27-vcs-client-phase-6-9-cleanup-umbrella-design.md:240`.
+**Spec:** the approved design, `docs/superpowers/specs/2026-10-28-phase-6-9-up-wails-ga-upgrade-design.md` (status: approved 2026-10-28, with D1–D7 and U1–U7). During execution it was the session-scratchpad file `design-UP.md`; client Task 6 committed it at the path above. Executors read §3 (the change table), §5 (plan shape), §6 (gates) and §9 (manual list). Umbrella: client `docs/superpowers/specs/2026-10-27-vcs-client-phase-6-9-cleanup-umbrella-design.md:240`.
 
 **Planning bases:** client `origin/main` `e7c7c30`, server `origin/main` `09f9180`. All `file:line` citations are against these SHAs.
 
@@ -20,7 +20,7 @@
 - The user's answers settle "Needs the user" items 1–3:
   - the Dependabot `ignore` for `@wailsio/runtime` ("Yes, ignore it"), so conditional Task 1b ran;
   - execution;
-  - one branch dispatch each of `release.yml` and `wails-check.yml`, during the PR step.
+  - one branch dispatch each of `release.yml` and `wails-check.yml`, during the PR step. This widens the plan's original "first `wails-check` dispatch after merge" (the approvals table and checklist §14 item 6). GitHub only accepts a `workflow_dispatch` for a workflow file that already exists on the default branch, and `wails-check.yml` is new in this PR, so the branch dispatch of it is expected to be refused before merge. Task 7 must report that refusal verbatim and must not work around it (for example with a temporary `push` trigger, which would be CI beyond the plan). The first real `wails-check` run is then checklist §14 item 6, after merge, which needs a fresh go-ahead from the user. The `release.yml` branch dispatch is unaffected: that workflow already exists on `main`.
 - Review findings were fixed in follow-up commits on the branch (`git log origin/main..chore/cleanup-up`).
 - The client manual items are in `docs/superpowers/plans/2026-09-15-phase-3-manual-verification.md` §14. None of them has been run on real hardware.
 
@@ -120,7 +120,7 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 bash .github/scripts/assert-go-toolchain_test.sh && bash .github/scripts/go-deps-update_test.sh
 ```
 
-`$S` is the scratchpad directory. The generate block is `.github/actions/generate/action.yml:57-77`.
+`$S` is the session scratchpad directory of the executing agent. It is temporary and is not in the repo, so every `$S/...` path in this plan records the execution-time environment and cannot be followed later. The generate block is `.github/actions/generate/action.yml:57-77`.
 
 Pass means:
 - generate exits 0; build and vet print nothing; the cross-build exits 0; 10 packages are `ok`;

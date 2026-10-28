@@ -397,7 +397,7 @@ platform backends.
    under every row. Seeing no inline notes there is correct, not a
    regression.
 
-### 14. Wails v3.0.0 GA (Phase 6.9 UP)
+### 14. Wails v3.0.0 GA — Phase 6.9 UP design §9
 
 Phase 6.9 UP moved the client from Wails `v3.0.0-beta.22` to `v3.0.0` GA,
 with `@wailsio/runtime` pinned to exactly `3.0.0`. It changed no Go or TS
@@ -413,9 +413,11 @@ The automated suite and CI cannot show them. Design:
    - Click **Show VCS** and **Settings**. **Expected:** each one shows and
      focuses the main window (`internal/app/tray.go:32-33`, `:51-58`).
    - Click **Quit**. **Expected:** `ServiceShutdown`
-     (`internal/app/app.go:301`) runs, the hotkey stream closes cleanly, the
-     process exits without a hang, and there is no race with the signal
-     handler.
+     (`internal/app/app.go:301`) runs: the log shows "App service shutting
+     down" once, and the process exits within a few seconds without a hang.
+     If the client was started from a terminal, repeat while pressing Ctrl-C
+     at the same moment as Quit. **Expected:** the same single log line and
+     a clean exit.
 2. **Linux tray** (behaviour change, design §3 #5):
    - Right-click the icon. **Expected:** only the menu opens. The main window
      must **not** toggle. Before GA it did.
@@ -427,7 +429,7 @@ The automated suite and CI cannot show them. Design:
    **Expected:** it hides and the app does not quit (`main.go:379-384`).
 4. **Multi-window:** open main, comms and notifications. Focus, resize and
    move each one, then restart. **Expected:** every window restores its saved
-   geometry (`internal/app/windows_wails.go:38-52`).
+   geometry (`internal/app/windows_wails.go:38-53`).
 5. **Release artefacts**, from a tagged run or a dispatched `release.yml`:
    - the NSIS installer installs and launches;
    - the AppImage launches on **Fedora or Arch** as well as on Ubuntu. Before

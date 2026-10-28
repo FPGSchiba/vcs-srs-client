@@ -264,6 +264,9 @@ No change to protoc/buf/gqlgen pins, to the client's pinned server checkout (`te
 ## 9. Manual verification (real hardware, webview or packaging only)
 
 **Client** (add to `docs/superpowers/plans/2026-09-15-phase-3-manual-verification.md`, which is itself still unrun):
+
+> Note (added when this design was committed): this section is kept as the approved text. Some of its line references are stale (for example `tray.go:52-58`, `windows_wails.go:39-52`). The authoritative, corrected references are in that checklist's §14.
+
 1. Windows: right-click the tray icon → menu opens (it never did on beta.22). Repeat with the icon in the overflow (`^`) flyout. Show VCS and Settings work (`tray.go:52-58`). **Quit** runs `ServiceShutdown` (`app.go:301`) and the hotkey stream closes cleanly (no hang, no race with the signal handler).
 2. Linux: right-click opens the menu **only**; the main window does not toggle. Left-click still toggles (`tray.go:37,62-73`). The tooltip still does nothing on Linux at 3.0.0 (expected).
 3. Close-to-tray: closing the main window hides it, not quits (`main.go:379-384`).
