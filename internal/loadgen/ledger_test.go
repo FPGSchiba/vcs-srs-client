@@ -92,3 +92,47 @@ func TestUnwrap24(t *testing.T) {
 		}
 	}
 }
+
+func TestRecvLedgerOutOfRangeIgnoredAndCounted(t *testing.T) {
+	const base = 0xFFFFF0
+	l := NewRecvLedger(base, 32)
+	l.Mark(base & 0xFFFFFF)
+	l.Mark((base + 1) & 0xFFFFFF)
+	before := l.Result()
+	// 0x000020 unwraps to base+48 (past the end); 0xFFFFE0 is below base.
+	for _, s := range []uint32{0x000020, 0xFFFFE0} {
+		if dup, re := l.Mark(s); dup || re {
+			t.Fatalf("seq %#x: dup=%v reordered=%v", s, dup, re)
+		}
+	}
+	after := l.Result()
+	if after.Unique != before.Unique || after.Dups != before.Dups || after.Reordered != before.Reordered {
+		t.Fatalf("out-of-range changed counters: before %+v after %+v", before, after)
+	}
+	if after.OutOfRange != 2 {
+		t.Fatalf("OutOfRange=%d want 2", after.OutOfRange)
+	}
+}
+
+func TestRecvLedgerLateFrameAfterWrap(t *testing.T) {
+	const base = 0xFFFFF0
+	l := NewRecvLedger(base, 32)
+	for i := 0; i < 32; i++ {
+		if i == 10 { // 0xFFFFFA, delivered late
+			continue
+		}
+		l.Mark(uint32((base + i) & 0xFFFFFF))
+	}
+	// Highest seen is 0x1000000+0xF; the late frame is across the wrap.
+	if dup, re := l.Mark(uint32((base + 10) & 0xFFFFFF)); dup || !re {
+		t.Fatalf("late frame: dup=%v reordered=%v", dup, re)
+	}
+	// A duplicate across the wrap is a dup, never also reordered.
+	if dup, re := l.Mark(0x000002); !dup || re {
+		t.Fatalf("dup across wrap: dup=%v reordered=%v", dup, re)
+	}
+	r := l.Result()
+	if r.Lost != 0 || r.Reordered != 1 || r.Dups != 1 || r.Unique != 32 || r.OutOfRange != 0 {
+		t.Fatalf("got %+v", r)
+	}
+}

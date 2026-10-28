@@ -30,20 +30,22 @@ func absDiff(a, b uint64) uint64 {
 // LedgerResult summarises one (receiver, sender, freq) stream.
 type LedgerResult struct {
 	Expected, Unique, Lost, Dups, Reordered uint64
-	Bursts                                  []int // lengths of runs of consecutive lost frames
+	OutOfRange                              uint64 // arrivals outside [base, base+n), ignored by the other counters
+	Bursts                                  []int  // lengths of runs of consecutive lost frames
 }
 
 // RecvLedger tracks which of [base, base+n) sequence numbers arrived.
 // Not safe for concurrent use; one per stream, owned by its receive loop.
 type RecvLedger struct {
-	base      uint64
-	n         int
-	bits      []uint64
-	highest   uint64
-	seen      bool
-	unique    uint64
-	dups      uint64
-	reordered uint64
+	base       uint64
+	n          int
+	bits       []uint64
+	highest    uint64
+	seen       bool
+	unique     uint64
+	dups       uint64
+	reordered  uint64
+	outOfRange uint64
 }
 
 func NewRecvLedger(base uint64, n int) *RecvLedger {
@@ -55,10 +57,13 @@ func NewRecvLedger(base uint64, n int) *RecvLedger {
 
 // Mark records an arrival of the 24-bit wire sequence. dup reports a repeat;
 // reordered reports a first arrival below the highest seen (never set with
-// dup). Sequences outside [base, base+n) are ignored.
+// dup). Sequences outside [base, base+n) are counted in OutOfRange and
+// otherwise ignored. Unwrapping is relative to the highest sequence seen, so
+// it assumes n is far below 2^23.
 func (l *RecvLedger) Mark(seq24 uint32) (dup, reordered bool) {
 	u := unwrap24(l.highest, seq24)
 	if u < l.base || u-l.base >= uint64(l.n) {
+		l.outOfRange++
 		return false, false
 	}
 	i := u - l.base
@@ -79,7 +84,7 @@ func (l *RecvLedger) Mark(seq24 uint32) (dup, reordered bool) {
 
 func (l *RecvLedger) Result() LedgerResult {
 	r := LedgerResult{Expected: uint64(l.n), Unique: l.unique, Lost: uint64(l.n) - l.unique,
-		Dups: l.dups, Reordered: l.reordered}
+		Dups: l.dups, Reordered: l.reordered, OutOfRange: l.outOfRange}
 	run := 0
 	for i := 0; i < l.n; i++ {
 		if l.bits[i/64]&(1<<(uint(i)%64)) == 0 {
