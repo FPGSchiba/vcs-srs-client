@@ -42,11 +42,12 @@ jobs:
           repository: FPGSchiba/vcs-srs-server
           # Pinned, not `main`: client CI must not go red because the server
           # moved. Bump this SHA deliberately in the PR that needs newer server
-          # behaviour. Currently server `main` after #230 (SV2, including the
-          # C17 subscription ack), which Phase 6.9 CL1's subscribe-first
-          # Connect/Reconnect/resync is coded against; #229 (SV3, SV5, SV1:
-          # session liveness) is below it.
-          ref: 850d984e186099d13acd6066f40ceb22ed2f7760
+          # behaviour. Currently server `main` after #233 (Phase 6.9 SEC: grpc
+          # v1.85.0, quic-go v0.64.1, x/net v0.62.0, bcrypt cost cap 12), so the
+          # integration suite runs against the patched server. #230 (SV2,
+          # including the C17 subscription ack that CL1's subscribe-first
+          # Connect/Reconnect/resync is coded against) is below it.
+          ref: a650a4413070582f0788ca3cc7ce3a2dd8121f30
           path: .vcs-srs-server
 
       # TWO TOOLCHAINS IN ONE JOB. The server is generated and built with the
