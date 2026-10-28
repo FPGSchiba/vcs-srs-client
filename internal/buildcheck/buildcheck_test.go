@@ -204,7 +204,14 @@ func readWindowsInfo(t *testing.T) map[string]string {
 	if err := json.Unmarshal([]byte(readRepoFile(t, "build/windows/info.json")), &wi); err != nil {
 		t.Fatalf("parse build/windows/info.json: %v", err)
 	}
-	return wi.Info["0000"]
+	if _, ok := wi.Info["0000"]; ok {
+		t.Errorf("info.json still has a \"0000\" block: use \"0409\" (en-US) only (Wails #6210, U6)")
+	}
+	block, ok := wi.Info["0409"]
+	if !ok {
+		t.Fatalf("info.json has no \"0409\" (en-US) block: Explorer's Details tab shows nothing for \"0000\" (Wails #6210, U6)")
+	}
+	return block
 }
 
 // CI-07: the Windows metadata files are rendered from build/config.yml, not
