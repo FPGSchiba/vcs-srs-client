@@ -82,6 +82,23 @@ func TestAccessibilityPaneURL(t *testing.T) {
 	}
 }
 
+// TestOpenPaneUsesAbsoluteBinary pins the absolute path to open(1) (Sonar
+// S4036: a bare "open" is resolved through PATH). This is a compile-level
+// guard only. It runs on the macOS CI leg; the nocgo test file is
+// darwin && !cgo and does not run there.
+func TestOpenPaneUsesAbsoluteBinary(t *testing.T) {
+	if openBinary != "/usr/bin/open" {
+		t.Errorf("openBinary = %q, want %q", openBinary, "/usr/bin/open")
+	}
+	src := strings.ReplaceAll(readSource(t, "permission_darwin_pane.go"), "\r\n", "\n")
+	if !strings.Contains(src, "exec.Command(openBinary, url)") {
+		t.Error("openPane must call exec.Command(openBinary, url)")
+	}
+	if strings.Contains(src, `exec.Command("open"`) {
+		t.Error("openPane must not resolve open through PATH")
+	}
+}
+
 // TestDarwinPermissionStatusIsBinary: Status() must commit to granted or
 // denied. PermissionUnknown exists only as the zero value of Permission, and
 // leaking it from the darwin checker would make the frontend render the
