@@ -83,7 +83,7 @@ func TestAccessibilityPaneURL(t *testing.T) {
 }
 
 // TestOpenPaneUsesAbsoluteBinary pins the absolute path to open(1) (Sonar
-// S4036: a bare "open" is resolved through PATH). This is a compile-level
+// S4036: a bare "open" is resolved through PATH). This is a source-text
 // guard only. It runs on the macOS CI leg; the nocgo test file is
 // darwin && !cgo and does not run there.
 func TestOpenPaneUsesAbsoluteBinary(t *testing.T) {
