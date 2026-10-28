@@ -803,9 +803,28 @@ func TestWailsCheckWorkflowShape(t *testing.T) {
 			t.Errorf("%s must not contain %q", wf, bad)
 		}
 	}
+	// The top level grants contents: read only; issues: write belongs to the
+	// job. TestWorkflowsLeastPrivilege's prefix match alone would also accept
+	// a top-level block that goes on to grant issues: write.
+	jobsAt := strings.Index(text, "\njobs:\n")
+	if jobsAt < 0 {
+		t.Fatalf("%s: no top-level jobs: key", wf)
+	}
+	head, body := text[:jobsAt], text[jobsAt:]
+	if !regexp.MustCompile(`(?m)^permissions:\n  contents: read\n(\n|[^ \n])`).MatchString(head) {
+		t.Errorf("%s: the top-level permissions block must be exactly `contents: read`", wf)
+	}
+	if regexp.MustCompile(`(?m)^[^#\n]*:\s*write\b`).MatchString(head) {
+		t.Errorf("%s: a write permission appears above jobs:; it belongs to the job only", wf)
+	}
+	if !strings.Contains(body, "\n      issues: write\n") {
+		t.Errorf("%s: the check job must grant issues: write", wf)
+	}
+	// The only action is one checkout. Its version is left to Dependabot's
+	// gha-deps group, so it is not pinned here.
 	uses := usesRe.FindAllStringSubmatch(text, -1)
-	if len(uses) == 0 {
-		t.Errorf("%s: no checkout step", wf)
+	if len(uses) != 1 {
+		t.Errorf("%s: %d uses: steps; want exactly one (actions/checkout)", wf, len(uses))
 	}
 	for _, m := range uses {
 		if target := strings.Trim(m[1], `"'`); !strings.HasPrefix(target, "actions/checkout@") {

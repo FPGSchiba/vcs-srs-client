@@ -6,8 +6,8 @@ name: Wails release check
 # one PR (U5; go-deps.yml excludes it via GO_DEPS_EXCLUDE).
 #
 # Token: only this workflow's own GITHUB_TOKEN (issues: write), no secret.
-# Security source: the wailsapp/wails repository-advisory API, because neither
-# the Go vuln DB nor the global advisory DB carries Wails' v3 advisories.
+# Security source: the wailsapp/wails repository-advisory API.
+# Why: neither the Go vuln DB nor the global advisory DB carries Wails' v3 advisories.
 # The logic lives in the portable .github/scripts/wails-update-check.sh,
 # shared verbatim with the server repo.
 
