@@ -5,8 +5,9 @@
 #
 # `curl` and `gh` are stubbed on PATH. Each case lives in its own directory
 # ($FIX), which holds the go.mod / frontend/package.json under test and the
-# stubs' inputs (proxy-list, npm.json, advisories.json, open-issue) and
-# outputs (gh-calls, gh-argv, body).
+# stubs' inputs (proxy-list, npm.json, advisories.json, open-issue, and the
+# curl-fail / curl-fail-npm / gh-api-fail switches) and outputs (gh-calls,
+# gh-argv, curl-argv, body).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,18 +32,21 @@ has() { # haystack, needle -> yes|no
 
 mkdir -p "$tmp/bin"
 
-# curl: dispatch on the URL (the last argument).
+# curl: dispatch on the URL (the last argument); every argv goes to curl-argv.
+# curl-fail fails every fetch, curl-fail-npm only the npm one.
 cat > "$tmp/bin/curl" <<'STUB'
 #!/usr/bin/env bash
+printf '%s
+' "$*" >> "$FIX/curl-argv"
 url=""
 for a in "$@"; do url="$a"; done
-if [ -e "$FIX/curl-fail" ]; then
-  echo "curl: (22) The requested URL returned error: 503" >&2
-  exit 22
-fi
+fail503() { echo "curl: (22) The requested URL returned error: 503" >&2; exit 22; }
+if [ -e "$FIX/curl-fail" ]; then fail503; fi
 case "$url" in
   https://proxy.golang.org/github.com/wailsapp/wails/v3/@v/list) cat "$FIX/proxy-list" ;;
-  https://registry.npmjs.org/@wailsio%2Fruntime) cat "$FIX/npm.json" ;;
+  https://registry.npmjs.org/@wailsio%2Fruntime)
+    if [ -e "$FIX/curl-fail-npm" ]; then fail503; fi
+    cat "$FIX/npm.json" ;;
   *) echo "curl stub: unexpected URL $url" >&2; exit 99 ;;
 esac
 STUB
@@ -116,6 +120,7 @@ mkcase() { # name, go version, npm spec, proxy list (space-separated), npm lates
   cp "$tmp/advisories.json" "$c/advisories.json"
   : > "$c/gh-calls"
   : > "$c/gh-argv"
+  : > "$c/curl-argv"
 }
 
 # run name [args...]: sets out, err, rc, calls, body.
@@ -156,6 +161,11 @@ argv="$(tr -d '\r' < "$tmp/client-beta22-opens/gh-argv")"
 check "client-beta22-opens: lists open labelled issues of the repo" "$(has "$argv" 'issue list --repo o/r --label wails-update --state open')" yes
 check "client-beta22-opens: label colour and description" "$(has "$argv" 'label create wails-update --repo o/r --force --color FBCA04 --description A newer Wails release is available')" yes
 check "client-beta22-opens: issue carries the label" "$(has "$argv" 'issue create --repo o/r --label wails-update')" yes
+curl_argv="$(tr -d '' < "$tmp/client-beta22-opens/curl-argv")"
+check "client-beta22-opens: two fetches" "$(printf '%s
+' "$curl_argv" | grep -c .)" 2
+check "client-beta22-opens: every fetch is https-only, TLS 1.2+"   "$(printf '%s
+' "$curl_argv" | grep -c -- '--proto =https --tlsv1.2')" 2
 
 # --- server-alpha43-five -----------------------------------------------------
 mkcase server-alpha43-five v3.0.0-alpha.43 '^3.0.0-beta.34' "v3.0.0-alpha.43 $beta22_list" 3.0.0
@@ -197,6 +207,7 @@ run semver-numeric
 check "semver-numeric: exit" "$rc" 0
 check "semver-numeric: gh calls" "$calls" "$(printf 'label create\nissue create title=Wails v3.10.0 available')"
 check "semver-numeric: Security: no" "$(has "$body" 'Security: no')" yes
+check "semver-numeric: go row (numeric max of the proxy list)" "$(has "$body" '| Go module `github.com/wailsapp/wails/v3` | `v3.9.0` → `v3.10.0` |')" yes
 
 # --- npm-only-behind ---------------------------------------------------------
 mkcase npm-only-behind v3.1.0 3.0.0 "v3.0.0 v3.1.0" 3.1.0
@@ -220,6 +231,7 @@ touch "$tmp/proxy-fetch-fails/curl-fail"
 run proxy-fetch-fails
 check "proxy-fetch-fails: non-zero exit" "$([ "$rc" -ne 0 ] && echo yes || echo no)" yes
 check "proxy-fetch-fails: gh calls" "$calls" ""
+check "proxy-fetch-fails: stderr" "$(has "$err" 'could not fetch the Go module proxy version list')" yes
 
 # --- missing-require ---------------------------------------------------------
 mkcase missing-require v3.0.0 3.0.0 "v3.0.0" 3.0.0
@@ -228,6 +240,60 @@ run missing-require
 check "missing-require: non-zero exit" "$([ "$rc" -ne 0 ] && echo yes || echo no)" yes
 check "missing-require: stderr" "$(has "$err" 'github.com/wailsapp/wails/v3 not found in go.mod')" yes
 check "missing-require: gh calls" "$calls" ""
+
+# --- advisory-beyond-latest --------------------------------------------------
+# Patched only above the latest release: the update does not fix it.
+mkcase advisory-beyond-latest v3.0.0 3.0.0 "v3.0.0 v3.1.0" 3.1.0
+cat > "$tmp/advisory-beyond-latest/advisories.json" <<'JSON'
+[{"ghsa_id":"GHSA-test-beyo-ndla","html_url":"https://example.invalid/a","severity":"high","vulnerabilities":[{"package":{"ecosystem":"go","name":"github.com/wailsapp/wails/v3"},"vulnerable_version_range":"< 3.2.0","patched_versions":"3.2.0"}]}]
+JSON
+run advisory-beyond-latest
+check "advisory-beyond-latest: exit" "$rc" 0
+check "advisory-beyond-latest: Security: no" "$(has "$body" 'Security: no')" yes
+check "advisory-beyond-latest: omits GHSA-test-beyo-ndla" "$(has "$body" GHSA-test-beyo-ndla)" no
+
+# --- advisory-unparsable -----------------------------------------------------
+# No version in patched_versions: the rule cannot be applied.
+mkcase advisory-unparsable v3.0.0 3.0.0 "v3.0.0 v3.1.0" 3.1.0
+cat > "$tmp/advisory-unparsable/advisories.json" <<'JSON'
+[{"ghsa_id":"GHSA-test-unpa-rsed","html_url":"https://example.invalid/b","severity":"high","vulnerabilities":[{"package":{"ecosystem":"npm","name":"@wailsio/runtime"},"vulnerable_version_range":"< 3.1.0","patched_versions":null}]}]
+JSON
+run advisory-unparsable
+check "advisory-unparsable: exit" "$rc" 0
+check "advisory-unparsable: Security: unknown" "$(has "$body" 'Security: unknown')" yes
+check "advisory-unparsable: could-not-be-evaluated line" "$(has "$body" 'Could not be evaluated (no version in patched_versions): GHSA-test-unpa-rsed')" yes
+
+# --- npm-latest-prerelease-ignored -------------------------------------------
+mkcase npm-latest-prerelease-ignored v3.0.0 3.0.0 "v3.0.0" 3.1.0-beta.1
+run npm-latest-prerelease-ignored
+check "npm-latest-prerelease-ignored: exit" "$rc" 0
+check "npm-latest-prerelease-ignored: gh calls" "$calls" ""
+check "npm-latest-prerelease-ignored: message" "$(has "$out" 'Wails is up to date (go v3.0.0, npm 3.0.0).')" yes
+
+# --- npm-latest-not-plain ----------------------------------------------------
+mkcase npm-latest-not-plain v3.0.0 3.0.0 "v3.0.0" '3.1.0+build.5'
+run npm-latest-not-plain
+check "npm-latest-not-plain: non-zero exit" "$([ "$rc" -ne 0 ] && echo yes || echo no)" yes
+check "npm-latest-not-plain: stderr" "$(has "$err" 'npm latest dist-tag for @wailsio/runtime is not a plain version: 3.1.0+build.5')" yes
+check "npm-latest-not-plain: gh calls" "$calls" ""
+
+# --- npm-fetch-fails ---------------------------------------------------------
+mkcase npm-fetch-fails v3.0.0-beta.22 '^3.0.0-beta.34' "$beta22_list" 3.0.0
+touch "$tmp/npm-fetch-fails/curl-fail-npm"
+run npm-fetch-fails
+check "npm-fetch-fails: non-zero exit" "$([ "$rc" -ne 0 ] && echo yes || echo no)" yes
+check "npm-fetch-fails: stderr" "$(has "$err" 'could not fetch @wailsio/runtime from the npm registry')" yes
+check "npm-fetch-fails: gh calls" "$calls" ""
+
+# --- npm-spec-not-plain ------------------------------------------------------
+for spec in latest '>=3'; do
+  mkcase npm-spec-not-plain v3.0.0 "$spec" "v3.0.0" 3.0.0
+  run npm-spec-not-plain
+  check "npm-spec-not-plain ($spec): non-zero exit" "$([ "$rc" -ne 0 ] && echo yes || echo no)" yes
+  check "npm-spec-not-plain ($spec): stderr" "$(has "$err" "@wailsio/runtime in frontend/package.json is not a plain version: $spec")" yes
+  check "npm-spec-not-plain ($spec): gh calls" "$calls" ""
+  rm -rf "$tmp/npm-spec-not-plain"
+done
 
 # --- dry-run -----------------------------------------------------------------
 mkcase dry-run v3.0.0-beta.22 '^3.0.0-beta.34' "$beta22_list" 3.0.0

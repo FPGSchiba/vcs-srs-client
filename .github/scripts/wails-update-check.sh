@@ -88,6 +88,8 @@ npm_latest="$(jq -r '."dist-tags".latest // empty' < "$work/npm.json" | tr -d '\
 case "$npm_latest" in
   *-*) npm_latest="$npm_current" ;; # a pre-release on `latest` is not a release
 esac
+# It ends up in the issue title, body and suggested commands: plain versions only.
+[[ "$npm_latest" =~ $plain_re ]] || die "npm latest dist-tag for $npm_pkg is not a plain version: $npm_latest"
 
 # --- advisories (best effort) ------------------------------------------------
 if gh api "repos/wailsapp/wails/security-advisories?state=published&per_page=100" > "$work/advisories.json" 2> "$work/gh-api.err" \
