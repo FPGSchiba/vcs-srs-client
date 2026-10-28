@@ -67,6 +67,21 @@ type ControlBot struct {
 	err error
 }
 
+// countingStream counts every update a full bot receives, so Counts is
+// complete whichever consumer path the bot takes.
+type countingStream struct {
+	srspb.SRSService_SubscribeToUpdatesClient
+	c *UpdateCounts
+}
+
+func (s countingStream) Recv() (*srspb.ServerUpdate, error) {
+	u, err := s.SRSService_SubscribeToUpdatesClient.Recv()
+	if err == nil {
+		s.c.add(u.GetType())
+	}
+	return u, err
+}
+
 type noopEmitter struct{}
 
 func (noopEmitter) Emit(string, any) {}
@@ -202,7 +217,7 @@ func (j *Joiner) receive(ctx context.Context, bot *ControlBot, st *state.Store, 
 	for {
 		var err error
 		if full {
-			err = bot.cc.Consume(stream, st, noopEmitter{})
+			err = bot.cc.Consume(countingStream{stream, bot.Counts}, st, noopEmitter{})
 		} else {
 			err = Drain(stream.Recv, bot.Counts)
 		}

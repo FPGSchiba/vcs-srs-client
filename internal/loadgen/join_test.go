@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
+	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
 
 func newTestJoiner(t *testing.T, f *grpctest.Fake) *Joiner {
@@ -70,6 +71,14 @@ func TestJoinFullKeepsStoreAndCounts(t *testing.T) {
 	defer bot.Close(context.Background())
 	if bot.Store == nil {
 		t.Fatal("full bot must keep a store")
+	}
+	f.PushUpdate(&srspb.ServerUpdate{Type: srspb.ServerUpdate_CLIENT_JOINED})
+	deadline := time.Now().Add(2 * time.Second)
+	for bot.Counts.Get(srspb.ServerUpdate_CLIENT_JOINED) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := bot.Counts.Get(srspb.ServerUpdate_CLIENT_JOINED); got != 1 {
+		t.Fatalf("full bot CLIENT_JOINED count = %d, want 1", got)
 	}
 }
 
