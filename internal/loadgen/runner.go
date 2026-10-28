@@ -335,6 +335,10 @@ func (r *Runner) joinOne(ctx context.Context, i int, full bool) (*runnerBot, err
 
 // startTalker sends SyntheticFrame at 50 fps on an absolute schedule: tick k
 // is due at t0 + k*20ms, never an accumulating ticker.
+// After a stall the loop does not skip or reschedule: it sends the missed
+// frames back to back (open loop), and the lag is recorded against each due
+// time, so no coordinated omission. The burst can distort loss and burst
+// figures; the D14 self-health set exists to flag such a stall.
 func (r *Runner) startTalker(b *runnerBot) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.talkCancel = cancel
