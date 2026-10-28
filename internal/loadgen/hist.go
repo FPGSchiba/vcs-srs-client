@@ -17,6 +17,10 @@ const (
 // digits). Index 0 is underflow (< 1 µs), the last index is overflow
 // (>= 10 s). The zero value is ready to use. Buckets are plain uint64
 // accessed atomically so that Snapshot can return a value copy.
+//
+// Alignment: on 32-bit platforms 64-bit atomics require 8-byte alignment, so
+// when embedding a Hist in another struct keep it as the first field. The
+// load bot targets 64-bit only.
 type Hist struct {
 	b [histBuckets]uint64
 }
@@ -69,12 +73,23 @@ func (h *Hist) Count() uint64 {
 	return n
 }
 
+// Overflow returns the number of observations at or above 10 s. Quantile
+// reports those as exactly 10 s, so a 10 s quantile with Overflow() > 0 is
+// saturated, not a measurement.
+func (h *Hist) Overflow() uint64 {
+	return atomic.LoadUint64(&h.b[histOverflow])
+}
+
 // Quantile returns the upper bound of the bucket holding rank ceil(q*count).
-// An empty histogram returns 0.
+// An empty histogram returns 0. NaN and q <= 0 select the first observation;
+// q > 1 selects the last. Observations >= 10 s saturate at 10 s (see Overflow).
 func (h *Hist) Quantile(q float64) time.Duration {
 	total := h.Count()
 	if total == 0 {
 		return 0
+	}
+	if math.IsNaN(q) || q <= 0 {
+		q = 0
 	}
 	rank := uint64(math.Ceil(q * float64(total)))
 	if rank < 1 {
