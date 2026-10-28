@@ -50,6 +50,9 @@ const (
 	// ready before failing the test outright, so a hung or crashed server
 	// fails fast with its log attached rather than hanging the whole suite.
 	readyTimeout = 20 * time.Second
+
+	// startAttempts bounds how often Start retries after a server bind error.
+	startAttempts = 3
 )
 
 // Server describes one running vcs-srs-server fixture instance: everything
@@ -91,12 +94,16 @@ func RequireServer(t *testing.T) string {
 // control and voice listeners to come up, and registers cleanup that kills
 // the process and -- on test failure -- dumps its combined stdout/stderr log.
 //
-// Every port is allocated dynamically (bound briefly as TCP, then released)
-// rather than hardcoded: a hardcoded port collides with any other instance
-// left running on the same machine -- including, concretely, a previous
-// manual verification run left resident on this very box while this fixture
-// was being built -- and CI runners execute jobs from more than one
-// workflow on the same host.
+// Every port is allocated dynamically (bound briefly, then released) rather
+// than hardcoded: a hardcoded port collides with any other instance left
+// running on the same machine -- including, concretely, a previous manual
+// verification run left resident on this very box while this fixture was
+// being built -- and CI runners execute jobs from more than one workflow on
+// the same host. The voice port is probed as UDP (it is a UDP listener)
+// because Windows keeps separate TCP and UDP excluded port ranges, so a port
+// that is free as TCP can still be reserved for UDP. The gap between releasing
+// a port and the server binding it is inherent, so a startup that fails with
+// a bind error is retried with fresh ports, up to startAttempts times.
 func Start(t *testing.T) *Server {
 	t.Helper()
 	bin := RequireServer(t)
@@ -104,64 +111,90 @@ func Start(t *testing.T) *Server {
 
 	genKeys(t, dir)
 
-	httpPort := freePort(t)
-	voicePort := freePort(t)
-	controlPort := freePort(t)
-
-	cfgPath := filepath.Join(dir, "config.yaml")
-	writeConfig(t, cfgPath, dir, httpPort, voicePort, controlPort)
-
-	bannedPath := filepath.Join(dir, "banned_clients.json")
-	if err := os.WriteFile(bannedPath, []byte("[]"), 0o644); err != nil {
-		t.Fatalf("testdata: write banned clients file: %v", err)
-	}
-
-	logDir := filepath.Join(dir, "log")
-	logPath := filepath.Join(dir, "server-output.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("testdata: create server log file: %v", err)
-	}
-
-	cmd := exec.Command(bin,
-		"--mode", "standalone",
-		"--autostart",
-		"--config", cfgPath,
-		"--banned", bannedPath,
-		"--log-folder", logDir,
-	)
-	// Stdout and Stderr are the SAME writer, which os/exec documents as safe
-	// for concurrent use by the two streams -- a separate io.Writer per
-	// stream would need its own synchronization instead.
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-
-	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		t.Fatalf("testdata: start %s: %v", bin, err)
-	}
-
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	for n := 1; ; n++ {
+		attemptDir := filepath.Join(dir, fmt.Sprintf("attempt-%d", n))
+		if err := os.MkdirAll(attemptDir, 0o755); err != nil {
+			t.Fatalf("testdata: create attempt dir: %v", err)
 		}
-		_ = cmd.Wait()
-		if t.Failed() {
-			data, _ := os.ReadFile(logPath)
-			t.Logf("vcs-srs-server output (pid %d):\n%s", cmd.Process.Pid, data)
+
+		httpPort := freePort(t)
+		voicePort := FreeUDPPort(t)
+		controlPort := freePort(t)
+
+		cfgPath := filepath.Join(attemptDir, "config.yaml")
+		writeConfig(t, cfgPath, dir, httpPort, voicePort, controlPort)
+
+		bannedPath := filepath.Join(attemptDir, "banned_clients.json")
+		if err := os.WriteFile(bannedPath, []byte("[]"), 0o644); err != nil {
+			t.Fatalf("testdata: write banned clients file: %v", err)
 		}
-		logFile.Close()
-	})
 
-	waitReady(t, logPath)
+		logDir := filepath.Join(attemptDir, "log")
+		logPath := filepath.Join(attemptDir, "server-output.log")
+		logFile, err := os.Create(logPath)
+		if err != nil {
+			t.Fatalf("testdata: create server log file: %v", err)
+		}
 
-	return &Server{
-		ControlAddr: fmt.Sprintf("127.0.0.1:%d", controlPort),
-		VoiceHost:   "127.0.0.1",
-		VoicePort:   voicePort,
-		Coalition:   CoalitionName,
-		Password:    CoalitionPassword,
-		logPath:     logPath,
+		cmd := exec.Command(bin,
+			"--mode", "standalone",
+			"--autostart",
+			"--config", cfgPath,
+			"--banned", bannedPath,
+			"--log-folder", logDir,
+		)
+		// Stdout and Stderr are the SAME writer, which os/exec documents as safe
+		// for concurrent use by the two streams -- a separate io.Writer per
+		// stream would need its own synchronization instead.
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+
+		if err := cmd.Start(); err != nil {
+			logFile.Close()
+			t.Fatalf("testdata: start %s: %v", bin, err)
+		}
+
+		stop := func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+		}
+		var cleaned bool
+		t.Cleanup(func() {
+			if !cleaned {
+				stop()
+			}
+			if t.Failed() {
+				data, _ := os.ReadFile(logPath)
+				t.Logf("vcs-srs-server output (pid %d):\n%s", cmd.Process.Pid, data)
+			}
+			logFile.Close()
+		})
+
+		out, ready := waitReady(logPath)
+		if ready {
+			return &Server{
+				ControlAddr: fmt.Sprintf("127.0.0.1:%d", controlPort),
+				VoiceHost:   "127.0.0.1",
+				VoicePort:   voicePort,
+				Coalition:   CoalitionName,
+				Password:    CoalitionPassword,
+				logPath:     logPath,
+			}
+		}
+
+		if IsBindError(out) && n < startAttempts {
+			stop()
+			cleaned = true
+			t.Logf("vcs-srs-server bind error on attempt %d/%d; retrying with fresh ports:\n%s", n, startAttempts, out)
+			continue
+		}
+
+		if strings.Contains(out, "level=ERROR") {
+			t.Fatalf("vcs-srs-server reported an error before becoming ready:\n%s", out)
+		}
+		t.Fatalf("vcs-srs-server did not report both listeners ready within %s; log:\n%s", readyTimeout, out)
 	}
 }
 
@@ -192,6 +225,34 @@ func freePort(t *testing.T) int {
 	}
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+// FreeUDPPort asks the OS for an unused UDP port on 127.0.0.1 by binding to
+// port 0 and releasing it. Windows keeps excluded port ranges per protocol, so
+// a UDP listener must be probed as UDP, not TCP.
+func FreeUDPPort(t *testing.T) int {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("testdata: allocate free UDP port: %v", err)
+	}
+	defer c.Close()
+	return c.LocalAddr().(*net.UDPAddr).Port
+}
+
+// IsBindError reports whether a server log shows a socket bind failure (a
+// reserved or already-used port), the only startup failure Start retries.
+func IsBindError(log string) bool {
+	for _, m := range []string{
+		"forbidden by its access permissions",
+		"Only one usage of each socket address",
+		"address already in use",
+	} {
+		if strings.Contains(log, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // genKeys writes an ECDSA P-256 keypair PEM-encoded exactly the way the
@@ -293,22 +354,22 @@ api:
 
 // waitReady polls the server's combined log for the two lines that mark both
 // listeners up (confirmed verbatim against a real run: "Starting VCS gRPC
-// server" and "Voice server started"), failing fast -- with the log attached
-// -- on an explicit startup error rather than waiting out the full timeout.
-func waitReady(t *testing.T, logPath string) {
-	t.Helper()
+// server" and "Voice server started"). It returns (log, false) as soon as an
+// explicit startup error appears, or at readyTimeout, so the caller decides
+// whether to retry or fail.
+func waitReady(logPath string) (out string, ready bool) {
 	deadline := time.Now().Add(readyTimeout)
 	for time.Now().Before(deadline) {
 		data, _ := os.ReadFile(logPath)
-		out := string(data)
+		out = string(data)
 		if strings.Contains(out, "Starting VCS gRPC server") && strings.Contains(out, "Voice server started") {
-			return
+			return out, true
 		}
 		if strings.Contains(out, "level=ERROR") {
-			t.Fatalf("vcs-srs-server reported an error before becoming ready:\n%s", out)
+			return out, false
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	data, _ := os.ReadFile(logPath)
-	t.Fatalf("vcs-srs-server did not report both listeners ready within %s; log:\n%s", readyTimeout, data)
+	return string(data), false
 }
