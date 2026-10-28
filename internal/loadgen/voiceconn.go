@@ -238,6 +238,8 @@ func (v *VoiceConn) keepaliveLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-v.done:
+			return
 		case <-t.C:
 			if v.closed.Load() {
 				return

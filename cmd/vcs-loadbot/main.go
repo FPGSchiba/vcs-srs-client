@@ -3,12 +3,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/loadgen"
 )
@@ -46,6 +50,10 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 	unit := fs.String("unit", "LDBT", "unit label")
 	seed := fs.Int64("seed", 0, "seed")
 	bounds := fs.String("bounds", "", "JSON overrides for the generator self-health bounds")
+	listen := fs.String("listen", "127.0.0.1:0", "reflect: loopback address to listen on (port 0 = ephemeral)")
+	senders := fs.Int("senders", 2, "reflect: sender goroutines on the one socket (>= 2)")
+	steps := fs.String("steps", "64,128,256,512", "calibrate: ascending bot counts")
+	hold := fs.Float64("hold", 3, "calibrate: seconds per step")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -71,9 +79,20 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 		}
 	}
 
-	if sub != "run" {
-		fmt.Fprintf(errw, "vcs-loadbot %s: not implemented\n", sub)
-		return 1
+	switch sub {
+	case "reflect":
+		// The listen port may be 0, so it cannot be an allow-list entry; it
+		// must still be a loopback IP literal.
+		if l, err := loadgen.ParseAllow(*listen); err != nil || len(l) != 1 {
+			if err == nil {
+				err = loadgen.ErrNotLoopback
+			}
+			fmt.Fprintf(errw, "vcs-loadbot: --listen refused: %v\n", err)
+			return 2
+		}
+		return reflectCmd(ctx, *listen, *senders, in, out, errw)
+	case "calibrate":
+		return calibrateCmd(ctx, *vals["reflector"], *steps, *hold, *seed, *bounds, al, out, errw)
 	}
 	return runCmd(ctx, runOpts{
 		scenario: *scenario, arm: *arm, control: *vals["control"], voice: *vals["voice"],
@@ -136,4 +155,96 @@ func runCmd(ctx context.Context, o runOpts, in io.Reader, out, errw io.Writer) i
 		return 1
 	}
 	return 0
+}
+
+// reflectCmd runs the calibration reflector until stdin EOF, {"quit":true}
+// or ctx is done. Its first stdout line is {"type":"ready","addr":...}; its
+// last is a stats line carrying the send-error count, which the kit combines
+// with the calibration result (the two run in different processes).
+func reflectCmd(ctx context.Context, listen string, senders int, in io.Reader, out, errw io.Writer) int {
+	r, err := loadgen.NewReflector(listen, senders)
+	if err != nil {
+		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
+		return 1
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- r.Serve(rctx) }()
+	writeJSON(out, map[string]any{"type": "ready", "addr": r.Addr()})
+	go func() {
+		sc := bufio.NewScanner(in)
+		for sc.Scan() {
+			if c, err := loadgen.ParseCommand(sc.Bytes()); err == nil && c.Quit {
+				break
+			}
+		}
+		cancel()
+	}()
+	err = <-served
+	writeJSON(out, map[string]any{"type": "reflector_stats", "send_errors": r.SendErrors(), "senders": senders})
+	if err != nil {
+		fmt.Fprintf(errw, "vcs-loadbot: reflector: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func parseSteps(csv string) ([]int, error) {
+	var ns []int
+	for _, e := range strings.Split(csv, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(e))
+		if err != nil || n < 2 {
+			return nil, fmt.Errorf("--steps: %q is not an integer >= 2", e)
+		}
+		if len(ns) > 0 && n <= ns[len(ns)-1] {
+			return nil, fmt.Errorf("--steps: %d is not ascending", n)
+		}
+		ns = append(ns, n)
+	}
+	return ns, nil
+}
+
+func calibrateCmd(ctx context.Context, refl, stepsCSV string, holdS float64, seed int64, boundsJSON string, al loadgen.AllowList, out, errw io.Writer) int {
+	if refl == "" {
+		fmt.Fprintln(errw, "vcs-loadbot: calibrate needs --reflector")
+		return 2
+	}
+	ns, err := parseSteps(stepsCSV)
+	if err != nil {
+		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
+		return 2
+	}
+	if !(holdS > 0) {
+		fmt.Fprintln(errw, "vcs-loadbot: --hold must be > 0")
+		return 2
+	}
+	b, err := loadgen.ParseBounds(boundsJSON)
+	if err != nil {
+		fmt.Fprintf(errw, "vcs-loadbot: --bounds: %v\n", err)
+		return 2
+	}
+	steps, capy, err := loadgen.Calibrate(ctx, refl, al, seed, ns, time.Duration(holdS*float64(time.Second)), loadgen.WithBounds(b))
+	for _, s := range steps {
+		writeJSON(out, map[string]any{
+			"type": "calibration", "n": s.N, "egress_pps": s.EgressPPS,
+			"valid": s.Valid, "violations": s.Violations,
+			"health": loadgen.NewHealthReport(s.Health), "bounds": loadgen.NewBoundsReport(b),
+			"label": loadgen.ReportLabel, "payload": loadgen.PayloadLabel,
+		})
+	}
+	if err != nil {
+		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
+		return 1
+	}
+	writeJSON(out, map[string]any{
+		"type": "receive_capacity", "pps": capy.PPS, "lower_bound": capy.LowerBound,
+		"label": loadgen.ReportLabel,
+	})
+	return 0
+}
+
+func writeJSON(w io.Writer, v any) {
+	b, _ := json.Marshal(v)
+	_, _ = w.Write(append(b, '\n'))
 }
