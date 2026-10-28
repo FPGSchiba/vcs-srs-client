@@ -39,3 +39,12 @@ func TestEverySubcommandChecksAddressesFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestRunRejectsPositionalArgs(t *testing.T) {
+	var out, errw bytes.Buffer
+	code := run(context.Background(), []string{"run", "--allow", "127.0.0.1:1", "10.0.0.1:1"},
+		strings.NewReader(""), &out, &errw)
+	if code != 2 || !strings.Contains(errw.String(), "unexpected argument") {
+		t.Fatalf("exit=%d stderr=%q, want 2 and \"unexpected argument\"", code, errw.String())
+	}
+}

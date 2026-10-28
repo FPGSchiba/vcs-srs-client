@@ -23,6 +23,9 @@ func TestAllowListCheck(t *testing.T) {
 		{"hostname", only2, "example.com:1", ErrNotLoopback},
 		{"wrong port", only2, "127.0.0.1:5003", ErrNotAllowed},
 		{"v6 unlisted", only2, "[::1]:5002", ErrNotAllowed},
+		{"v4-mapped v6 not equal to listed v4", only2, "[::ffff:127.0.0.1]:5002", ErrNotAllowed},
+		{"v6 loopback with zone not equal to listed", both, "[::1%eth0]:5002", ErrNotAllowed},
+		{"non-loopback v6 with zone", both, "[fe80::1%eth0]:5002", ErrNotLoopback},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
