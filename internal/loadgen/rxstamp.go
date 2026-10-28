@@ -6,7 +6,7 @@ type Stamp struct {
 	KernelNs  int64  // kernel receive time, Unix ns (valid iff Stamped)
 	Drops     uint32 // cumulative socket drops (valid iff DropsSeen)
 	Stamped   bool   // SCM_TIMESTAMPNS cmsg was present and decoded
-	DropsSeen bool   // SO_RXQ_OVFL cmsg was present; otherwise keep the last Drops
+	DropsSeen bool   // SO_RXQ_OVFL cmsg present (kernel omits it while the count is 0); else keep last Drops
 	Truncated bool   // MSG_CTRUNC: the control buffer was too small, cmsgs lost
 	ParseErr  bool   // the control buffer did not parse
 }

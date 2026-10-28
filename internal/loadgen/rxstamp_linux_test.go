@@ -48,9 +48,8 @@ func TestReadStampedLoopback(t *testing.T) {
 	if st.Truncated || st.ParseErr {
 		t.Fatalf("unexpected %+v", st)
 	}
-	if !st.DropsSeen {
-		t.Fatal("SO_RXQ_OVFL cmsg not delivered")
-	}
+	// The kernel omits the SO_RXQ_OVFL cmsg while its counter is zero, so
+	// DropsSeen is not asserted here.
 	if st.Drops != 0 {
 		t.Fatalf("drops=%d", st.Drops)
 	}
