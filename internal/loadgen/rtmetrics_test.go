@@ -39,3 +39,16 @@ func TestSampleRuntimeHasBuckets(t *testing.T) {
 		t.Fatalf("sched %d buckets, gc %d buckets", len(s.Sched.Buckets), len(s.GC.Buckets))
 	}
 }
+
+func TestDeltaQuantileOutOfRangeQ(t *testing.T) {
+	before := hist([]uint64{0, 0, 0})
+	after := hist([]uint64{5, 98, 2})
+	for _, q := range []float64{1.5, math.Inf(1), math.NaN()} {
+		if got := DeltaQuantile(before, after, q); got != 3*time.Millisecond {
+			t.Fatalf("q=%v: got %v, want 3ms (fail high, never 0)", q, got)
+		}
+	}
+	if got := DeltaQuantile(before, after, -1); got != time.Millisecond {
+		t.Fatalf("q=-1: got %v, want 1ms (lowest populated bucket)", got)
+	}
+}
