@@ -397,6 +397,56 @@ platform backends.
    under every row. Seeing no inline notes there is correct, not a
    regression.
 
+### 14. Wails v3.0.0 GA — Phase 6.9 UP design §9
+
+Phase 6.9 UP moved the client from Wails `v3.0.0-beta.22` to `v3.0.0` GA,
+with `@wailsio/runtime` pinned to exactly `3.0.0`. It changed no Go or TS
+source (design D2). These items need a real webview, tray or packaging run.
+The automated suite and CI cannot show them. Design:
+`docs/superpowers/specs/2026-10-28-phase-6-9-up-wails-ga-upgrade-design.md` §9.
+
+1. **Windows tray** (behaviour change: before GA, right-click did nothing,
+   design §3 #4):
+   - Right-click the tray icon. **Expected:** the Show VCS / Settings / Quit
+     menu opens. Move the icon into the overflow (`^`) flyout and repeat:
+     the menu must open there too.
+   - Click **Show VCS** and **Settings**. **Expected:** each one shows and
+     focuses the main window (`internal/app/tray.go:32-33`, `:51-58`).
+   - Click **Quit**. **Expected:** `ServiceShutdown`
+     (`internal/app/app.go:301`) runs: the log shows "App service shutting
+     down" once, and the process exits within a few seconds without a hang.
+     If the client was started from a terminal, repeat while pressing Ctrl-C
+     at the same moment as Quit. **Expected:** the same single log line and
+     a clean exit.
+2. **Linux tray** (behaviour change, design §3 #5):
+   - Right-click the icon. **Expected:** only the menu opens. The main window
+     must **not** toggle. Before GA it did.
+   - Left-click. **Expected:** it still toggles the main window
+     (`internal/app/tray.go:37`, `:62-73`).
+   - Hover. **Expected:** no tooltip. That is still the case at 3.0.0, so it
+     is not a regression.
+3. **Close-to-tray:** with `minimize_to_tray` on, close the main window.
+   **Expected:** it hides and the app does not quit (`main.go:379-384`).
+4. **Multi-window:** open main, comms and notifications. Focus, resize and
+   move each one, then restart. **Expected:** every window restores its saved
+   geometry (`internal/app/windows_wails.go:38-53`).
+5. **Release artefacts**, from a tagged run or a dispatched `release.yml`:
+   - the NSIS installer installs and launches;
+   - the AppImage launches on **Fedora or Arch** as well as on Ubuntu. Before
+     GA it crashed outside Debian/Ubuntu (design §3 #12);
+   - the arm64 `.app` zip launches;
+   - Explorer → Properties → Details on the `.exe` shows the product name and
+     version. This is the `0409` version-info block (U6). With the old `0000`
+     key the tab was empty (Wails #6210).
+6. **Weekly Wails check (U7), after merge.** Ask the user first, because it
+   may create an issue. Run `gh workflow run wails-check.yml`, then check:
+   - the run is green and takes under 5 minutes;
+   - if a newer stable Wails exists, exactly one open `wails-update` issue
+     appears, and its `Security:` line reads `YES` or `no`, not `unknown`.
+     `unknown` means the `GITHUB_TOKEN` advisory read was refused: record it
+     as a follow-up;
+   - a second dispatch edits the same issue and does not open a new one.
+
 ---
 
 ## Known, already-documented gaps this checklist is not meant to "fail" on

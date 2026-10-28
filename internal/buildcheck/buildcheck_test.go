@@ -3,6 +3,7 @@ package buildcheck
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -118,7 +119,11 @@ func TestCIScripts(t *testing.T) {
 			t.Skipf("%s not on PATH", tool)
 		}
 	}
-	for _, s := range []string{".github/scripts/assert-go-toolchain_test.sh", ".github/scripts/go-deps-update_test.sh"} {
+	for _, s := range []string{
+		".github/scripts/assert-go-toolchain_test.sh",
+		".github/scripts/go-deps-update_test.sh",
+		".github/scripts/wails-update-check_test.sh",
+	} {
 		cmd := exec.Command("bash", repoPath(t, s))
 		cmd.Dir = repoPath(t, ".")
 		out, err := cmd.CombinedOutput()
@@ -203,7 +208,14 @@ func readWindowsInfo(t *testing.T) map[string]string {
 	if err := json.Unmarshal([]byte(readRepoFile(t, "build/windows/info.json")), &wi); err != nil {
 		t.Fatalf("parse build/windows/info.json: %v", err)
 	}
-	return wi.Info["0000"]
+	if _, ok := wi.Info["0000"]; ok {
+		t.Errorf("info.json still has a \"0000\" block: use \"0409\" (en-US) only (Wails #6210, U6)")
+	}
+	block, ok := wi.Info["0409"]
+	if !ok {
+		t.Fatalf("info.json has no \"0409\" (en-US) block: Explorer's Details tab shows nothing for \"0000\" (Wails #6210, U6)")
+	}
+	return block
 }
 
 // CI-07: the Windows metadata files are rendered from build/config.yml, not
@@ -481,6 +493,271 @@ func TestDependabotHasNoGomod(t *testing.T) {
 	}
 }
 
+// TestDependabotIgnoresWailsRuntime: @wailsio/runtime moves only together with
+// go.mod's Wails module (TestWailsRuntimeMatchesGoModule); a Dependabot npm
+// group PR bumping it alone would break the pairing.
+func TestDependabotIgnoresWailsRuntime(t *testing.T) {
+	if err := checkDependabotIgnoresWailsRuntime(readRepoFile(t, ".github/dependabot.yml")); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCheckDependabotIgnoresWailsRuntimeFixtures(t *testing.T) {
+	const head = `version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+`
+	const gha = `
+  - package-ecosystem: github-actions
+    directory: /
+`
+	cases := []struct {
+		name string
+		yml  string
+		ok   bool
+	}{
+		{"ignored in npm block", head + `    ignore:
+      # why
+      - dependency-name: "@wailsio/runtime"
+    groups:
+      x:
+` + gha, true},
+		{"missing", head + `    groups:
+      x:
+` + gha, false},
+		{"commented out", head + `    ignore:
+      # - dependency-name: "@wailsio/runtime"
+` + gha, false},
+		{"under groups, not ignore", head + `    groups:
+      x:
+      - dependency-name: "@wailsio/runtime"
+` + gha, false},
+		{"in the github-actions block", head + gha + `    ignore:
+      - dependency-name: "@wailsio/runtime"
+`, false},
+	}
+	for _, c := range cases {
+		err := checkDependabotIgnoresWailsRuntime(c.yml)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
+// checkDependabotIgnoresWailsRuntime requires an uncommented
+// `- dependency-name: "@wailsio/runtime"` entry inside the `ignore:` list of
+// the npm update block: not commented out, not under `groups:`, and not in
+// another ecosystem's block.
+func checkDependabotIgnoresWailsRuntime(text string) error {
+	const entry = `- dependency-name: "@wailsio/runtime"`
+	indent := func(line string) int { return len(line) - len(strings.TrimLeft(line, " ")) }
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	inNpm, inIgnore, ignoreIndent := false, false, 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- package-ecosystem:") {
+			inNpm = strings.TrimSpace(strings.TrimPrefix(trimmed, "- package-ecosystem:")) == "npm"
+			inIgnore = false
+			continue
+		}
+		if !inNpm || trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if inIgnore && indent(line) <= ignoreIndent {
+			inIgnore = false
+		}
+		if trimmed == "ignore:" {
+			inIgnore, ignoreIndent = true, indent(line)
+			continue
+		}
+		if inIgnore && trimmed == entry {
+			return nil
+		}
+	}
+	return errors.New(`dependabot.yml lacks an uncommented ` + entry + ` under the npm block's ignore: list (the paired Wails runtime must not move alone)`)
+}
+
+// wailsGoVersionRe matches the Wails v3 requirement in go.mod, in either the
+// block form or a single-line `require` directive. A line carrying `=>` is a
+// replace, never a requirement.
+var wailsGoVersionRe = regexp.MustCompile(`(?m)^\s*(?:require\s+)?github\.com/wailsapp/wails/v3\s+(v[^\s=]+)\s*(?:$|//)`)
+
+// wailsReplaceRe matches a replace directive for the Wails v3 module, in the
+// single-line or block form, with or without a version on the left side.
+var wailsReplaceRe = regexp.MustCompile(`(?m)^\s*(?:replace\s+)?github\.com/wailsapp/wails/v3(?:\s+v\S+)?\s*=>`)
+
+// parseWailsGoVersion returns the Wails v3 version go.mod requires, with its
+// "v". It refuses a go.mod that replaces the module: the required version would
+// then not be the one built, and pairing npm against it would be meaningless.
+func parseWailsGoVersion(gomod string) (string, error) {
+	if wailsReplaceRe.MatchString(gomod) {
+		return "", errors.New("go.mod replaces github.com/wailsapp/wails/v3; the required version is not the one built, so the npm runtime pairing cannot be checked")
+	}
+	m := wailsGoVersionRe.FindStringSubmatch(gomod)
+	if m == nil {
+		return "", errors.New("go.mod has no github.com/wailsapp/wails/v3 requirement")
+	}
+	return m[1], nil
+}
+
+// wailsGoVersion returns go.mod's Wails v3 version, with its "v" (e.g. "v3.0.0").
+func wailsGoVersion(t *testing.T) string {
+	t.Helper()
+	v, err := parseWailsGoVersion(readRepoFile(t, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// The parser behind wailsGoVersion: it reads the required version from either
+// require form, and refuses a go.mod that replaces the Wails module, since the
+// required version would then not be the one actually built.
+func TestParseWailsGoVersion(t *testing.T) {
+	const head = "module example.com/m\n\ngo 1.25\n\n"
+	for _, tc := range []struct {
+		name, gomod, want string
+		wantErr           bool
+	}{
+		{"block require", head + "require (\n\tgithub.com/wailsapp/wails/v3 v3.0.0\n)\n", "v3.0.0", false},
+		{"single-line require", head + "require github.com/wailsapp/wails/v3 v3.0.0\n", "v3.0.0", false},
+		{"missing", head + "require golang.org/x/sys v0.1.0\n", "", true},
+		{"replace to path", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace github.com/wailsapp/wails/v3 => ../wails/v3\n", "", true},
+		{"versioned replace", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace github.com/wailsapp/wails/v3 v3.0.0 => github.com/fork/wails/v3 v3.0.1\n", "", true},
+		{"replace block", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace (\n\tgithub.com/wailsapp/wails/v3 v3.0.0 => ../wails/v3\n)\n", "", true},
+		{"unrelated replace", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace golang.org/x/sys => ../sys\n", "v3.0.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseWailsGoVersion(tc.gomod)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseWailsGoVersion err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("parseWailsGoVersion = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// UP / U1: the Wails v3.0.0 release notes require the JS runtime
+// (@wailsio/runtime) to be the same version as the Go module, so the npm
+// package is pinned exactly (no ^ or ~) to go.mod's Wails version, in both
+// package.json and the lockfile. The two only move together, by hand.
+func TestWailsRuntimeMatchesGoModule(t *testing.T) {
+	want := strings.TrimPrefix(wailsGoVersion(t), "v")
+
+	var pkg struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "frontend/package.json")), &pkg); err != nil {
+		t.Fatalf("decode frontend/package.json: %v", err)
+	}
+	if got := pkg.Dependencies["@wailsio/runtime"]; got != want {
+		t.Errorf("package.json @wailsio/runtime = %q, want exactly %q (go.mod's Wails version; bump both by hand, U5)", got, want)
+	}
+
+	var lock struct {
+		Packages map[string]struct {
+			Version      string            `json:"version"`
+			Dependencies map[string]string `json:"dependencies"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "frontend/package-lock.json")), &lock); err != nil {
+		t.Fatalf("decode frontend/package-lock.json: %v", err)
+	}
+	if got := lock.Packages[""].Dependencies["@wailsio/runtime"]; got != want {
+		t.Errorf(`package-lock.json packages[""] @wailsio/runtime = %q, want exactly %q`, got, want)
+	}
+	if got := lock.Packages["node_modules/@wailsio/runtime"].Version; got != want {
+		t.Errorf("package-lock.json node_modules/@wailsio/runtime version = %q, want exactly %q", got, want)
+	}
+}
+
+// derivedWails3Install is the one accepted form of a wails3 CLI install: the
+// version comes from go.mod, so the CLI can never drift from the module.
+const derivedWails3Install = `wails3@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)`
+
+// literalWails3PinRe matches a hard-coded wails3 CLI version.
+var literalWails3PinRe = regexp.MustCompile(`wails3@v[0-9]`)
+
+// UP / D4: no workflow or composite action pins the wails3 CLI to a literal
+// version; every install derives it from go.mod, and test.yml and release.yml
+// each install it exactly once.
+func TestWailsCLIVersionIsDerivedFromGoMod(t *testing.T) {
+	actions, err := filepath.Glob(repoPath(t, ".github/actions/*/action.yml"))
+	if err != nil {
+		t.Fatalf("glob actions: %v", err)
+	}
+	files := workflowFiles(t)
+	for _, a := range actions {
+		files = append(files, ".github/actions/"+filepath.Base(filepath.Dir(a))+"/action.yml")
+	}
+	requireOnce := map[string]bool{".github/workflows/test.yml": true, ".github/workflows/release.yml": true}
+	seen := map[string]bool{}
+	for _, rel := range files {
+		seen[rel] = true
+		for _, p := range checkWails3Installs(readRepoFile(t, rel), requireOnce[rel]) {
+			t.Errorf("%s: %s", rel, p)
+		}
+	}
+	for rel := range requireOnce {
+		if !seen[rel] {
+			t.Errorf("%s: not among the scanned workflow files", rel)
+		}
+	}
+}
+
+// checkWails3Installs returns the D4 problems in one workflow or action file:
+// a literal wails3 CLI pin, any `cmd/wails3@` line not in the derived form,
+// and, when requireOnce is set, a derived-install count other than exactly 1.
+func checkWails3Installs(text string, requireOnce bool) []string {
+	var problems []string
+	if literalWails3PinRe.MatchString(text) {
+		problems = append(problems, "literal wails3 CLI pin; derive it from go.mod (D4)")
+	}
+	for i, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "cmd/wails3@") && !strings.Contains(line, derivedWails3Install) {
+			problems = append(problems, fmt.Sprintf("line %d: wails3 CLI install not derived from go.mod (D4): %s", i+1, strings.TrimSpace(line)))
+		}
+	}
+	if requireOnce {
+		if n := strings.Count(text, derivedWails3Install); n != 1 {
+			problems = append(problems, fmt.Sprintf("derived wails3 CLI install appears %d times, want exactly 1 (D4)", n))
+		}
+	}
+	return problems
+}
+
+// The scan behind TestWailsCLIVersionIsDerivedFromGoMod, over fixtures: a
+// literal pin, @latest, and a duplicated derived install are refused; a single
+// derived install passes, and a file with none passes unless one is required.
+func TestCheckWails3InstallsFixtures(t *testing.T) {
+	const prefix = "      - run: go install github.com/wailsapp/wails/v3/cmd/"
+	derived := prefix + derivedWails3Install + "\n"
+	for _, c := range []struct {
+		name        string
+		text        string
+		requireOnce bool
+		wantProblem bool
+	}{
+		{"literal pin", prefix + "wails3@v3.0.0\n", false, true},
+		{"literal pin, required file", prefix + "wails3@v3.0.0\n", true, true},
+		{"latest", prefix + "wails3@latest\n", false, true},
+		{"derived once", derived, true, false},
+		{"derived twice", derived + derived, true, true},
+		{"none, not required", "steps: []\n", false, false},
+		{"none, required", "steps: []\n", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := checkWails3Installs(c.text, c.requireOnce)
+			if (len(got) > 0) != c.wantProblem {
+				t.Errorf("checkWails3Installs problems = %q, wantProblem %v", got, c.wantProblem)
+			}
+		})
+	}
+}
+
 // CI-06: the weekly Go dependency workflow regenerates code, bumps direct
 // requirements (Wails excluded), runs the race suite, and opens a PR with a
 // token whose absence fails loudly.
@@ -503,5 +780,55 @@ func TestGoDepsWorkflowShape(t *testing.T) {
 	upd := taskBlock(t, text, "update")
 	if strings.Contains(upd, "secrets.") {
 		t.Errorf("go-deps.yml: the update job references a secret:\n%s", upd)
+	}
+}
+
+// U7: the weekly Wails release check only reports. It runs on a schedule and
+// on demand, holds nothing but the workflow's own GITHUB_TOKEN (issues: write,
+// contents: read), and uses no action other than a credential-less checkout.
+func TestWailsCheckWorkflowShape(t *testing.T) {
+	const wf = ".github/workflows/wails-check.yml"
+	text := readRepoFile(t, wf)
+	for _, want := range []string{
+		"cron: '0 7 * * 1'", "workflow_dispatch:", "issues: write",
+		"GH_TOKEN: ${{ github.token }}", "persist-credentials: false",
+		"bash .github/scripts/wails-update-check.sh", "group: wails-check",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("%s lacks %q", wf, want)
+		}
+	}
+	for _, bad := range []string{"secrets.", "pull_request", "contents: write"} {
+		if strings.Contains(text, bad) {
+			t.Errorf("%s must not contain %q", wf, bad)
+		}
+	}
+	// The top level grants contents: read only; issues: write belongs to the
+	// job. TestWorkflowsLeastPrivilege's prefix match alone would also accept
+	// a top-level block that goes on to grant issues: write.
+	jobsAt := strings.Index(text, "\njobs:\n")
+	if jobsAt < 0 {
+		t.Fatalf("%s: no top-level jobs: key", wf)
+	}
+	head, body := text[:jobsAt], text[jobsAt:]
+	if !regexp.MustCompile(`(?m)^permissions:\n  contents: read\n(\n|[^ \n])`).MatchString(head) {
+		t.Errorf("%s: the top-level permissions block must be exactly `contents: read`", wf)
+	}
+	if regexp.MustCompile(`(?m)^[^#\n]*:\s*write\b`).MatchString(head) {
+		t.Errorf("%s: a write permission appears above jobs:; it belongs to the job only", wf)
+	}
+	if !strings.Contains(body, "\n      issues: write\n") {
+		t.Errorf("%s: the check job must grant issues: write", wf)
+	}
+	// The only action is one checkout. Its version is left to Dependabot's
+	// gha-deps group, so it is not pinned here.
+	uses := usesRe.FindAllStringSubmatch(text, -1)
+	if len(uses) != 1 {
+		t.Errorf("%s: %d uses: steps; want exactly one (actions/checkout)", wf, len(uses))
+	}
+	for _, m := range uses {
+		if target := strings.Trim(m[1], `"'`); !strings.HasPrefix(target, "actions/checkout@") {
+			t.Errorf("%s: uses %s; only actions/checkout is allowed", wf, target)
+		}
 	}
 }

@@ -10,7 +10,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
 	github.com/robotn/gohook v1.0.0-beta1 // pinned: purego backends exist only from this tag; build with -tags purego
-	github.com/wailsapp/wails/v3 v3.0.0-beta.22
+	github.com/wailsapp/wails/v3 v3.0.0
 	golang.org/x/crypto v0.58.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
