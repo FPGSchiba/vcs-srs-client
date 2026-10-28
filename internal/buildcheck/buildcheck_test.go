@@ -481,6 +481,54 @@ func TestDependabotHasNoGomod(t *testing.T) {
 	}
 }
 
+// wailsGoVersionRe matches the Wails v3 requirement in go.mod, in either the
+// block form or a single-line `require` directive.
+var wailsGoVersionRe = regexp.MustCompile(`(?m)^\s*(?:require\s+)?github\.com/wailsapp/wails/v3\s+(v\S+)`)
+
+// wailsGoVersion returns go.mod's Wails v3 version, with its "v" (e.g. "v3.0.0").
+func wailsGoVersion(t *testing.T) string {
+	t.Helper()
+	m := wailsGoVersionRe.FindStringSubmatch(readRepoFile(t, "go.mod"))
+	if m == nil {
+		t.Fatal("go.mod has no github.com/wailsapp/wails/v3 requirement")
+	}
+	return m[1]
+}
+
+// UP / U1: the Wails v3.0.0 release notes require the JS runtime
+// (@wailsio/runtime) to be the same version as the Go module, so the npm
+// package is pinned exactly (no ^ or ~) to go.mod's Wails version, in both
+// package.json and the lockfile. The two only move together, by hand.
+func TestWailsRuntimeMatchesGoModule(t *testing.T) {
+	want := strings.TrimPrefix(wailsGoVersion(t), "v")
+
+	var pkg struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "frontend/package.json")), &pkg); err != nil {
+		t.Fatalf("decode frontend/package.json: %v", err)
+	}
+	if got := pkg.Dependencies["@wailsio/runtime"]; got != want {
+		t.Errorf("package.json @wailsio/runtime = %q, want exactly %q (go.mod's Wails version; bump both by hand, U5)", got, want)
+	}
+
+	var lock struct {
+		Packages map[string]struct {
+			Version      string            `json:"version"`
+			Dependencies map[string]string `json:"dependencies"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "frontend/package-lock.json")), &lock); err != nil {
+		t.Fatalf("decode frontend/package-lock.json: %v", err)
+	}
+	if got := lock.Packages[""].Dependencies["@wailsio/runtime"]; got != want {
+		t.Errorf(`package-lock.json packages[""] @wailsio/runtime = %q, want exactly %q`, got, want)
+	}
+	if got := lock.Packages["node_modules/@wailsio/runtime"].Version; got != want {
+		t.Errorf("package-lock.json node_modules/@wailsio/runtime version = %q, want exactly %q", got, want)
+	}
+}
+
 // CI-06: the weekly Go dependency workflow regenerates code, bumps direct
 // requirements (Wails excluded), runs the race suite, and opens a PR with a
 // token whose absence fails loudly.
