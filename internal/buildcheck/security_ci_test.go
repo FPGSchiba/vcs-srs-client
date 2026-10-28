@@ -38,6 +38,10 @@ func TestGovulncheckGatesEveryBackendLeg(t *testing.T) {
 			t.Errorf("govulncheck step has a condition (%q); it must run on all three legs (D5)", strings.TrimSpace(l))
 		}
 	}
+	// A step- or job-level continue-on-error would make the gate non-blocking.
+	if strings.Contains(job, "continue-on-error") {
+		t.Error("backend job uses continue-on-error; govulncheck must be a blocking gate (D5)")
+	}
 	idx := func(s string) int {
 		i := strings.Index(job, s)
 		if i < 0 {
