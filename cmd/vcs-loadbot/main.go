@@ -184,8 +184,8 @@ func reflectCmd(ctx context.Context, listen string, senders int, in io.Reader, o
 		cancel()
 	}()
 	err = <-served
-	writeJSON(out, map[string]any{"type": "reflector_stats", "send_errors": r.SendErrors(),
-		"queue_full_drops": r.QueueFullDrops(), "write_errors": r.WriteErrors(), "senders": senders})
+	writeJSON(out, reflectorStatsLine{Type: "reflector_stats", SendErrors: r.SendErrors(),
+		QueueFullDrops: r.QueueFullDrops(), WriteErrors: r.WriteErrors(), Senders: senders})
 	if err != nil {
 		fmt.Fprintf(errw, "vcs-loadbot: reflector: %v\n", err)
 		return 1
@@ -298,6 +298,16 @@ type calibrationStoppedLine struct {
 	Bot    int    `json:"bot"`
 	Tries  int    `json:"tries"`
 	Reason string `json:"reason"`
+}
+
+// reflectorStatsLine is the reflect subcommand's last line (interface I-5).
+// SendErrors = QueueFullDrops + WriteErrors, its v1 meaning.
+type reflectorStatsLine struct {
+	Type           string `json:"type"`
+	SendErrors     uint64 `json:"send_errors"`
+	QueueFullDrops uint64 `json:"queue_full_drops"`
+	WriteErrors    uint64 `json:"write_errors"`
+	Senders        int    `json:"senders"`
 }
 
 type receiveCapacityLine struct {
