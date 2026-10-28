@@ -19,14 +19,17 @@ func TestSyntheticFrame(t *testing.T) {
 	if bytes.Equal(f, SyntheticFrame(8)) {
 		t.Fatal("seq 7 and 8 equal")
 	}
-	allEq := true
-	for _, b := range f[1:] {
-		if b != f[0] {
-			allEq = false
+	for _, seq := range []uint32{0, 1, 7, 1 << 31} {
+		g := SyntheticFrame(seq)
+		allEq := true
+		for _, b := range g[5:] {
+			if b != g[4] {
+				allEq = false
+			}
 		}
-	}
-	if allEq {
-		t.Fatal("all bytes equal")
+		if allEq {
+			t.Fatalf("seq %d: bytes 4+ all equal", seq)
+		}
 	}
 	if binary.BigEndian.Uint32(f[:4]) != 7 {
 		t.Fatal("seq prefix wrong")

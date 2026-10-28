@@ -42,3 +42,21 @@ func TestCheckAgainstServer(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestLoadScenarioValidation(t *testing.T) {
+	cases := map[string]string{
+		"zero freq":     `{"name":"x","version":1,"seed":1,"coalition":"Blue","freq_mhz":0}`,
+		"negative freq": `{"name":"x","version":1,"seed":1,"coalition":"Blue","freq_mhz":-5}`,
+		"no coalition":  `{"name":"x","version":1,"seed":1,"coalition":"","freq_mhz":251}`,
+		"trailing json": `{"name":"x","version":1,"seed":1,"coalition":"Blue","freq_mhz":251} {"a":1}`,
+	}
+	for name, body := range cases {
+		p := filepath.Join(t.TempDir(), "s.json")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadScenario(p); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

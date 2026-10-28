@@ -41,6 +41,15 @@ func LoadScenario(nameOrPath string) (Scenario, error) {
 	if err := dec.Decode(&s); err != nil {
 		return Scenario{}, fmt.Errorf("loadgen: decode scenario %q: %w", nameOrPath, err)
 	}
+	if dec.More() {
+		return Scenario{}, fmt.Errorf("loadgen: scenario %q: trailing data after JSON object", nameOrPath)
+	}
+	if s.Coalition == "" {
+		return Scenario{}, fmt.Errorf("loadgen: scenario %q: coalition is empty", nameOrPath)
+	}
+	if s.FreqKHz() <= 0 {
+		return Scenario{}, fmt.Errorf("loadgen: scenario %q: freq_mhz %v is not a positive frequency", nameOrPath, s.FreqMHz)
+	}
 	return s, nil
 }
 
