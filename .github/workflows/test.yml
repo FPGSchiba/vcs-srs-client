@@ -321,8 +321,9 @@ jobs:
       - name: Generate proto bindings
         run: buf generate
 
-      - name: Install wails3 CLI
-        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
+      - name: Install wails3 CLI (version from go.mod)
+        shell: bash
+        run: go install "github.com/wailsapp/wails/v3/cmd/wails3@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)"
 
       # frontend/src/shared/api/client.ts imports the generated TS bindings
       # (gitignored), so they must be generated before tsc/vite build.

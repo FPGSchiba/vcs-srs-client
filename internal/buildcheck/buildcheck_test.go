@@ -662,6 +662,43 @@ func TestWailsRuntimeMatchesGoModule(t *testing.T) {
 	}
 }
 
+// derivedWails3Install is the one accepted form of a wails3 CLI install: the
+// version comes from go.mod, so the CLI can never drift from the module.
+const derivedWails3Install = `wails3@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)`
+
+// literalWails3PinRe matches a hard-coded wails3 CLI version.
+var literalWails3PinRe = regexp.MustCompile(`wails3@v[0-9]`)
+
+// UP / D4: no workflow or composite action pins the wails3 CLI to a literal
+// version; every install derives it from go.mod, and test.yml and release.yml
+// each install it exactly once.
+func TestWailsCLIVersionIsDerivedFromGoMod(t *testing.T) {
+	actions, err := filepath.Glob(repoPath(t, ".github/actions/*/action.yml"))
+	if err != nil {
+		t.Fatalf("glob actions: %v", err)
+	}
+	files := workflowFiles(t)
+	for _, a := range actions {
+		files = append(files, ".github/actions/"+filepath.Base(filepath.Dir(a))+"/action.yml")
+	}
+	for _, rel := range files {
+		text := readRepoFile(t, rel)
+		if literalWails3PinRe.MatchString(text) {
+			t.Errorf("%s: literal wails3 CLI pin; derive it from go.mod (D4)", rel)
+		}
+		for i, line := range strings.Split(text, "\n") {
+			if strings.Contains(line, "cmd/wails3@") && !strings.Contains(line, derivedWails3Install) {
+				t.Errorf("%s:%d: wails3 CLI install not derived from go.mod (D4): %s", rel, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	for _, rel := range []string{".github/workflows/test.yml", ".github/workflows/release.yml"} {
+		if n := strings.Count(readRepoFile(t, rel), derivedWails3Install); n != 1 {
+			t.Errorf("%s: derived wails3 CLI install appears %d times, want exactly 1 (D4)", rel, n)
+		}
+	}
+}
+
 // CI-06: the weekly Go dependency workflow regenerates code, bumps direct
 // requirements (Wails excluded), runs the race suite, and opens a PR with a
 // token whose absence fails loudly.

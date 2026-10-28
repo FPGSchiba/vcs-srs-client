@@ -116,8 +116,8 @@ jobs:
       #
       # The list lives in the shared linux-gui-deps action, so it can no
       # longer drift from test.yml's. It previously named GTK 3 and
-      # WebKit2GTK 4.1, which Wails v3 beta.22 does not link against -- it
-      # wants GTK 4 and WebKitGTK 6.0, so `go install wails3` died at the
+      # WebKit2GTK 4.1, which Wails v3 does not link against (GTK 4 /
+      # WebKitGTK 6.0 is the GA default), so `go install wails3` died at the
       # link step with "cannot find -lgtk-4 / -lwebkitgtk-6.0". Nothing
       # caught it because this workflow only fires on a `v*` tag and no tag
       # has ever been pushed, so it had never run this far.
@@ -148,15 +148,16 @@ jobs:
       - name: Generate proto bindings
         run: buf generate
 
-      - name: Install wails3 CLI
-        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
+      - name: Install wails3 CLI (version from go.mod)
+        shell: bash
+        run: go install "github.com/wailsapp/wails/v3/cmd/wails3@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)"
 
       # Wails downloads linuxdeploy from its rolling `continuous` release
-      # unless the file already exists in the AppImage build dir (beta.22
-      # internal/commands/appimage.go), so pre-seed a pinned, checksummed copy.
-      # Still unpinnable (design R2, re-check in track UP): AppImageKit's
-      # `continuous` AppRun, the AppImage runtime linuxdeploy fetches itself,
-      # and Microsoft's WebView2 bootstrapper on Windows.
+      # unless the file already exists in the AppImage build dir (v3.0.0
+      # internal/commands/appimage.go:116-119), so pre-seed a pinned, checksummed
+      # copy. Since v3.0.0 Wails writes its own AppRun (appimage.go:122).
+      # Still unpinnable (design R2, re-checked in UP): the AppImage runtime
+      # linuxdeploy fetches itself, and Microsoft's WebView2 bootstrapper on Windows.
       - name: Pre-seed pinned linuxdeploy · Linux
         if: matrix.platform == 'linux-amd64'
         run: |

@@ -153,7 +153,7 @@ Workflow behaviour beyond these text assertions is verified by pinned `actionlin
 
 ## 9. Risks
 - **R1 AppImage + WebKitGTK 6:** fragile; glibc 2.39 floor (ubuntu-24.04). Field verification only.
-- **R2 floating downloads Wails can't pin:** `AppRun` (AppImageKit `continuous`), linuxdeploy's own appimage runtime fetch, and the WebView2 bootstrapper (Microsoft). Documented exceptions; re-check in UP.
+- **R2 floating downloads Wails can't pin:** linuxdeploy's own appimage runtime fetch, and the WebView2 bootstrapper (Microsoft). Documented exceptions; re-checked in UP (2026-10-28): Wails v3.0.0 writes its own AppRun.
 - **R3 NSIS install on the Windows runner:** chocolatey's `nsis` may not put `makensis` on PATH; the workflow appends `C:\Program Files (x86)\NSIS` to `GITHUB_PATH` and prints `makensis -VERSION`.
 - **R4 unsigned arm64 `.app`:** "damaged" until quarantine removed; documented in notes.
 - **R5 asset rendering:** mitigated by rendering into a scratch dir.
