@@ -14,8 +14,8 @@
 #   bash .github/scripts/wails-update-check.sh            # open/update the issue
 #   bash .github/scripts/wails-update-check.sh --dry-run  # print title + body only
 #
-# It only reports; it never bumps anything. Wails moves by hand, Go module and
-# @wailsio/runtime together in one PR (TestWailsRuntimeMatchesGoModule).
+# It only reports; it never bumps anything. Wails moves by hand: the Go module
+# and @wailsio/runtime are bumped together, in one PR.
 #
 # Latest versions: the Go module proxy's version list and npm's `latest`
 # dist-tag, stable releases only (nightlies and other pre-releases are ignored).
@@ -188,8 +188,8 @@ body="$work/body.md"
   echo "- Run the repo's code generation first, so \`go mod tidy\` sees every package (client: \`buf generate\`; server: protoc + \`go run github.com/99designs/gqlgen generate\`)."
   echo "- \`go get $go_pkg@v$x && go mod tidy\`"
   echo "- \`cd frontend && npm install --save-exact $npm_pkg@$x\`"
-  echo "- Re-run the UP trial-bump checks (Phase 6.9 UP design, section 4): bindings, frontend build, the full test suite and govulncheck."
-  echo "- Bump the Go module and \`$npm_pkg\` in ONE PR (U5); the PR closes this issue with \`Closes #N\`."
+  echo "- Re-run the checks a Wails bump needs: binding generation, the frontend build, the full test suite and govulncheck."
+  echo "- Bump the Go module and \`$npm_pkg\` together in ONE PR; the PR closes this issue with \`Closes #N\`."
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
     echo
     echo "Reported by ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/$GITHUB_RUN_ID"

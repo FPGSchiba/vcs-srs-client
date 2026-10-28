@@ -157,6 +157,9 @@ for id in $v2_only_ids; do
 done
 check "client-beta22-opens: go row" "$(has "$body" '| Go module `github.com/wailsapp/wails/v3` | `v3.0.0-beta.22` → `v3.0.0` |')" yes
 check "client-beta22-opens: npm row" "$(has "$body" '| npm `@wailsio/runtime` | `3.0.0-beta.34` → `3.0.0` |')" yes
+for code in '(U5)' 'Phase 6.9' 'UP design' TestWailsRuntimeMatchesGoModule; do
+  check "client-beta22-opens: body is repo-neutral (no $code)" "$(has "$body" "$code")" no
+done
 argv="$(tr -d '\r' < "$tmp/client-beta22-opens/gh-argv")"
 check "client-beta22-opens: lists open labelled issues of the repo" "$(has "$argv" 'issue list --repo o/r --label wails-update --state open')" yes
 check "client-beta22-opens: label colour and description" "$(has "$argv" 'label create wails-update --repo o/r --force --color FBCA04 --description A newer Wails release is available')" yes
