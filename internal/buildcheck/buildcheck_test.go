@@ -366,7 +366,7 @@ func TestServerCheckoutPinnedToSHA(t *testing.T) {
 	if m == nil {
 		t.Fatal("test.yml: vcs-srs-server checkout is not pinned to a 40-hex SHA")
 	}
-	if want := "850d984e186099d13acd6066f40ceb22ed2f7760"; m[1] != want {
+	if want := "a650a4413070582f0788ca3cc7ce3a2dd8121f30"; m[1] != want {
 		t.Errorf("server checkout pinned to %s, want %s", m[1], want)
 	}
 	if strings.Contains(text, "alpha.96") {
