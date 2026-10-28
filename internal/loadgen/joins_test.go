@@ -192,3 +192,24 @@ func splitLines(b []byte) [][]byte {
 	}
 	return out
 }
+
+// A tries value below 1 (no HELLO sent) must not break "index 0 is always 0"
+// or "the hist sums to joined" (interface I-1).
+func TestJoinTallyOkClampsTriesBelowOne(t *testing.T) {
+	tl := newJoinTally(3, 0)
+	for _, tries := range []int{0, -1, 1} {
+		tl.begin()
+		tl.ok(tries)
+	}
+	r := tl.report(3, 0, 0, RampHealth{})
+	if r.HelloTriesHist[0] != 0 {
+		t.Fatalf("hist[0] = %d, want 0 (hist %v)", r.HelloTriesHist[0], r.HelloTriesHist)
+	}
+	sum := 0
+	for _, c := range r.HelloTriesHist {
+		sum += c
+	}
+	if sum != r.Joined || r.Joined != 3 {
+		t.Fatalf("hist sums to %d, joined %d, want 3", sum, r.Joined)
+	}
+}

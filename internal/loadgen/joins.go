@@ -139,7 +139,8 @@ func (t *joinTally) begin() {
 	t.mu.Unlock()
 }
 
-func (t *joinTally) finish() {
+// finishLocked retires one in-flight join. The caller must hold t.mu.
+func (t *joinTally) finishLocked() {
 	if t.inFlight > 0 {
 		t.inFlight--
 	}
@@ -149,7 +150,7 @@ func (t *joinTally) finish() {
 func (t *joinTally) ok(tries int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.finish()
+	t.finishLocked()
 	t.joined++
 	if tries >= 2 {
 		t.retried++
@@ -157,9 +158,10 @@ func (t *joinTally) ok(tries int) {
 	if tries > t.triesMax {
 		t.triesMax = tries
 	}
+	// Index 0 is always 0 (I-1): a join that reports no HELLO is counted as 1.
 	k := tries
-	if k < 0 {
-		k = 0
+	if k < 1 {
+		k = 1
 	}
 	if k >= len(t.hist) {
 		k = len(t.hist) - 1
@@ -171,7 +173,7 @@ func (t *joinTally) ok(tries int) {
 func (t *joinTally) fail(f JoinFailure) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.finish()
+	t.finishLocked()
 	switch f.Stage {
 	case StageControl:
 		t.byStage.Control++
@@ -179,7 +181,11 @@ func (t *joinTally) fail(f JoinFailure) {
 		t.byStage.Radio++
 	case StageVoiceDial:
 		t.byStage.VoiceDial++
+	case StageHello:
+		t.byStage.Hello++
 	default:
+		// An unknown stage is still a failed join; surface it under hello
+		// rather than losing it from failures_by_stage.
 		t.byStage.Hello++
 	}
 	if f.Tries > t.triesMax {
@@ -200,7 +206,8 @@ func (t *joinTally) progress() ProgressLine {
 	}
 }
 
-// report builds the joins line once the ramp has ended.
+// report builds the joins line once the ramp has ended. requested and had must
+// equal the values passed to newJoinTally.
 func (t *joinTally) report(requested, had int, ramp time.Duration, rh RampHealth) JoinReport {
 	t.mu.Lock()
 	defer t.mu.Unlock()
