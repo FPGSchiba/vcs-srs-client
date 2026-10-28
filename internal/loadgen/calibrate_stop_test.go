@@ -1,9 +1,9 @@
 package loadgen
 
 import (
-	"sync"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,5 +138,28 @@ func TestCalibrateProgress(t *testing.T) {
 	}
 	if last := lines[len(lines)-1]; last.ElapsedS <= 0 {
 		t.Errorf("ElapsedS = %v, want > 0", last.ElapsedS)
+	}
+}
+
+// The calibration_stopped reason reads like the I-4 example (and v1's stderr
+// text): a join-stage stop names the bot, other stages carry their own text.
+func TestCalStoppedReasonMatchesInterface(t *testing.T) {
+	cases := []struct {
+		e    CalStoppedError
+		want string
+	}{
+		{CalStoppedError{N: 4096, Bots: 3702, Stage: "hello", Bot: 3702, Tries: 5,
+			Err: errors.New("no HELLO_ACK after 5 tries")}, "bot 3702: no HELLO_ACK after 5 tries"},
+		{CalStoppedError{N: 8, Bots: 6, Stage: "voice_dial", Bot: 6,
+			Err: errors.New("dial udp: refused")}, "bot 6: dial udp: refused"},
+		{CalStoppedError{N: 8, Bots: 8, Stage: "talker_stalled",
+			Err: errors.New("talker stalled at N=8")}, "talker stalled at N=8"},
+		{CalStoppedError{N: 8, Bots: 8, Stage: "ledger",
+			Err: errors.New("bot lost its ledger at N=8")}, "bot lost its ledger at N=8"},
+	}
+	for _, c := range cases {
+		if got := c.e.Reason(); got != c.want {
+			t.Errorf("%s: Reason() = %q, want %q", c.e.Stage, got, c.want)
+		}
 	}
 }

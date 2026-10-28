@@ -252,7 +252,7 @@ func calibrateCmd(ctx context.Context, refl, stepsCSV string, holdS float64, see
 		emit(calibrationStoppedLine{
 			Type: "calibration_stopped", N: stop.N, Bots: stop.Bots,
 			Stage: stop.Stage, Bot: stop.Bot, Tries: stop.Tries,
-			Reason: stop.Err.Error(),
+			Reason: stop.Reason(),
 		})
 		if len(steps) == 0 {
 			fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)

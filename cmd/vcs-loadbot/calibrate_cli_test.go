@@ -131,13 +131,15 @@ func TestCalibrateCLIStopsAtLastGoodStep(t *testing.T) {
 		N, Bots int
 		Stage   string
 		Tries   int
+		Reason  string
 	}
 	for _, l := range lines {
 		if strings.Contains(l, `"calibration_stopped"`) {
 			_ = json.Unmarshal([]byte(l), &stopped)
 		}
 	}
-	if stopped.N != 8 || stopped.Bots != 6 || stopped.Stage != "hello" || stopped.Tries != 5 {
+	if stopped.N != 8 || stopped.Bots != 6 || stopped.Stage != "hello" || stopped.Tries != 5 ||
+		stopped.Reason != "bot 6: no HELLO_ACK after 5 tries" {
 		t.Errorf("calibration_stopped = %+v", stopped)
 	}
 }

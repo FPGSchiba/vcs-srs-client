@@ -43,6 +43,16 @@ func (e *CalStoppedError) Error() string {
 
 func (e *CalStoppedError) Unwrap() error { return e.Err }
 
+// Reason is the calibration_stopped line's reason (interface I-4). A join-stage
+// stop (hello, voice_dial) names the bot, as v1's stderr text did; the other
+// stages carry their own text.
+func (e *CalStoppedError) Reason() string {
+	if e.Stage == "hello" || e.Stage == "voice_dial" {
+		return fmt.Sprintf("bot %d: %v", e.Bot, e.Err)
+	}
+	return e.Err.Error()
+}
+
 // ReceiveCapacity is the generator's receive capacity: the largest valid
 // step's pps. LowerBound means the true ceiling was not reached (the
 // reflector reported send errors, or every step stayed valid). PPS == 0
