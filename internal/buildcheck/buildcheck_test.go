@@ -482,17 +482,65 @@ func TestDependabotHasNoGomod(t *testing.T) {
 }
 
 // wailsGoVersionRe matches the Wails v3 requirement in go.mod, in either the
-// block form or a single-line `require` directive.
-var wailsGoVersionRe = regexp.MustCompile(`(?m)^\s*(?:require\s+)?github\.com/wailsapp/wails/v3\s+(v\S+)`)
+// block form or a single-line `require` directive. A line carrying `=>` is a
+// replace, never a requirement.
+var wailsGoVersionRe = regexp.MustCompile(`(?m)^\s*(?:require\s+)?github\.com/wailsapp/wails/v3\s+(v[^\s=]+)\s*(?:$|//)`)
+
+// wailsReplaceRe matches a replace directive for the Wails v3 module, in the
+// single-line or block form, with or without a version on the left side.
+var wailsReplaceRe = regexp.MustCompile(`(?m)^\s*(?:replace\s+)?github\.com/wailsapp/wails/v3(?:\s+v\S+)?\s*=>`)
+
+// parseWailsGoVersion returns the Wails v3 version go.mod requires, with its
+// "v". It refuses a go.mod that replaces the module: the required version would
+// then not be the one built, and pairing npm against it would be meaningless.
+func parseWailsGoVersion(gomod string) (string, error) {
+	if wailsReplaceRe.MatchString(gomod) {
+		return "", errors.New("go.mod replaces github.com/wailsapp/wails/v3; the required version is not the one built, so the npm runtime pairing cannot be checked")
+	}
+	m := wailsGoVersionRe.FindStringSubmatch(gomod)
+	if m == nil {
+		return "", errors.New("go.mod has no github.com/wailsapp/wails/v3 requirement")
+	}
+	return m[1], nil
+}
 
 // wailsGoVersion returns go.mod's Wails v3 version, with its "v" (e.g. "v3.0.0").
 func wailsGoVersion(t *testing.T) string {
 	t.Helper()
-	m := wailsGoVersionRe.FindStringSubmatch(readRepoFile(t, "go.mod"))
-	if m == nil {
-		t.Fatal("go.mod has no github.com/wailsapp/wails/v3 requirement")
+	v, err := parseWailsGoVersion(readRepoFile(t, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return m[1]
+	return v
+}
+
+// The parser behind wailsGoVersion: it reads the required version from either
+// require form, and refuses a go.mod that replaces the Wails module, since the
+// required version would then not be the one actually built.
+func TestParseWailsGoVersion(t *testing.T) {
+	const head = "module example.com/m\n\ngo 1.25\n\n"
+	for _, tc := range []struct {
+		name, gomod, want string
+		wantErr           bool
+	}{
+		{"block require", head + "require (\n\tgithub.com/wailsapp/wails/v3 v3.0.0\n)\n", "v3.0.0", false},
+		{"single-line require", head + "require github.com/wailsapp/wails/v3 v3.0.0\n", "v3.0.0", false},
+		{"missing", head + "require golang.org/x/sys v0.1.0\n", "", true},
+		{"replace to path", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace github.com/wailsapp/wails/v3 => ../wails/v3\n", "", true},
+		{"versioned replace", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace github.com/wailsapp/wails/v3 v3.0.0 => github.com/fork/wails/v3 v3.0.1\n", "", true},
+		{"replace block", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace (\n\tgithub.com/wailsapp/wails/v3 v3.0.0 => ../wails/v3\n)\n", "", true},
+		{"unrelated replace", head + "require github.com/wailsapp/wails/v3 v3.0.0\nreplace golang.org/x/sys => ../sys\n", "v3.0.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseWailsGoVersion(tc.gomod)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseWailsGoVersion err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("parseWailsGoVersion = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // UP / U1: the Wails v3.0.0 release notes require the JS runtime
