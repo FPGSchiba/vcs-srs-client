@@ -3,6 +3,7 @@ package buildcheck
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -681,21 +682,68 @@ func TestWailsCLIVersionIsDerivedFromGoMod(t *testing.T) {
 	for _, a := range actions {
 		files = append(files, ".github/actions/"+filepath.Base(filepath.Dir(a))+"/action.yml")
 	}
+	requireOnce := map[string]bool{".github/workflows/test.yml": true, ".github/workflows/release.yml": true}
+	seen := map[string]bool{}
 	for _, rel := range files {
-		text := readRepoFile(t, rel)
-		if literalWails3PinRe.MatchString(text) {
-			t.Errorf("%s: literal wails3 CLI pin; derive it from go.mod (D4)", rel)
-		}
-		for i, line := range strings.Split(text, "\n") {
-			if strings.Contains(line, "cmd/wails3@") && !strings.Contains(line, derivedWails3Install) {
-				t.Errorf("%s:%d: wails3 CLI install not derived from go.mod (D4): %s", rel, i+1, strings.TrimSpace(line))
-			}
+		seen[rel] = true
+		for _, p := range checkWails3Installs(readRepoFile(t, rel), requireOnce[rel]) {
+			t.Errorf("%s: %s", rel, p)
 		}
 	}
-	for _, rel := range []string{".github/workflows/test.yml", ".github/workflows/release.yml"} {
-		if n := strings.Count(readRepoFile(t, rel), derivedWails3Install); n != 1 {
-			t.Errorf("%s: derived wails3 CLI install appears %d times, want exactly 1 (D4)", rel, n)
+	for rel := range requireOnce {
+		if !seen[rel] {
+			t.Errorf("%s: not among the scanned workflow files", rel)
 		}
+	}
+}
+
+// checkWails3Installs returns the D4 problems in one workflow or action file:
+// a literal wails3 CLI pin, any `cmd/wails3@` line not in the derived form,
+// and, when requireOnce is set, a derived-install count other than exactly 1.
+func checkWails3Installs(text string, requireOnce bool) []string {
+	var problems []string
+	if literalWails3PinRe.MatchString(text) {
+		problems = append(problems, "literal wails3 CLI pin; derive it from go.mod (D4)")
+	}
+	for i, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "cmd/wails3@") && !strings.Contains(line, derivedWails3Install) {
+			problems = append(problems, fmt.Sprintf("line %d: wails3 CLI install not derived from go.mod (D4): %s", i+1, strings.TrimSpace(line)))
+		}
+	}
+	if requireOnce {
+		if n := strings.Count(text, derivedWails3Install); n != 1 {
+			problems = append(problems, fmt.Sprintf("derived wails3 CLI install appears %d times, want exactly 1 (D4)", n))
+		}
+	}
+	return problems
+}
+
+// The scan behind TestWailsCLIVersionIsDerivedFromGoMod, over fixtures: a
+// literal pin, @latest, and a duplicated derived install are refused; a single
+// derived install passes, and a file with none passes unless one is required.
+func TestCheckWails3InstallsFixtures(t *testing.T) {
+	const prefix = "      - run: go install github.com/wailsapp/wails/v3/cmd/"
+	derived := prefix + derivedWails3Install + "\n"
+	for _, c := range []struct {
+		name        string
+		text        string
+		requireOnce bool
+		wantProblem bool
+	}{
+		{"literal pin", prefix + "wails3@v3.0.0\n", false, true},
+		{"literal pin, required file", prefix + "wails3@v3.0.0\n", true, true},
+		{"latest", prefix + "wails3@latest\n", false, true},
+		{"derived once", derived, true, false},
+		{"derived twice", derived + derived, true, true},
+		{"none, not required", "steps: []\n", false, false},
+		{"none, required", "steps: []\n", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := checkWails3Installs(c.text, c.requireOnce)
+			if (len(got) > 0) != c.wantProblem {
+				t.Errorf("checkWails3Installs problems = %q, wantProblem %v", got, c.wantProblem)
+			}
+		})
 	}
 }
 
