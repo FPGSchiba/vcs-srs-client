@@ -45,6 +45,8 @@ type sessionAPI interface {
 	// MarkControlLost declares the control link dead after the probe
 	// threshold trips. Idempotent against the stream-termination path.
 	MarkControlLost()
+	// CancelConnect aborts a Connect/Reconnect in flight (Welcome's CANCEL).
+	CancelConnect()
 }
 
 // windowsAPI is the window-registry surface the bindings depend on.
@@ -164,6 +166,12 @@ func SetBackend(a *App, sess sessionAPI, windows windowsAPI) {
 	}); ok {
 		o.SetGeometryObserver(a.onWindowGeometry)
 	}
+	// When the server ends the session (kicked, banned, expired...), voice
+	// must stop BEFORE the session clears the voice credentials, or the
+	// voice-credentials observer would redial with an empty secret.
+	if o, ok := sess.(interface{ SetSessionEndedHook(func(string)) }); ok {
+		o.SetSessionEndedHook(func(string) { a.stopVoiceSession() })
+	}
 }
 
 // onWindowGeometry receives settled window geometry from the registry.
@@ -270,6 +278,15 @@ func (a *App) ServiceStartup(_ context.Context, _ application.ServiceOptions) er
 // unresponsive server would hang the quit forever on a context.Background()
 // call the user cannot cancel.
 const shutdownDisconnectTimeout = 2 * time.Second
+
+// disconnectTimeout bounds the user's Logout (App.Disconnect) and
+// radioPushTimeout every radio push to the server (App.UpdateRadioInfo,
+// pushPersistedRadios). D1 (user decision): without them a server that
+// stopped answering hung the binding forever.
+const (
+	disconnectTimeout = 2 * time.Second
+	radioPushTimeout  = 5 * time.Second
+)
 
 // shutdownPollStopTimeout bounds how long quit waits for an armed
 // hotkey-permission re-check to return. Short: the goroutine returns

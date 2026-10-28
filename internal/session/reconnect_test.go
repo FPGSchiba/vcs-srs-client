@@ -11,6 +11,7 @@ import (
 
 func TestReconnect_ReestablishesAfterConnect(t *testing.T) {
 	f := grpctest.NewFake()
+	f.SyncVoiceSecret = "secret" // a live session always has one; "" on Reconnect means it ended
 	dial, cleanup := grpctest.Start(t, f)
 	defer cleanup()
 

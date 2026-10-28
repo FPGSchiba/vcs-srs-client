@@ -195,3 +195,16 @@ func TestAudioEmittersForwardPayloads(t *testing.T) {
 		t.Fatalf("emitted %q", f.last().name)
 	}
 }
+
+func TestTaggedSessionEnded(t *testing.T) {
+	f := &fakeEmitter{}
+	events.New(f).SessionEnded("banned")
+	got := f.last()
+	if got.name != "auth:session_ended" || events.EventAuthSessionEnded != "auth:session_ended" {
+		t.Fatalf("name = %q, want auth:session_ended", got.name)
+	}
+	p, ok := got.payload.(events.SessionEndedPayload)
+	if !ok || p.Reason != "banned" {
+		t.Fatalf("payload = %#v, want SessionEndedPayload{Reason: banned}", got.payload)
+	}
+}

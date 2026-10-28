@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/FPGSchiba/vcs-srs-client/internal/config"
 	"github.com/FPGSchiba/vcs-srs-client/internal/connhealth"
 	"github.com/FPGSchiba/vcs-srs-client/internal/version"
 )
@@ -27,6 +28,7 @@ func (a *App) Connect(serverURL, name, password, unitID string) error {
 	if err := a.sess.Connect(ctx, serverURL, name, password, unitID); err != nil {
 		return err
 	}
+	a.rememberServerAddress(serverURL)
 	// F1 fix (Phase 6 whole-branch review): cfg.ServerURL is never written --
 	// there is no Settings field for it and the Welcome form's address never
 	// reaches config -- so main.go's startup monitor.SetServer(cfg.ServerURL)
@@ -44,12 +46,49 @@ func (a *App) Connect(serverURL, name, password, unitID string) error {
 	return nil
 }
 
+// rememberServerAddress persists addr as config's last_server_address after
+// a successful connect (FE18, D4). Only the address is written -- never the
+// password, never server_url. A failure is logged and swallowed: the
+// connection is up, and failing it over a config write would be absurd.
+func (a *App) rememberServerAddress(addr string) {
+	sb := a.settings
+	if sb == nil {
+		return
+	}
+	if _, err := sb.persistCfg(cfgTxn{mutate: func(c *config.Config) { c.LastServerAddress = addr }}); err != nil {
+		a.logger.Warn("config: could not remember the server address", "err", err)
+	}
+}
+
+// GetLastServerAddress returns the address of the last successful connect,
+// for the Welcome screen to prefill; "" when none is remembered or no
+// settings backend is wired.
+func (a *App) GetLastServerAddress() string {
+	sb := a.settings
+	if sb == nil {
+		return ""
+	}
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.cfg.LastServerAddress
+}
+
 // Disconnect tears down the voice session, THEN the control session -- so a
 // voice session never outlives the control connection it was dialed
 // against.
 func (a *App) Disconnect() error {
 	a.stopVoiceSession()
-	return a.sess.Disconnect(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), disconnectTimeout)
+	defer cancel()
+	return a.sess.Disconnect(ctx)
+}
+
+// CancelConnect aborts a Connect or Reconnect still in flight (the Welcome
+// screen's CANCEL). The in-flight call then returns the session's
+// connect-cancelled error, which the frontend shows no error for. A no-op
+// when nothing is in flight.
+func (a *App) CancelConnect() {
+	a.sess.CancelConnect()
 }
 
 // Reconnect re-establishes the control session, then re-pushes the locally
@@ -104,7 +143,9 @@ func (a *App) UpdateRadioInfo(info RadioInfoDTO) error {
 		return err
 	}
 	a.refreshRXContext()
-	err = a.sess.UpdateRadioInfo(context.Background(), RadioInfoToProto(info))
+	ctx, cancel := context.WithTimeout(context.Background(), radioPushTimeout)
+	defer cancel()
+	err = a.sess.UpdateRadioInfo(ctx, RadioInfoToProto(info))
 	a.reportAction(actRadioSend, err)
 	return err
 }

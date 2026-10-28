@@ -6,6 +6,9 @@ export const EV = {
   clientLeft: "state:client_left",
   radioUpdate: "state:radio_update",
   authSession: "auth:session_changed",
+  // Emitted when the SERVER ended the session, always followed by
+  // authSession = "logged_out" (Phase 6.9 CL1).
+  authSessionEnded: "auth:session_ended",
   controlConnection: "control:connection",
   windowState: "window:state",
   settingsChanged: "settings:changed",
@@ -43,6 +46,12 @@ export const EV = {
 // resolveTXTarget / perRadioPTTID).
 export interface HotkeyEventPayload {
   action_id: string;
+}
+
+// SessionEndedPayload is the EV.authSessionEnded payload -- mirrors
+// internal/events.SessionEndedPayload.
+export interface SessionEndedPayload {
+  reason: string;
 }
 
 // on subscribes to a Wails event and returns an unsubscribe function.

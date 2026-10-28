@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/FPGSchiba/vcs-srs-client/internal/control"
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
 	"github.com/FPGSchiba/vcs-srs-client/internal/state"
@@ -20,7 +23,7 @@ func TestSyncClient_HydratesStore(t *testing.T) {
 
 	st := state.New()
 	c := control.New(conn, "tok")
-	if err := c.SyncClient(context.Background(), st); err != nil {
+	if _, err := c.SyncClient(context.Background(), st); err != nil {
 		t.Fatalf("SyncClient: %v", err)
 	}
 	if _, ok := st.Client("g1"); !ok {
@@ -42,7 +45,7 @@ func TestSyncClient_CapturesVoiceCredentials(t *testing.T) {
 
 	st := state.New()
 	c := control.New(conn, "tok")
-	if err := c.SyncClient(context.Background(), st); err != nil {
+	if _, err := c.SyncClient(context.Background(), st); err != nil {
 		t.Fatalf("SyncClient: %v", err)
 	}
 
@@ -71,7 +74,7 @@ func TestSyncClient_EmptyVoiceAddrsAreStoredAsIs(t *testing.T) {
 
 	st := state.New()
 	c := control.New(conn, "tok")
-	if err := c.SyncClient(context.Background(), st); err != nil {
+	if _, err := c.SyncClient(context.Background(), st); err != nil {
 		t.Fatalf("SyncClient: %v", err)
 	}
 
@@ -100,5 +103,70 @@ func TestUpdateRadioInfo_SendsPayload(t *testing.T) {
 	got := f.LastRadioInfo()
 	if got == nil || len(got.GetRadios()) != 1 || got.GetRadios()[0].GetName() != "Fleet" {
 		t.Fatalf("server did not receive radio: %+v", got)
+	}
+}
+
+func TestSyncClient_ReplacesRoster(t *testing.T) {
+	f := grpctest.NewFake()
+	f.SyncClients = map[string]*srspb.ClientInfo{"a": {Name: "A"}}
+	dial, cleanup := grpctest.Start(t, f)
+	defer cleanup()
+	conn, _ := dial(context.Background())
+
+	st := state.New()
+	st.UpdateClient("ghost", &srspb.ClientInfo{Name: "Ghost"})
+	st.SetRadios("ghost", &srspb.RadioInfo{})
+	if _, err := control.New(conn, "tok").SyncClient(context.Background(), st); err != nil {
+		t.Fatalf("SyncClient: %v", err)
+	}
+	snap := st.Snapshot()
+	if len(snap.Clients) != 1 || snap.Clients["a"] == nil {
+		t.Fatalf("clients = %v, want only a", snap.Clients)
+	}
+	if _, ok := snap.Radios["ghost"]; ok {
+		t.Fatal("ghost radios survived SyncClient")
+	}
+}
+
+func TestSyncClient_EmptySecretKeepsStoredSecret(t *testing.T) {
+	f := grpctest.NewFake()
+	f.SyncCoalitionVoiceAddr = "x:1"
+	// SyncVoiceSecret left "".
+	dial, cleanup := grpctest.Start(t, f)
+	defer cleanup()
+	conn, _ := dial(context.Background())
+
+	st := state.New()
+	st.SetVoiceCredentials("s1", "", "")
+	hadSecret, err := control.New(conn, "tok").SyncClient(context.Background(), st)
+	if err != nil {
+		t.Fatalf("SyncClient: %v", err)
+	}
+	if hadSecret {
+		t.Fatal("hadSecret = true for an empty voice_secret")
+	}
+	secret, coal, _ := st.VoiceCredentials()
+	if secret != "s1" {
+		t.Fatalf("secret = %q, want the stored s1 kept", secret)
+	}
+	if coal != "x:1" {
+		t.Fatalf("coalition addr = %q, want x:1", coal)
+	}
+}
+
+func TestSyncClient_FailureLeavesRoster(t *testing.T) {
+	f := grpctest.NewFake()
+	f.Fail("SyncClient", status.Error(codes.Internal, "boom"))
+	dial, cleanup := grpctest.Start(t, f)
+	defer cleanup()
+	conn, _ := dial(context.Background())
+
+	st := state.New()
+	st.UpdateClient("a", &srspb.ClientInfo{Name: "A"})
+	if _, err := control.New(conn, "tok").SyncClient(context.Background(), st); err == nil {
+		t.Fatal("expected SyncClient to fail")
+	}
+	if _, ok := st.Client("a"); !ok {
+		t.Fatal("a failed SyncClient must leave the roster untouched")
 	}
 }

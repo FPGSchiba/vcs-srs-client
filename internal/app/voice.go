@@ -1014,6 +1014,8 @@ func (a *App) pushPersistedRadios(ctx context.Context) {
 			IsIntercom: r.IsIntercom,
 		})
 	}
+	ctx, cancel := context.WithTimeout(ctx, radioPushTimeout)
+	defer cancel()
 	if err := a.sess.UpdateRadioInfo(ctx, info); err != nil {
 		a.logger.Warn("voice: failed to push persisted radios on connect", "err", err)
 	}

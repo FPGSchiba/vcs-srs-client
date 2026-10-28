@@ -30,6 +30,11 @@ type General struct {
 type Config struct {
 	LogLevel  string `toml:"log_level"`
 	ServerURL string `toml:"server_url"`
+	// LastServerAddress is the address of the last SUCCESSFUL connect, which
+	// the Welcome screen prefills (FE18, Phase 6.9 CL1 D4). Written only
+	// after a successful Connect; never accompanied by the password. It is
+	// deliberately separate from ServerURL, which it never touches.
+	LastServerAddress string `toml:"last_server_address"`
 	// TLSCAFile optionally pins the control connection to one certificate
 	// authority. Empty (the default) means the OS trust store is used for
 	// remote hosts, which is what the public deployment needs. Set it to a
@@ -356,6 +361,7 @@ func Default() *Config {
 	return &Config{
 		LogLevel:            "INFO",
 		ServerURL:           "",
+		LastServerAddress:   "",
 		TLSCAFile:           "",
 		PingIntervalSeconds: 5,
 		General: General{

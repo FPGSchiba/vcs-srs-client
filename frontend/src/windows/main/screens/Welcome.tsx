@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api } from "../../../shared/api/client";
 import { useSession } from "../../../shared/store/session";
@@ -53,19 +53,52 @@ function errorMessage(e: unknown): string {
  * rendered disabled. Submitting CONNECT drives the session phase and calls
  * api.connect; success transitions arrive via control:connection events wired
  * in MainApp. classNames match the design so the ported CSS applies unchanged.
+ *
+ * Phase 6.9 CL1: the manual stage is a <form> (Enter submits; BACK is
+ * type="button"), the server field is prefilled with the last successfully
+ * connected address, the connecting panel has a CANCEL, and the error slot is
+ * a role="alert" that also carries the session-ended notice -- when one is
+ * set, Welcome opens straight on the manual stage.
  */
 export function Welcome() {
   const setPhase = useSession((s) => s.setPhase);
   const phase = useSession((s) => s.phase);
   const build = useBuildInfo();
-  const [stage, setStage] = useState<Stage>("welcome");
+  const sessionNotice = useSession((s) => s.sessionNotice);
+  const setSessionNotice = useSession((s) => s.setSessionNotice);
+  const [stage, setStage] = useState<Stage>(() =>
+    useSession.getState().sessionNotice ? "manual" : "welcome",
+  );
   const [server, setServer] = useState("localhost:5002");
+  // serverTouched guards the remembered-address prefill: a late answer never
+  // overwrites what the user already typed.
+  const serverTouched = useRef(false);
+  // cancelledRef marks a connect the user CANCELled, so its rejection is not
+  // shown as an error (D3). Reset at the start of every connect().
+  const cancelledRef = useRef(false);
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [ffid, setFfid] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    let live = true;
+    api
+      .getLastServerAddress()
+      .then((addr) => {
+        if (live && addr && !serverTouched.current) setServer(addr);
+      })
+      .catch(() => {
+        /* keep the localhost:5002 fallback */
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   async function connect() {
+    cancelledRef.current = false;
+    setSessionNotice(null);
     setError(null);
     const idError = unitIdError(ffid);
     if (idError) {
@@ -79,9 +112,16 @@ export function Welcome() {
       // event wired in MainApp (phase → "connected").
     } catch (e) {
       setPhase("welcome");
-      setError(errorMessage(e));
+      if (!cancelledRef.current) setError(errorMessage(e));
     }
   }
+
+  function cancel() {
+    cancelledRef.current = true;
+    void api.cancelConnect();
+  }
+
+  const alertText = error ?? sessionNotice;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-0)" }}>
@@ -139,8 +179,11 @@ export function Welcome() {
                   <span className="cap" style={{ color: "var(--ac-primary)" }}>ESTABLISHING TACTICAL LINK</span>
                 </div>
                 <div className="cap cap-dim">Connecting to {server}…</div>
-                <div className="conn-pill warn" style={{ alignSelf: "flex-start" }}>
-                  <span className="dot" /> NEGOTIATING
+                <div className="row between acenter">
+                  <div className="conn-pill warn" style={{ alignSelf: "flex-start" }}>
+                    <span className="dot" /> NEGOTIATING
+                  </div>
+                  <Button variant="ghost" size="sm" type="button" onClick={cancel}>CANCEL</Button>
                 </div>
               </div>
             )}
@@ -157,17 +200,38 @@ export function Welcome() {
             )}
 
             {phase !== "connecting" && stage === "manual" && (
-              <div className="col gap-5" style={{ padding: 28 }}>
+              <form
+                className="col gap-5"
+                style={{ padding: 28 }}
+                noValidate
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void connect();
+                }}
+              >
                 <div className="row between acenter">
                   <div className="cap" style={{ color: "var(--ac-primary)" }}>MANUAL SERVER · GUEST</div>
-                  <Button variant="ghost" size="sm" onClick={() => setStage("welcome")}>BACK</Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    onClick={() => {
+                      setSessionNotice(null);
+                      setStage("welcome");
+                    }}
+                  >
+                    BACK
+                  </Button>
                 </div>
                 <Field label="Server Address" htmlFor="srv">
                   <input
                     id="srv"
                     className="input mono"
                     value={server}
-                    onChange={(e) => setServer(e.target.value)}
+                    onChange={(e) => {
+                      serverTouched.current = true;
+                      setServer(e.target.value);
+                    }}
                   />
                 </Field>
                 <Field label="Server Password" htmlFor="srv-pw">
@@ -180,10 +244,11 @@ export function Welcome() {
                   />
                 </Field>
                 <div className="row gap-4">
-                  <Field label="FFID (optional)" htmlFor="ffid" style={{ flex: 1 }}>
+                  <Field label="FFID" htmlFor="ffid" style={{ flex: 1 }}>
                     <input
                       id="ffid"
                       className="input mono"
+                      placeholder="e.g. VG12"
                       value={ffid}
                       // Auto-uppercase as typed -- matches how FFIDs are
                       // normally presented and removes the lowercase
@@ -201,13 +266,13 @@ export function Welcome() {
                     />
                   </Field>
                 </div>
-                {error && (
-                  <div className="cap" style={{ color: "var(--ac-alert)" }}>{error}</div>
+                {alertText && (
+                  <div className="cap" role="alert" style={{ color: "var(--ac-alert)" }}>{alertText}</div>
                 )}
-                <Button variant="primary" size="lg" onClick={() => void connect()}>
+                <Button variant="primary" size="lg" type="submit">
                   CONNECT
                 </Button>
-              </div>
+              </form>
             )}
           </div>
 

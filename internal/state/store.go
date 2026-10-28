@@ -204,6 +204,37 @@ func (s *Store) ClearSelf() {
 	s.notifyRadiosChanged()
 }
 
+// ResetRoster drops every known client and radio set, then notifies radio
+// observers once. Server settings, self and voice credentials are kept.
+//
+// SyncClient calls it immediately before hydrating, so a snapshot REPLACES
+// the roster rather than being merged into it: without this a client that
+// left while we were offline stayed in the roster forever (a ghost).
+func (s *Store) ResetRoster() {
+	s.mu.Lock()
+	s.clients = map[string]*srspb.ClientInfo{}
+	s.radios = map[string]*srspb.RadioInfo{}
+	s.mu.Unlock()
+	s.notifyRadiosChanged()
+}
+
+// ResetSession forgets everything a session put in the store apart from
+// self (ClearSelf owns that) and the server settings: the roster (see
+// ResetRoster) and the voice-plane secret and addresses. It runs on logout
+// and when the server ends the session, so a later login never inherits a
+// previous session's voice secret.
+//
+// Callers stop any live voice session BEFORE calling this: clearing the
+// credentials notifies voice-credential observers, and a live session would
+// otherwise read that as a redirect and redial with an empty secret.
+func (s *Store) ResetSession() {
+	s.ResetRoster()
+	s.mu.Lock()
+	s.voiceSecret, s.coalitionVoiceAddr, s.globalVoiceAddr = "", "", ""
+	s.mu.Unlock()
+	s.notifyVoiceCredentialsChanged()
+}
+
 // SetSettings overwrites the server settings and notifies settings
 // observers (see OnSettingsChanged) so a live voice session can refresh its
 // RX filter when the global/test frequency lists change mid-session.

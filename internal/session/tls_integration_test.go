@@ -3,11 +3,14 @@ package session
 import (
 	"context"
 	"crypto/tls"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
 )
@@ -15,21 +18,6 @@ import (
 func dialCtx(t *testing.T) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
-	return ctx
-}
-
-// refusalCtx is for the tests below that expect the handshake to be refused.
-// grpc.DialContext without WithBlock retries with backoff until the context
-// deadline, and grpc.WithReturnConnectionError only surfaces the underlying
-// error once that deadline is hit -- so the wait is bounded by this
-// deadline, not by how fast the handshake itself fails. 500ms was confirmed
-// to still surface the identical handshake errors these tests assert on;
-// using it instead of dialCtx's 5s keeps three refusal tests from adding
-// ~15s to every run of this package.
-func refusalCtx(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	t.Cleanup(cancel)
 	return ctx
 }
@@ -69,18 +57,14 @@ func TestTLS_UntrustedCertificateIsRefused(t *testing.T) {
 	serverCert := grpctest.NewTestCert(t, "localhost")
 	otherCert := grpctest.NewTestCert(t, "localhost") // a different issuer
 
-	dialWith, cleanup := grpctest.StartWith(t, &grpctest.Fake{}, credentials.NewServerTLSFromCert(&serverCert.Certificate))
-	t.Cleanup(cleanup)
-
 	clientCreds := credentials.NewTLS(&tls.Config{
 		RootCAs:    otherCert.Pool(), // pins the WRONG issuer
 		ServerName: "localhost",
 		MinVersion: tls.VersionTLS12,
 	})
 
-	conn, err := dialWith(refusalCtx(t), clientCreds)
+	err := grpctest.DialUntilFailure(t, &grpctest.Fake{}, credentials.NewServerTLSFromCert(&serverCert.Certificate), clientCreds)
 	if err == nil {
-		_ = conn.Close()
 		t.Fatal("expected a certificate signed by an untrusted issuer to be refused")
 	}
 	// Pins the failure to the untrusted-issuer verification path, not merely
@@ -93,18 +77,14 @@ func TestTLS_UntrustedCertificateIsRefused(t *testing.T) {
 
 func TestTLS_HostnameMismatchIsRefused(t *testing.T) {
 	cert := grpctest.NewTestCert(t, "srs.example.org") // no "localhost" SAN
-	dialWith, cleanup := grpctest.StartWith(t, &grpctest.Fake{}, credentials.NewServerTLSFromCert(&cert.Certificate))
-	t.Cleanup(cleanup)
-
 	clientCreds := credentials.NewTLS(&tls.Config{
 		RootCAs:    cert.Pool(), // issuer IS trusted; only the name is wrong
 		ServerName: "localhost",
 		MinVersion: tls.VersionTLS12,
 	})
 
-	conn, err := dialWith(refusalCtx(t), clientCreds)
+	err := grpctest.DialUntilFailure(t, &grpctest.Fake{}, credentials.NewServerTLSFromCert(&cert.Certificate), clientCreds)
 	if err == nil {
-		_ = conn.Close()
 		t.Fatal("expected a certificate valid for a different name to be refused")
 	}
 	if !strings.Contains(err.Error(), "x509") {
@@ -116,18 +96,14 @@ func TestTLS_ClientAgainstPlaintextServerFails(t *testing.T) {
 	// The failure an operator hits when they upgrade the client before the
 	// server, or forget the clientTLS block entirely.
 	cert := grpctest.NewTestCert(t, "localhost")
-	dialWith, cleanup := grpctest.StartWith(t, &grpctest.Fake{}, nil) // plaintext server
-	t.Cleanup(cleanup)
-
 	clientCreds := credentials.NewTLS(&tls.Config{
 		RootCAs:    cert.Pool(),
 		ServerName: "localhost",
 		MinVersion: tls.VersionTLS12,
 	})
 
-	conn, err := dialWith(refusalCtx(t), clientCreds)
+	err := grpctest.DialUntilFailure(t, &grpctest.Fake{}, nil, clientCreds) // plaintext server
 	if err == nil {
-		_ = conn.Close()
 		t.Fatal("expected a TLS client against a plaintext server to fail")
 	}
 	// Pins the failure to the TLS client speaking to a plaintext peer, not
@@ -139,26 +115,54 @@ func TestTLS_ClientAgainstPlaintextServerFails(t *testing.T) {
 }
 
 func TestTLS_PlaintextServerProducesTheExplainedError(t *testing.T) {
-	// Proves the error string a real failed TLS handshake produces (via
-	// WithReturnConnectionError, against a genuine plaintext listener) is
+	// Proves the error string a real failed TLS handshake produces (the
+	// last connection error an RPC carries, against a genuine plaintext
+	// listener) is
 	// one explainDialError matches -- explainDialError itself is still
 	// called by hand below, not reached through dial()'s own error path.
 	cert := grpctest.NewTestCert(t, "localhost")
-	dialWith, cleanup := grpctest.StartWith(t, &grpctest.Fake{}, nil) // plaintext
-	t.Cleanup(cleanup)
-
 	clientCreds := credentials.NewTLS(&tls.Config{
 		RootCAs:    cert.Pool(),
 		ServerName: "localhost",
 		MinVersion: tls.VersionTLS12,
 	})
 
-	_, err := dialWith(refusalCtx(t), clientCreds)
+	err := grpctest.DialUntilFailure(t, &grpctest.Fake{}, nil, clientCreds) // plaintext
 	if err == nil {
 		t.Fatal("expected the dial to fail")
 	}
 	explained := explainDialError(err, "srs.example.org:5002", "")
 	if !strings.Contains(explained.Error(), "not speaking TLS") {
 		t.Fatalf("expected the plaintext-server diagnosis, got: %v", explained)
+	}
+}
+
+// Review finding (CL1): TestTLS_PlaintextServerProducesTheExplainedError now
+// feeds explainDialError an RPC error from a non-blocking channel. This test
+// keeps one check on the exact shape production's dial path returns:
+// boundedDial (blocking, WithReturnConnectionError) against a plaintext
+// listener, with a bound generous enough that the first handshake has long
+// failed before it expires even under a loaded -race run.
+func TestTLS_BoundedDialAgainstPlaintextIsExplained(t *testing.T) {
+	cert := grpctest.NewTestCert(t, "localhost")
+	lis := bufconn.Listen(1024 * 1024)
+	srv := grpc.NewServer() // plaintext
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(func() { srv.Stop(); _ = lis.Close() })
+
+	creds := credentials.NewTLS(&tls.Config{
+		RootCAs:    cert.Pool(),
+		ServerName: "localhost",
+		MinVersion: tls.VersionTLS12,
+	})
+	conn, err := boundedDial(context.Background(), 3*time.Second, "passthrough:///bufnet", creds,
+		grpc.WithContextDialer(func(c context.Context, _ string) (net.Conn, error) { return lis.DialContext(c) }))
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("expected the dial to fail")
+	}
+	explained := explainDialError(err, "srs.example.org:5002", "")
+	if !strings.Contains(explained.Error(), "not speaking TLS") {
+		t.Fatalf("expected the plaintext-server diagnosis from boundedDial's own error, got: %v", explained)
 	}
 }

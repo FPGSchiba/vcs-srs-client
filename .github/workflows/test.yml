@@ -42,30 +42,32 @@ jobs:
           repository: FPGSchiba/vcs-srs-server
           # Pinned, not `main`: client CI must not go red because the server
           # moved. Bump this SHA deliberately in the PR that needs newer server
-          # behaviour (Phase 6.9 track CL1 bumps it after SV1/SV3).
-          ref: c3096ce6acb421d2e530e0238471dacdf1b1128e
+          # behaviour. Currently server `main` after #230 (SV2, including the
+          # C17 subscription ack), which Phase 6.9 CL1's subscribe-first
+          # Connect/Reconnect/resync is coded against; #229 (SV3, SV5, SV1:
+          # session liveness) is below it.
+          ref: 850d984e186099d13acd6066f40ceb22ed2f7760
           path: .vcs-srs-server
 
       # TWO TOOLCHAINS IN ONE JOB. The server is generated and built with the
-      # SERVER's own Go (read from its go.mod -- go 1.25.0 at the pinned SHA),
-      # and only then does the job switch to the client's pinned go1.27.3
-      # (the second setup-go below, after "Export the server binary path").
-      # setup-go exports GOTOOLCHAIN=local and prepends its Go to PATH, so each
-      # step runs exactly the toolchain most recently set up -- no silent
-      # auto-download. Why split at all: the server's gqlgen (v0.17.89, with
-      # golang.org/x/tools v0.42.0) exits 1 with no message when run under
-      # go1.27.3, which is what failed this job once the client moved to 1.27.
-      # The server is not ours to re-toolchain from here; when the server repo
-      # moves to Go 1.27 itself, bumping the pinned SHA above carries that over
-      # with no change to this step.
+      # SERVER's own Go (read from its go.mod -- go 1.27.0 / toolchain
+      # go1.27.3 at the pinned SHA), and only then does the job switch to the
+      # client's pinned go1.27.3 (the second setup-go below, after "Export the
+      # server binary path"). setup-go exports GOTOOLCHAIN=local and prepends
+      # its Go to PATH, so each step runs exactly the toolchain most recently
+      # set up -- no silent auto-download. The two happen to match today; the
+      # split is kept on purpose so the server is always built with its own
+      # go.mod's toolchain, independent of the client's, and a future server
+      # toolchain move is carried over by bumping the pinned SHA alone.
       #
       # cache: false -- both setup-go steps share one GOMODCACHE, whose files
       # are read-only, so two cache restores into it can collide. The
       # server's modules are downloaded fresh instead; only the client's
       # setup-go caches.
       #
-      # No toolchain assert here: the assert script compares against a
-      # `toolchain` directive, which the server's go.mod (not ours) lacks.
+      # No toolchain assert here: the assert script guards the CLIENT's
+      # go.mod `toolchain` directive; the server's go.mod is not ours to
+      # police from this job.
       - name: Setup Go (server's go.mod)
         uses: actions/setup-go@v7
         with:
@@ -170,7 +172,13 @@ jobs:
           protoc --go_out=./srspb --go_opt=paths=source_relative --go-grpc_out=./srspb --go-grpc_opt=paths=source_relative srs.proto
           protoc --go_out=./voicecontrolpb --go_opt=paths=source_relative --go-grpc_out=./voicecontrolpb --go-grpc_opt=paths=source_relative control.proto
           protoc --go_out=./vcsauthpb --go_opt=paths=source_relative --go-grpc_out=./vcsauthpb --go-grpc_opt=paths=source_relative vcs-auth-plugin.proto
-          go run github.com/99designs/gqlgen@$(go list -m -f '{{.Version}}' github.com/99designs/gqlgen) generate
+          # gqlgen runs IN-MODULE (no @version), exactly as the server's own
+          # .github/actions/generate/action.yml does: `go run pkg@version`
+          # builds gqlgen against gqlgen's own go.mod (golang.org/x/tools
+          # v0.42.0), which fails under Go 1.27; the server's go.mod raises
+          # x/tools and declares gqlgen as a `tool`. That composite action
+          # itself is not reused because it is Linux-X64-only.
+          go run github.com/99designs/gqlgen generate
 
       - name: Build the headless VCS server
         run: |

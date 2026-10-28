@@ -8,6 +8,7 @@ import { useSettingsSync } from "../../shared/store/useSettingsSync";
 import { useConnectionSync } from "../../shared/store/useConnectionSync";
 import { useNotificationsSync } from "../../shared/store/useNotificationsSync";
 import { useClientStateSync } from "../../shared/store/useClientStateSync";
+import { useSessionEndedNotice } from "../../shared/store/useSessionEndedNotice";
 import { hydrateSnapshot } from "../../shared/store/hydrate";
 import { TopBar } from "../../shared/components/TopBar";
 import { NavRail } from "../../shared/components/NavRail";
@@ -61,6 +62,7 @@ export function MainApp() {
   // Clients, radios, self and the selection: hydrated, kept live, and
   // cleared on logout by the shared hook (FE01, FE02).
   useClientStateSync();
+  useSessionEndedNotice();
 
   useEffect(() => {
     // FE08: a window:state push during the hydrate is newer, so the late

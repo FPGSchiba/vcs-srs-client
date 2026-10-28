@@ -309,3 +309,52 @@ func TestStore_OnSettingsChanged_ObserverCanReadTheStore(t *testing.T) {
 		t.Errorf("observer saw global frequencies %v, want [251.000]", seenGlobal)
 	}
 }
+
+func TestResetRoster_ClearsClientsAndRadiosNotifiesOnce(t *testing.T) {
+	s := state.New()
+	s.UpdateClient("a", &srspb.ClientInfo{Name: "A"})
+	s.SetRadios("a", &srspb.RadioInfo{})
+	s.SetSettings(&srspb.ServerSettings{})
+	n := 0
+	s.OnRadiosChanged(func() { n++ })
+
+	s.ResetRoster()
+
+	if n != 1 {
+		t.Fatalf("radio observers notified %d times, want 1", n)
+	}
+	if _, ok := s.Client("a"); ok {
+		t.Fatal("client a survived ResetRoster")
+	}
+	if _, ok := s.Radios("a"); ok {
+		t.Fatal("radios for a survived ResetRoster")
+	}
+	if s.Settings() == nil {
+		t.Fatal("ResetRoster must keep the server settings")
+	}
+}
+
+func TestResetSession_ClearsVoiceCredentials(t *testing.T) {
+	s := state.New()
+	s.SetSelf("me", &srspb.ClientInfo{Name: "Me"})
+	s.UpdateClient("a", &srspb.ClientInfo{Name: "A"})
+	s.SetVoiceCredentials("secret", "c:1", "g:1")
+	voiceN := 0
+	s.OnVoiceCredentialsChanged(func() { voiceN++ })
+
+	s.ResetSession()
+
+	secret, coal, global := s.VoiceCredentials()
+	if secret != "" || coal != "" || global != "" {
+		t.Fatalf("voice credentials = %q %q %q, want all empty", secret, coal, global)
+	}
+	if voiceN != 1 {
+		t.Fatalf("voice observers notified %d times, want 1", voiceN)
+	}
+	if _, ok := s.Client("a"); ok {
+		t.Fatal("client a survived ResetSession")
+	}
+	if snap := s.Snapshot(); snap.SelfGUID != "me" {
+		t.Fatalf("ResetSession must not clear self (ClearSelf does); SelfGUID = %q", snap.SelfGUID)
+	}
+}

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/notify"
+	"github.com/FPGSchiba/vcs-srs-client/internal/session"
 	"github.com/FPGSchiba/vcs-srs-client/srspb"
 )
 
@@ -202,3 +204,92 @@ func TestMicTestAndPreviewWithoutBackendRaise(t *testing.T) {
 		t.Fatalf("keys = %v, want action:audio.mictest and action:audio.preview", got)
 	}
 }
+
+// assertDeadlineWithin checks ctx carries a deadline no later than max after
+// end, the time the call under test RETURNED. Measuring from a time taken
+// before the call fails on any clock finer than the call itself: the deadline
+// is time.Now()+max inside the call, so it lies max plus the call's own
+// duration after a "start" taken before it (seen on the Linux and macOS CI
+// legs; Windows' coarse clock hid it).
+func assertDeadlineWithin(t *testing.T, ctx context.Context, end time.Time, max time.Duration) {
+	t.Helper()
+	if ctx == nil {
+		t.Fatal("no call recorded")
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("the RPC context has no deadline")
+	}
+	if dl.Sub(end) > max {
+		t.Fatalf("deadline %v after the call returned, want <= %v", dl.Sub(end), max)
+	}
+}
+
+// GO-03: radio pushes are bounded at 5 s (D1).
+func TestUpdateRadioInfo_HasDeadline(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	fs := &fakeControlSession{}
+	a.sess = fs
+	if err := a.UpdateRadioInfo(RadioInfoDTO{Radios: []RadioDTO{
+		{ID: 1, Name: "Radio 1", Frequency: 130.000, Enabled: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	assertDeadlineWithin(t, fs.lastCtx(), time.Now(), 5*time.Second)
+}
+
+func TestPushPersistedRadios_HasDeadline(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	fs := &fakeControlSession{}
+	a.sess = fs
+	if err := a.Connect("localhost:5002", "n", "p", "u"); err != nil {
+		t.Fatal(err)
+	}
+	assertDeadlineWithin(t, fs.lastCtx(), time.Now(), 5*time.Second)
+}
+
+// A session the server ended has already told the user; a stale "not sent
+// to the server" toast after re-login would be noise.
+func TestReportAction_SessionEndedResolves(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	n := notify.New(notify.Options{})
+	a.setNotifier(n)
+	a.reportAction(actRadioSend, errors.New("plain"))
+	a.reportAction(actRadioSend, fmt.Errorf("x: %w", session.ErrSessionEnded))
+	items := n.Snapshot().Items
+	if len(items) != 1 || items[0].Key != "action:radio.send" || !items[0].Resolved {
+		t.Fatalf("items = %+v, want the one radio.send item resolved", items)
+	}
+}
+
+// hookSession is a sessionAPI that also accepts the session-ended hook.
+type hookSession struct {
+	fakeControlSession
+	hook func(string)
+}
+
+func (h *hookSession) SetSessionEndedHook(fn func(string)) { h.hook = fn }
+
+func TestSetBackend_InstallsSessionEndedHook(t *testing.T) {
+	a, _, _ := newTestApp(t)
+	hs := &hookSession{}
+	SetBackend(a, hs, nil)
+	if hs.hook == nil {
+		t.Fatal("SetBackend did not install the session-ended hook")
+	}
+	live := &fakeVoiceSession{}
+	a.voice.mu.Lock()
+	a.voice.sess = live
+	a.voice.mu.Unlock()
+
+	hs.hook("kicked")
+
+	if a.voiceSession() != nil {
+		t.Fatal("voice still live after the server ended the session")
+	}
+}
+
+// SetBackend wires the session-ended hook through an optional-interface
+// assertion. Pin at compile time that the real Session satisfies it, so a
+// signature drift cannot silently disable the voice stop (spec R3).
+var _ interface{ SetSessionEndedHook(func(string)) } = (*session.Session)(nil)

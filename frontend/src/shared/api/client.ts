@@ -111,6 +111,8 @@ export const api = {
     App.Connect(server, name, password, unitId),
   disconnect: () => App.Disconnect(),
   reconnect: () => App.Reconnect(),
+  cancelConnect: (): Promise<void> => App.CancelConnect(),
+  getLastServerAddress: (): Promise<string> => App.GetLastServerAddress(),
   getClientState: (): Promise<ClientStateSnapshot> =>
     narrow<ClientStateSnapshot>(App.GetClientState()),
   updateRadioInfo: (info: RadioInfoDTO) => App.UpdateRadioInfo(info),

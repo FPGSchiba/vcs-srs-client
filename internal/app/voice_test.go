@@ -44,6 +44,25 @@ func newTestAppWithConfig(t *testing.T, cfg *config.Config, cfgPath string) *App
 type fakeControlSession struct {
 	mu      sync.Mutex
 	updates []*srspb.RadioInfo
+	// ctxs records the context every UpdateRadioInfo received, so the
+	// GO-03 tests can assert a deadline was set.
+	ctxs           []context.Context
+	cancelConnects int
+}
+
+func (f *fakeControlSession) CancelConnect() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelConnects++
+}
+
+func (f *fakeControlSession) lastCtx() context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.ctxs) == 0 {
+		return nil
+	}
+	return f.ctxs[len(f.ctxs)-1]
 }
 
 func (f *fakeControlSession) Connect(context.Context, string, string, string, string) error {
@@ -55,10 +74,11 @@ func (f *fakeControlSession) Reconnect(context.Context) error  { return nil }
 func (f *fakeControlSession) PingOnce(context.Context, int64) (int64, error) { return 1, nil }
 func (f *fakeControlSession) MarkControlLost()                               {}
 
-func (f *fakeControlSession) UpdateRadioInfo(_ context.Context, info *srspb.RadioInfo) error {
+func (f *fakeControlSession) UpdateRadioInfo(ctx context.Context, info *srspb.RadioInfo) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updates = append(f.updates, info)
+	f.ctxs = append(f.ctxs, ctx)
 	return nil
 }
 

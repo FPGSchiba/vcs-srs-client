@@ -25,6 +25,11 @@ const (
 	EventHotkeyPressed     = "hotkey:pressed"
 	EventHotkeyReleased    = "hotkey:released"
 	EventHotkeysState      = "hotkeys:state"
+	// EventAuthSessionEnded is emitted when the SERVER ended this client's
+	// session (removed, kicked, banned, restarted, token expired), always
+	// immediately followed by EventAuthSession = "logged_out". Payload:
+	// SessionEndedPayload.
+	EventAuthSessionEnded = "auth:session_ended"
 	// EventJoystickCaptured is emitted when a joystick capture completed and bound
 	// itself.
 	EventJoystickCaptured = "keybinds:joy_captured"
@@ -206,6 +211,18 @@ func (t *Tagged) RadioUpdate(guid string, info RadioInfoPayload) {
 
 // SessionChanged emits EventAuthSession ("logged_in" | "logged_out").
 func (t *Tagged) SessionChanged(state string) { t.em.Emit(EventAuthSession, state) }
+
+// SessionEndedPayload is the EventAuthSessionEnded payload. Reason is the
+// server's reason ("kicked", "banned", "stale", "stream lost", ...) or
+// "expired" when it gave none; the frontend maps it to the copy.
+type SessionEndedPayload struct {
+	Reason string `json:"reason"`
+}
+
+// SessionEnded emits EventAuthSessionEnded.
+func (t *Tagged) SessionEnded(reason string) {
+	t.em.Emit(EventAuthSessionEnded, SessionEndedPayload{Reason: reason})
+}
 
 // HotkeyStatePayload is the EventHotkeysState payload.
 type HotkeyStatePayload struct {
