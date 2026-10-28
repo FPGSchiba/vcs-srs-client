@@ -61,6 +61,19 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 	if hold <= 0 {
 		return nil, ReceiveCapacity{}, fmt.Errorf("calibrate: hold %v must be > 0", hold)
 	}
+	// Bots persist across steps and stay registered at the reflector, so a
+	// step smaller than an earlier one would carry more load than its N says.
+	if len(ns) == 0 {
+		return nil, ReceiveCapacity{}, fmt.Errorf("calibrate: no steps")
+	}
+	for i, n := range ns {
+		if n < 2 {
+			return nil, ReceiveCapacity{}, fmt.Errorf("calibrate: step %d needs >= 2 bots", n)
+		}
+		if i > 0 && n <= ns[i-1] {
+			return nil, ReceiveCapacity{}, fmt.Errorf("calibrate: steps %v are not strictly ascending", ns)
+		}
+	}
 	const freq = voice.KHz(251000)
 	var bots []*VoiceConn
 	defer func() {
@@ -93,9 +106,6 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 	}
 	var steps []CalStep
 	for _, n := range ns {
-		if n < 2 {
-			return steps, ReceiveCapacity{}, fmt.Errorf("calibrate: step %d needs >= 2 bots", n)
-		}
 		for len(bots) < n {
 			if err := ctx.Err(); err != nil {
 				return steps, ReceiveCapacity{}, err

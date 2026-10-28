@@ -14,7 +14,8 @@ const ReportLabel = "Shared GitHub runner (4 vCPU), loopback, relative only. Not
 
 // JoinLabel qualifies JoinP99Us: joins are closed-loop, so it is not an
 // open-loop latency (design 4.5g).
-const JoinLabel = "closed-loop, <= 16 in flight; server-side cost only, client hash excluded"
+// Both plan labels appear verbatim, joined by "; ".
+const JoinLabel = "closed-loop, <= 16 in flight; server-side cost only; client hash excluded"
 
 // Command is one NDJSON line on the bot's stdin. Exactly one field is set.
 type Command struct {
