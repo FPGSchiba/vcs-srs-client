@@ -85,6 +85,14 @@ func TestLoadbotOneBigNetAgainstRealServer(t *testing.T) {
 	if s.Unique == 0 || s.Resyncs.Hold != 0 {
 		t.Fatalf("Unique=%d Resyncs.Hold=%d", s.Unique, s.Resyncs.Hold)
 	}
+	if len(r.lastPerListener) != 7 {
+		t.Fatalf("per-listener results = %d, want 7", len(r.lastPerListener))
+	}
+	for i, lr := range r.lastPerListener {
+		if lr.Unique == 0 {
+			t.Fatalf("listener %d received nothing", i)
+		}
+	}
 	if s.Updates["CLIENT_JOINED"] < 1 {
 		t.Fatalf("Updates = %v", s.Updates)
 	}

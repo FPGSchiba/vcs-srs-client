@@ -26,6 +26,7 @@ func TestBoundsViolations(t *testing.T) {
 		{"wheel_lag_p99", func(h *Health) { h.WheelLagP99 = over }, []string{"wheel_lag_p99"}},
 		{"sched_p99", func(h *Health) { h.SchedP99 = over }, []string{"sched_p99"}},
 		{"gc_pause_p99", func(h *Health) { h.GCPauseP99 = over }, []string{"gc_pause_p99"}},
+		{"send_errors", func(h *Health) { h.SendErrors = 1 }, []string{"send_errors"}},
 		{"gen_cpu", func(h *Health) { h.GenCPU = 0.86 }, []string{"gen_cpu"}},
 		{"nil rx lag", func(h *Health) { h.RxLagP99 = nil }, []string{}},
 		{"gen cpu measured by kit", func(h *Health) { h.GenCPU = -1 }, []string{}},

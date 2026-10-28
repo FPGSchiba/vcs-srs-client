@@ -134,10 +134,43 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		defer cancel()
 		r.shutdown(cctx)
 	}()
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := sc.Bytes()
+	// Read stdin in a goroutine so ctx cancellation is honoured while it is
+	// blocked. After a cancel that goroutine stays parked in Read until the
+	// caller closes stdin or the process exits.
+	type inLine struct {
+		b   []byte
+		err error
+		eof bool
+	}
+	lines := make(chan inLine)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		sc := bufio.NewScanner(in)
+		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+		for sc.Scan() {
+			select {
+			case lines <- inLine{b: append([]byte(nil), sc.Bytes()...)}:
+			case <-stop:
+				return
+			}
+		}
+		select {
+		case lines <- inLine{err: sc.Err(), eof: true}:
+		case <-stop:
+		}
+	}()
+	for {
+		var line []byte
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case l := <-lines:
+			if l.eof {
+				return l.err
+			}
+			line = l.b
+		}
 		if len(line) == 0 {
 			continue
 		}
@@ -164,7 +197,6 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			return cerr
 		}
 	}
-	return sc.Err()
 }
 
 func (r *Runner) botName(i int) string { return fmt.Sprintf("%s-%04d", r.cfg.Unit, i) }
@@ -359,6 +391,8 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 		l.voice.RxLag.Reset()
 	}
 	r.wheel.Reset()
+	resync0, rex0 := phaseCounts(&r.resync), phaseCounts(&r.rex)
+	sendErr0 := r.sendErrors.Load()
 	drops0 := make([]uint32, len(listeners))
 	for i, l := range listeners {
 		drops0[i] = l.voice.Drops.Load()
@@ -395,6 +429,7 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 		rx.Merge(l.voice.RxLag)
 	}
 	h.SocketDrops = drops
+	h.SendErrors = r.sendErrors.Load() - sendErr0
 	if rx.Count() > 0 {
 		p := rx.Quantile(0.99)
 		h.RxLagP99 = &p
@@ -407,9 +442,10 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 		Type: "step", Label: ReportLabel, Payload: PayloadLabel,
 		Arm: r.cfg.Arm, Scenario: r.cfg.Scenario.Name,
 		N: len(r.bots), Talkers: 1, Listeners: len(listeners), HoldS: secs,
-		Resyncs: phaseCounts(&r.resync), ResourceExhausted: phaseCounts(&r.rex),
-		Updates:   r.updateTotals(),
-		JoinP99Us: r.joinHist.Quantile(0.99).Microseconds(), JoinLabel: JoinLabel,
+		Resyncs:           holdDelta(phaseCounts(&r.resync), resync0),
+		ResourceExhausted: holdDelta(phaseCounts(&r.rex), rex0),
+		Updates:           r.updateTotals(),
+		JoinP99Us:         r.joinHist.Quantile(0.99).Microseconds(), JoinLabel: JoinLabel,
 		Health: NewHealthReport(h), Bounds: NewBoundsReport(r.cfg.Bounds),
 	}
 	rep.Violations = r.cfg.Bounds.Violations(h)

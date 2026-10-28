@@ -68,6 +68,14 @@ type PhaseCounts struct {
 	Hold   uint64 `json:"hold"`
 }
 
+// holdDelta turns cumulative counts into a per-hold figure: Hold is the
+// increase since base; Ramp and Settle stay cumulative, because they accrue
+// between holds (set_n and idle time), not inside one.
+func holdDelta(now, base PhaseCounts) PhaseCounts {
+	now.Hold -= base.Hold
+	return now
+}
+
 func phaseCounts(c *PhaseCounter) PhaseCounts {
 	return PhaseCounts{Ramp: c[PhaseRamp].Load(), Settle: c[PhaseSettle].Load(), Hold: c[PhaseHold].Load()}
 }
@@ -75,6 +83,7 @@ func phaseCounts(c *PhaseCounter) PhaseCounts {
 // HealthReport is Health in wire form: microseconds, null for not available.
 type HealthReport struct {
 	SocketDrops   uint64   `json:"socket_drops"`
+	SendErrors    uint64   `json:"send_errors"`
 	RxLagP99Us    *int64   `json:"rx_lag_p99_us"`
 	WheelLagP99Us int64    `json:"wheel_lag_p99_us"`
 	SchedP99Us    int64    `json:"sched_p99_us"`
@@ -86,6 +95,7 @@ type HealthReport struct {
 func NewHealthReport(h Health) HealthReport {
 	r := HealthReport{
 		SocketDrops:   h.SocketDrops,
+		SendErrors:    h.SendErrors,
 		WheelLagP99Us: h.WheelLagP99.Microseconds(),
 		SchedP99Us:    h.SchedP99.Microseconds(),
 		GCPauseP99Us:  h.GCPauseP99.Microseconds(),

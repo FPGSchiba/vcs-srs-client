@@ -26,6 +26,9 @@ var DefaultBounds = Bounds{
 // Health is the generator's own measured state over one hold window.
 type Health struct {
 	SocketDrops uint64
+	// SendErrors counts frames the generator failed to send during the hold;
+	// any is a generator fault, not server loss.
+	SendErrors  uint64
 	RxLagP99    *time.Duration // nil = not available (off Linux)
 	WheelLagP99 time.Duration
 	SchedP99    time.Duration
@@ -39,6 +42,9 @@ func (b Bounds) Violations(h Health) []string {
 	v := []string{}
 	if h.SocketDrops > b.MaxSocketDrops {
 		v = append(v, "socket_drops")
+	}
+	if h.SendErrors > 0 {
+		v = append(v, "send_errors")
 	}
 	if h.RxLagP99 != nil && *h.RxLagP99 > b.RxLagP99 {
 		v = append(v, "rx_lag_p99")
