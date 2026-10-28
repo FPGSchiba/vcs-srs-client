@@ -1,6 +1,7 @@
 package loadgen
 
 import (
+	"sync"
 	"context"
 	"errors"
 	"testing"
@@ -111,15 +112,15 @@ func TestCalibrateProgress(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var lines []ProgressLine
-	var mu chan struct{} = make(chan struct{}, 1)
+	var mu sync.Mutex
 	_, _, _ = Calibrate(ctx, proxy, allow, 1, []int{4}, time.Second,
 		WithProgress(50*time.Millisecond, func(p ProgressLine) {
-			mu <- struct{}{}
+			mu.Lock()
 			lines = append(lines, p)
-			<-mu
+			mu.Unlock()
 		}))
-	mu <- struct{}{}
-	defer func() { <-mu }()
+	mu.Lock()
+	defer mu.Unlock()
 	if len(lines) == 0 {
 		t.Fatal("no progress lines")
 	}
@@ -127,5 +128,15 @@ func TestCalibrateProgress(t *testing.T) {
 		if p.Type != "progress" || p.Phase != "calibrate_ramp" || p.Target != 4 {
 			t.Errorf("line = %+v", p)
 		}
+	}
+	prev := 0
+	for _, p := range lines {
+		if p.Bots < prev {
+			t.Errorf("Bots went backwards: %d after %d", p.Bots, prev)
+		}
+		prev = p.Bots
+	}
+	if last := lines[len(lines)-1]; last.ElapsedS <= 0 {
+		t.Errorf("ElapsedS = %v, want > 0", last.ElapsedS)
 	}
 }

@@ -162,6 +162,9 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 			v, err := DialVoice(reflAddr, DeterministicUUID(seed, idx))
 			if err != nil {
 				stopRamp()
+				if cerr := ctx.Err(); cerr != nil {
+					return steps, ReceiveCapacity{}, cerr
+				}
 				return stopped(&CalStoppedError{N: n, Bots: idx, Stage: "voice_dial", Bot: idx, Err: err})
 			}
 			hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
