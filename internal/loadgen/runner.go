@@ -267,6 +267,10 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 		// there is nothing to measure, so its failure stays fatal.
 		b, err := r.joinOne(ctx, 0, r.fullSet[0])
 		if err != nil {
+			// Fatal for the whole command (Serve exits), and the progress
+			// ticker has not started. Reset the phase anyway so making this
+			// error non-fatal later cannot leave the runner stuck in ramp.
+			r.phase.Store(int32(PhaseSettle))
 			return JoinReport{}, err
 		}
 		r.bots = append(r.bots, b)
@@ -298,8 +302,14 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 			idx := first + k
 			b, err := r.joinOne(ctx, idx, r.fullSet[idx])
 			if err != nil {
+				if ctx.Err() != nil {
+					// Interrupted by cancellation, not a join failure. The
+					// tally is discarded (setN returns ctx.Err()), so do not
+					// record a misleading control-stage failure.
+					return
+				}
 				var je *JoinError
-				if ctx.Err() == nil && errors.As(err, &je) {
+				if errors.As(err, &je) {
 					tally.fail(je.failure())
 					return
 				}
@@ -331,14 +341,22 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 	return rep, nil
 }
 
+// defaultProgressEvery is the progress-line period when none is configured.
+const defaultProgressEvery = 5 * time.Second
+
+// progressPeriod returns every, or the 5 s default when it is not positive.
+func progressPeriod(every time.Duration) time.Duration {
+	if every <= 0 {
+		return defaultProgressEvery
+	}
+	return every
+}
+
 // startProgress writes a ramp progress line every progressEvery (5 s by
 // default) until the returned stop function is called. A ramp shorter than
 // the period writes none.
 func (r *Runner) startProgress(t *joinTally) (stop func()) {
-	every := r.progressEvery
-	if every <= 0 {
-		every = 5 * time.Second
-	}
+	every := progressPeriod(r.progressEvery)
 	if r.out == nil {
 		return func() {}
 	}

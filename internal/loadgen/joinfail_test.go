@@ -209,4 +209,40 @@ func TestServeProgressLines(t *testing.T) {
 	if pi < 0 || ji < 0 || pi > ji {
 		t.Fatalf("progress index %d, joins index %d; want progress before joins", pi, ji)
 	}
+	// Counter values on the last progress line before the joins line.
+	var last map[string]any
+	for _, m := range lines[:ji] {
+		if m["type"] == "progress" {
+			last = m
+		}
+	}
+	num := func(k string) int {
+		v, ok := last[k].(float64)
+		if !ok {
+			t.Fatalf("progress key %q missing or not a number: %v", k, last)
+		}
+		return int(v)
+	}
+	if num("requested") != 4 || num("had") != 0 {
+		t.Errorf("requested/had = %d/%d, want 4/0", num("requested"), num("had"))
+	}
+	done, inFlight := num("done"), num("in_flight")
+	if done != num("joined")+num("join_failures") {
+		t.Errorf("done %d != joined %d + join_failures %d", done, num("joined"), num("join_failures"))
+	}
+	if done+inFlight > 4 || done < 1 {
+		t.Errorf("done %d, in_flight %d inconsistent with 4 requested", done, inFlight)
+	}
+}
+
+func TestProgressPeriodDefault(t *testing.T) {
+	if got := progressPeriod(0); got != 5*time.Second {
+		t.Errorf("progressPeriod(0) = %v, want 5s", got)
+	}
+	if got := progressPeriod(-1); got != 5*time.Second {
+		t.Errorf("progressPeriod(-1) = %v, want 5s", got)
+	}
+	if got := progressPeriod(100 * time.Millisecond); got != 100*time.Millisecond {
+		t.Errorf("progressPeriod(100ms) = %v", got)
+	}
 }
