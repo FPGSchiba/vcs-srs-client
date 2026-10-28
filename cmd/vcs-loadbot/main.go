@@ -49,8 +49,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(errw, "vcs-loadbot: unexpected argument %q (all inputs are flags)
-", fs.Arg(0))
+		fmt.Fprintf(errw, "vcs-loadbot: unexpected argument %q (all inputs are flags)\n", fs.Arg(0))
 		return 2
 	}
 
