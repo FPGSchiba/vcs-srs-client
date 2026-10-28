@@ -479,20 +479,91 @@ func TestDependabotHasNoGomod(t *testing.T) {
 			t.Errorf("dependabot.yml lacks %q", want)
 		}
 	}
+}
 
-	// @wailsio/runtime moves only together with go.mod's Wails module
-	// (TestWailsRuntimeMatchesGoModule); a Dependabot npm group PR bumping it
-	// alone would break the pairing. The ignore must sit in the npm block.
-	const ignore = `dependency-name: "@wailsio/runtime"`
-	npmAt := strings.Index(text, "package-ecosystem: npm")
-	ghaAt := strings.Index(text, "package-ecosystem: github-actions")
-	ignoreAt := strings.Index(text, ignore)
-	switch {
-	case ignoreAt < 0:
-		t.Errorf("dependabot.yml lacks %q (the npm ignore for the paired Wails runtime)", ignore)
-	case npmAt < 0 || ignoreAt < npmAt || (ghaAt > npmAt && ignoreAt > ghaAt):
-		t.Errorf("dependabot.yml has %q outside the npm block", ignore)
+// TestDependabotIgnoresWailsRuntime: @wailsio/runtime moves only together with
+// go.mod's Wails module (TestWailsRuntimeMatchesGoModule); a Dependabot npm
+// group PR bumping it alone would break the pairing.
+func TestDependabotIgnoresWailsRuntime(t *testing.T) {
+	if err := checkDependabotIgnoresWailsRuntime(readRepoFile(t, ".github/dependabot.yml")); err != nil {
+		t.Error(err)
 	}
+}
+
+func TestCheckDependabotIgnoresWailsRuntimeFixtures(t *testing.T) {
+	const head = `version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+`
+	const gha = `
+  - package-ecosystem: github-actions
+    directory: /
+`
+	cases := []struct {
+		name string
+		yml  string
+		ok   bool
+	}{
+		{"ignored in npm block", head + `    ignore:
+      # why
+      - dependency-name: "@wailsio/runtime"
+    groups:
+      x:
+` + gha, true},
+		{"missing", head + `    groups:
+      x:
+` + gha, false},
+		{"commented out", head + `    ignore:
+      # - dependency-name: "@wailsio/runtime"
+` + gha, false},
+		{"under groups, not ignore", head + `    groups:
+      x:
+      - dependency-name: "@wailsio/runtime"
+` + gha, false},
+		{"in the github-actions block", head + gha + `    ignore:
+      - dependency-name: "@wailsio/runtime"
+`, false},
+	}
+	for _, c := range cases {
+		err := checkDependabotIgnoresWailsRuntime(c.yml)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
+// checkDependabotIgnoresWailsRuntime requires an uncommented
+// `- dependency-name: "@wailsio/runtime"` entry inside the `ignore:` list of
+// the npm update block: not commented out, not under `groups:`, and not in
+// another ecosystem's block.
+func checkDependabotIgnoresWailsRuntime(text string) error {
+	const entry = `- dependency-name: "@wailsio/runtime"`
+	indent := func(line string) int { return len(line) - len(strings.TrimLeft(line, " ")) }
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	inNpm, inIgnore, ignoreIndent := false, false, 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- package-ecosystem:") {
+			inNpm = strings.TrimSpace(strings.TrimPrefix(trimmed, "- package-ecosystem:")) == "npm"
+			inIgnore = false
+			continue
+		}
+		if !inNpm || trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if inIgnore && indent(line) <= ignoreIndent {
+			inIgnore = false
+		}
+		if trimmed == "ignore:" {
+			inIgnore, ignoreIndent = true, indent(line)
+			continue
+		}
+		if inIgnore && trimmed == entry {
+			return nil
+		}
+	}
+	return errors.New(`dependabot.yml lacks an uncommented ` + entry + ` under the npm block's ignore: list (the paired Wails runtime must not move alone)`)
 }
 
 // wailsGoVersionRe matches the Wails v3 requirement in go.mod, in either the
