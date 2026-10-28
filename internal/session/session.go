@@ -78,6 +78,16 @@ const (
 	// the server's own measure, and is treated exactly like the server's
 	// fell-behind end (C13): resync.
 	pendingUpdateCap = 256
+
+	// subscribeAckTimeout bounds the wait for the server's subscription ack
+	// (SV2 C17, see awaitSubscribed) on Connect, Reconnect and the resync
+	// (user decision 2026-10-27). A C17 server acks within one round trip;
+	// a server from before C17 never does, and past this bound the attempt
+	// logs a Warn and goes on to SyncClient without the ordering guarantee,
+	// so such a server still connects, about 2 s slower. Inside Connect and
+	// Reconnect the wait is also capped by what is left of the post-dial
+	// bound, which keeps covering everything after the dial.
+	subscribeAckTimeout = 2 * time.Second
 )
 
 // Session orchestrates connect/disconnect and owns the live connection.
@@ -298,17 +308,13 @@ func (s *Session) resync(streamCtx context.Context, gen uint64) {
 // stream. SV2 C17 closes that: the server sends (empty) response headers
 // right after registering, and Header() returns on them.
 //
-// The wait is bounded by the post-dial timeout. A server from before C17
-// sends its headers only with the first update; past the bound this logs a
-// Warn and returns nil, so the resync proceeds as it did before C17 instead
-// of wedging. A stream that ends before any header (the server refused it)
-// returns that stream's error, like a failed Subscribe. A cancelled ctx
-// returns its error.
-//
-// Connect and Reconnect pass their post-dial context, which started before
-// this wait and so expires first: against a pre-C17 server with nothing to
-// publish, their attempt fails with "server not responding" rather than
-// falling back (design §3.12, R9).
+// The wait is bounded by subscribeAckTimeout, or by what is left of ctx's
+// deadline when that is sooner (Connect and Reconnect pass their post-dial
+// context). A server from before C17 sends its headers only with the first
+// update; past the bound this logs a Warn and returns nil, so the caller
+// proceeds to SyncClient as it did before C17 instead of wedging or failing.
+// A stream that ends before any header (the server refused it) returns that
+// stream's error, like a failed Subscribe. A cancelled ctx returns its error.
 //
 // On the fallback, the Header goroutine outlives this call until the first
 // update or the stream's end; grpc-go permits Header() alongside RecvMsg.
@@ -320,7 +326,12 @@ func (s *Session) awaitSubscribed(ctx context.Context, stream srspb.SRSService_S
 		md, err := stream.Header()
 		acked <- err == nil && md != nil
 	}()
-	bound := s.postDialTimeout()
+	bound := subscribeAckTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); left < bound {
+			bound = left
+		}
+	}
 	timer := time.NewTimer(bound)
 	defer timer.Stop()
 	select {
@@ -333,7 +344,7 @@ func (s *Session) awaitSubscribed(ctx context.Context, stream srspb.SRSService_S
 		}
 		return errors.New("update stream ended before the server acknowledged the subscription")
 	case <-timer.C:
-		slog.Default().Warn("session: server did not acknowledge the update subscription; resyncing without the ordering guarantee (server predates SV2 C17?)",
+		slog.Default().Warn("session: server did not acknowledge the update subscription; continuing without the ordering guarantee (server predates SV2 C17?)",
 			"after", bound)
 		return nil
 	case <-ctx.Done():

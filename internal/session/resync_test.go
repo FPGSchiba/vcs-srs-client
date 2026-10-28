@@ -9,6 +9,7 @@ import (
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/events"
 	"github.com/FPGSchiba/vcs-srs-client/internal/grpctest"
+	"github.com/FPGSchiba/vcs-srs-client/internal/session"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
 )
 
@@ -133,28 +134,22 @@ func waitLong(d time.Duration, cond func() bool) bool {
 }
 
 // A server from before SV2 C17 (dcce3ad) never acknowledges the
-// subscription. The resync must not wedge on it: after the post-dial bound
-// it logs a Warn and proceeds to SyncClient, the pre-C17 behaviour.
-func TestResync_NoSubscriptionAckFallsBackAfterPostDialBound(t *testing.T) {
-	const postDial = 2 * time.Second
+// subscription. The resync must not wedge on it: after the ack bound
+// (subscribeAckTimeout, 2 s, well inside the post-dial bound) it logs a Warn
+// and proceeds to SyncClient, the pre-C17 behaviour.
+func TestResync_NoSubscriptionAckFallsBackAfterAckBound(t *testing.T) {
+	ack := session.SubscribeAckTimeout
 	f := grpctest.NewFake()
-	f.SyncVoiceSecret = "secret"
-	h := newBound(t, f, nil, postDial)
-	if err := h.connect(); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	if !waitFor(t, func() bool { return f.ActiveStreams() == 1 }) {
-		t.Fatal("update stream never opened")
-	}
+	h, _ := connected(t, f) // post-dial bound testPostDialOK (5 s)
 	f.SetSubscribeAck(false)
 
 	start := time.Now()
 	f.EndStream(errFellBehind)
-	if !waitLong(postDial+3*time.Second, func() bool { return countCalls(f.Calls(), "SyncClient") == 2 }) {
+	if !waitLong(ack+3*time.Second, func() bool { return countCalls(f.Calls(), "SyncClient") == 2 }) {
 		t.Fatalf("resync never reached SyncClient without an ack; calls %v", f.Calls())
 	}
-	if el := time.Since(start); el < postDial-200*time.Millisecond {
-		t.Fatalf("SyncClient after %v, want the resync to wait out the %v bound for the ack", el, postDial)
+	if el := time.Since(start); el < ack-200*time.Millisecond || el >= testPostDialOK {
+		t.Fatalf("SyncClient after %v, want the resync to wait out the %v ack bound and no longer", el, ack)
 	}
 	if !waitFor(t, func() bool { return h.rec.countOf(events.ConnConnected) == 2 }) {
 		t.Fatalf("states = %v, want connected re-published after the fallback", h.rec.all())

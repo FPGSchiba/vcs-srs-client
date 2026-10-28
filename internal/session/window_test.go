@@ -256,3 +256,26 @@ func TestConnect_WaitsForSubscriptionAckBeforeSync(t *testing.T) {
 		t.Fatalf("with a slow registration the update was lost; calls %v", f.Calls())
 	}
 }
+
+// A server from before SV2 C17 (no ack, nothing to publish) still connects:
+// the ack wait has its own short bound (subscribeAckTimeout, 2 s) inside the
+// post-dial bound, after which Connect logs a Warn and proceeds to
+// SyncClient.
+func TestConnect_NoSubscriptionAckFallsBackAfterAckBound(t *testing.T) {
+	f := grpctest.NewFake()
+	f.SyncVoiceSecret = "secret"
+	f.SetSubscribeAck(false)
+	h := newBound(t, f, nil, 0) // post-dial bound testPostDialOK (5 s)
+
+	start := time.Now()
+	if err := h.connect(); err != nil {
+		t.Fatalf("connect against a server with no ack failed after %v: %v", time.Since(start), err)
+	}
+	el := time.Since(start)
+	if el < session.SubscribeAckTimeout-200*time.Millisecond || el > session.SubscribeAckTimeout+1500*time.Millisecond {
+		t.Fatalf("connect took %v, want about the %v ack bound", el, session.SubscribeAckTimeout)
+	}
+	if h.last() != events.ConnConnected {
+		t.Fatalf("states = %v, want connected", h.rec.all())
+	}
+}
