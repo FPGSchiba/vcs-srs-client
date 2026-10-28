@@ -1,5 +1,6 @@
 # Phase 6.9 / SEC: GitHub Security Alerts Implementation Plan
 
+> **Lane note:** only the sec-client tasks are ticked in this copy. The server lane (S0-S7) is tracked in the `vngd-srs-server` repo and its steps are intentionally left unticked here.
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bring both repos to 0 reachable govulncheck findings and close every open Dependabot alert. Keep it that way with a blocking govulncheck CI step. Cap the bcrypt cost the server accepts (12) and compare outside the settings lock. Fix the Windows reserved-port flake in the client's real-server fixture. Make the code-level SonarCloud fixes.
