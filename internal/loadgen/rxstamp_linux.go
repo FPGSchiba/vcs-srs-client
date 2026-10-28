@@ -38,14 +38,25 @@ func EnableRxStamps(c *net.UDPConn) error {
 
 // ReadStamped reads one datagram and decodes the kernel receive time (Unix ns,
 // CLOCK_REALTIME) and the cumulative drop count from the control messages.
-func ReadStamped(c *net.UDPConn, buf, oob []byte) (n int, kernelNs int64, drops uint32, stamped bool, err error) {
-	n, oobn, _, _, err := c.ReadMsgUDP(buf, oob)
+// The Stamp says which of them were actually present, so a caller can tell
+// "no stamp" from "stamp lost" and never mistake a missing drop cmsg for 0.
+func ReadStamped(c *net.UDPConn, buf, oob []byte) (int, Stamp, error) {
+	n, oobn, flags, _, err := c.ReadMsgUDP(buf, oob)
 	if err != nil {
-		return n, 0, 0, false, err
+		return n, Stamp{}, err
 	}
-	msgs, perr := syscall.ParseSocketControlMessage(oob[:oobn])
+	return n, decodeStamp(oob[:oobn], flags), nil
+}
+
+// decodeStamp parses the control buffer. The numeric option constants above
+// hold on amd64/arm64/arm/386 only (mips, sparc, alpha, parisc differ), which
+// covers every target this tool ships for.
+func decodeStamp(oob []byte, flags int) Stamp {
+	st := Stamp{Truncated: flags&syscall.MSG_CTRUNC != 0}
+	msgs, perr := syscall.ParseSocketControlMessage(oob)
 	if perr != nil {
-		return n, 0, 0, false, nil
+		st.ParseErr = true
+		return st
 	}
 	for _, m := range msgs {
 		if m.Header.Level != syscall.SOL_SOCKET {
@@ -53,16 +64,30 @@ func ReadStamped(c *net.UDPConn, buf, oob []byte) (n int, kernelNs int64, drops 
 		}
 		switch m.Header.Type {
 		case soTimestampNS: // SCM_TIMESTAMPNS == SO_TIMESTAMPNS
-			if len(m.Data) >= int(unsafe.Sizeof(syscall.Timespec{})) {
-				ts := *(*syscall.Timespec)(unsafe.Pointer(&m.Data[0]))
-				kernelNs = int64(ts.Sec)*1e9 + int64(ts.Nsec)
-				stamped = true
+			// Timespec is two native words; decode without an unaligned cast.
+			w := int(unsafe.Sizeof(syscall.Timespec{}.Sec))
+			if len(m.Data) < 2*w {
+				continue
 			}
+			var sec, nsec int64
+			switch w {
+			case 8:
+				sec = int64(binary.NativeEndian.Uint64(m.Data[:8]))
+				nsec = int64(binary.NativeEndian.Uint64(m.Data[8:16]))
+			case 4:
+				sec = int64(int32(binary.NativeEndian.Uint32(m.Data[:4])))
+				nsec = int64(int32(binary.NativeEndian.Uint32(m.Data[4:8])))
+			default:
+				continue
+			}
+			st.KernelNs = sec*1e9 + nsec
+			st.Stamped = true
 		case soRxqOvfl:
 			if len(m.Data) >= 4 {
-				drops = binary.NativeEndian.Uint32(m.Data[:4])
+				st.Drops = binary.NativeEndian.Uint32(m.Data[:4])
+				st.DropsSeen = true
 			}
 		}
 	}
-	return n, kernelNs, drops, stamped, nil
+	return st
 }
