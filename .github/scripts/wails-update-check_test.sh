@@ -36,8 +36,7 @@ mkdir -p "$tmp/bin"
 # curl-fail fails every fetch, curl-fail-npm only the npm one.
 cat > "$tmp/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-printf '%s
-' "$*" >> "$FIX/curl-argv"
+printf '%s\n' "$*" >> "$FIX/curl-argv"
 url=""
 for a in "$@"; do url="$a"; done
 fail503() { echo "curl: (22) The requested URL returned error: 503" >&2; exit 22; }
@@ -164,11 +163,9 @@ argv="$(tr -d '\r' < "$tmp/client-beta22-opens/gh-argv")"
 check "client-beta22-opens: lists open labelled issues of the repo" "$(has "$argv" 'issue list --repo o/r --label wails-update --state open')" yes
 check "client-beta22-opens: label colour and description" "$(has "$argv" 'label create wails-update --repo o/r --force --color FBCA04 --description A newer Wails release is available')" yes
 check "client-beta22-opens: issue carries the label" "$(has "$argv" 'issue create --repo o/r --label wails-update')" yes
-curl_argv="$(tr -d '' < "$tmp/client-beta22-opens/curl-argv")"
-check "client-beta22-opens: two fetches" "$(printf '%s
-' "$curl_argv" | grep -c .)" 2
-check "client-beta22-opens: every fetch is https-only, TLS 1.2+"   "$(printf '%s
-' "$curl_argv" | grep -c -- '--proto =https --tlsv1.2')" 2
+curl_argv="$(tr -d '\r' < "$tmp/client-beta22-opens/curl-argv")"
+check "client-beta22-opens: two fetches" "$(printf '%s\n' "$curl_argv" | grep -c .)" 2
+check "client-beta22-opens: every fetch is https-only, TLS 1.2+"   "$(printf '%s\n' "$curl_argv" | grep -c -- '--proto =https --tlsv1.2')" 2
 
 # --- server-alpha43-five -----------------------------------------------------
 mkcase server-alpha43-five v3.0.0-alpha.43 '^3.0.0-beta.34' "v3.0.0-alpha.43 $beta22_list" 3.0.0
