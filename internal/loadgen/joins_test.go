@@ -258,3 +258,16 @@ func TestJoinErrorFailureKeepsGUIDContext(t *testing.T) {
 		t.Fatalf("bare failure error = %q", got)
 	}
 }
+
+// A calibrate_ramp line always carries target and bots, even at zero, so the
+// column order is stable in an Actions log.
+func TestCalibrateRampProgressKeepsZeroBots(t *testing.T) {
+	out, err := json.Marshal(ProgressLine{Type: "progress", Phase: "calibrate_ramp", Target: 2048, Bots: 0, ElapsedS: 5.0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"progress","phase":"calibrate_ramp","target":2048,"bots":0,"hello_retried":0,"elapsed_s":5}`
+	if string(out) != want {
+		t.Fatalf("got %s want %s", out, want)
+	}
+}

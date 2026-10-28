@@ -158,6 +158,16 @@ func (p ProgressLine) MarshalJSON() ([]byte, error) {
 			ElapsedS     float64 `json:"elapsed_s"`
 		}{p.Type, p.Phase, p.Requested, p.Had, p.Done, p.Joined, p.JoinFailures, p.InFlight, p.HelloRetried, p.ElapsedS})
 	}
+	if p.Phase == "calibrate_ramp" {
+		return json.Marshal(struct {
+			Type         string  `json:"type"`
+			Phase        string  `json:"phase"`
+			Target       int     `json:"target"`
+			Bots         int     `json:"bots"`
+			HelloRetried int     `json:"hello_retried"`
+			ElapsedS     float64 `json:"elapsed_s"`
+		}{p.Type, p.Phase, p.Target, p.Bots, p.HelloRetried, p.ElapsedS})
+	}
 	type plain ProgressLine
 	return json.Marshal(plain(p))
 }
