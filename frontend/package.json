@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build:dev": "tsc && vite build --minify false --mode development",
+    "postbuild:dev": "node scripts/check-dist.mjs",
     "build": "tsc && vite build --mode production",
+    "postbuild": "node scripts/check-dist.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
