@@ -2,7 +2,6 @@ package loadgen
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -86,16 +85,24 @@ func TestReflectorFansOutOnce(t *testing.T) {
 		v.Start(context.Background())
 		bots = append(bots, v)
 	}
-	for i, v := range bots {
+	for _, v := range bots {
 		v.ExpectFrom(bots[0].ID, freq, 1, 20)
-		_ = i
 	}
 	for seq := uint32(1); seq <= 20; seq++ {
 		if err := bots[0].Send(seq, freq, SyntheticFrame(seq)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	time.Sleep(500 * time.Millisecond)
+	if !waitFor(func() bool {
+		for i := 1; i < 4; i++ {
+			if lr, ok := bots[i].LedgerResult(bots[0].ID, freq); !ok || lr.Unique < 20 {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Log("ledgers did not fill before the deadline; per-bot assertions below report the shortfall")
+	}
 	for i := 1; i < 4; i++ {
 		lr, ok := bots[i].LedgerResult(bots[0].ID, freq)
 		if !ok || lr.Unique != 20 || lr.Dups != 0 {
@@ -136,10 +143,11 @@ func TestCalibrateSmall(t *testing.T) {
 		}
 	}
 	_ = capy // validity is not asserted (shared Windows CI)
-	if bad, err := ParseAllow("127.0.0.1:1"); err == nil {
-		if _, _, err := Calibrate(ctx, r.Addr(), bad, 1, []int{4}, time.Second); err == nil {
-			t.Fatal("calibrate dialled a non-allowed reflector")
-		}
+	bad, err := ParseAllow("127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("ParseAllow: %v", err)
 	}
-	_ = fmt.Sprint
+	if _, _, err := Calibrate(ctx, r.Addr(), bad, 1, []int{4}, time.Second); err == nil {
+		t.Fatal("calibrate dialled a non-allowed reflector")
+	}
 }

@@ -21,7 +21,10 @@ type CalStep struct {
 
 // ReceiveCapacity is the generator's receive capacity: the largest valid
 // step's pps. LowerBound means the true ceiling was not reached (the
-// reflector reported send errors, or every step stayed valid).
+// reflector reported send errors, or every step stayed valid). PPS == 0
+// with LowerBound == false means no step was valid. The reflector process's
+// own health is NOT sampled here: a combined verdict must OR the reflect
+// command's reflector_stats send_errors into lower_bound (kit, PR-D).
 type ReceiveCapacity struct {
 	PPS        float64
 	LowerBound bool
