@@ -16,7 +16,10 @@ import (
 //
 // Every new downstream source address is numbered 0, 1, 2... in order of its
 // first packet and gets its own connected upstream socket, so the server
-// binds a distinct address per bot. Both directions are forwarded. Every
+// binds a distinct address per bot. The index is ARRIVAL ORDER of the first
+// packet, not the bot id: bots dial concurrently, so which bot gets which index
+// differs from run to run. Tests must assert counts, never a specific bot id.
+// Both directions are forwarded. Every
 // HELLO from a source whose index satisfies drop is discarded; everything
 // else, including later keepalives and voice, passes through untouched.
 //
