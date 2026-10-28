@@ -479,6 +479,20 @@ func TestDependabotHasNoGomod(t *testing.T) {
 			t.Errorf("dependabot.yml lacks %q", want)
 		}
 	}
+
+	// @wailsio/runtime moves only together with go.mod's Wails module
+	// (TestWailsRuntimeMatchesGoModule); a Dependabot npm group PR bumping it
+	// alone would break the pairing. The ignore must sit in the npm block.
+	const ignore = `dependency-name: "@wailsio/runtime"`
+	npmAt := strings.Index(text, "package-ecosystem: npm")
+	ghaAt := strings.Index(text, "package-ecosystem: github-actions")
+	ignoreAt := strings.Index(text, ignore)
+	switch {
+	case ignoreAt < 0:
+		t.Errorf("dependabot.yml lacks %q (the npm ignore for the paired Wails runtime)", ignore)
+	case npmAt < 0 || ignoreAt < npmAt || (ghaAt > npmAt && ignoreAt > ghaAt):
+		t.Errorf("dependabot.yml has %q outside the npm block", ignore)
+	}
 }
 
 // wailsGoVersionRe matches the Wails v3 requirement in go.mod, in either the
