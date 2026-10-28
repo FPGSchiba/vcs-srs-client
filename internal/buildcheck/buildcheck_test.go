@@ -119,7 +119,11 @@ func TestCIScripts(t *testing.T) {
 			t.Skipf("%s not on PATH", tool)
 		}
 	}
-	for _, s := range []string{".github/scripts/assert-go-toolchain_test.sh", ".github/scripts/go-deps-update_test.sh"} {
+	for _, s := range []string{
+		".github/scripts/assert-go-toolchain_test.sh",
+		".github/scripts/go-deps-update_test.sh",
+		".github/scripts/wails-update-check_test.sh",
+	} {
 		cmd := exec.Command("bash", repoPath(t, s))
 		cmd.Dir = repoPath(t, ".")
 		out, err := cmd.CombinedOutput()
@@ -776,5 +780,36 @@ func TestGoDepsWorkflowShape(t *testing.T) {
 	upd := taskBlock(t, text, "update")
 	if strings.Contains(upd, "secrets.") {
 		t.Errorf("go-deps.yml: the update job references a secret:\n%s", upd)
+	}
+}
+
+// U7: the weekly Wails release check only reports. It runs on a schedule and
+// on demand, holds nothing but the workflow's own GITHUB_TOKEN (issues: write,
+// contents: read), and uses no action other than a credential-less checkout.
+func TestWailsCheckWorkflowShape(t *testing.T) {
+	const wf = ".github/workflows/wails-check.yml"
+	text := readRepoFile(t, wf)
+	for _, want := range []string{
+		"cron: '0 7 * * 1'", "workflow_dispatch:", "issues: write",
+		"GH_TOKEN: ${{ github.token }}", "persist-credentials: false",
+		"bash .github/scripts/wails-update-check.sh", "group: wails-check",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("%s lacks %q", wf, want)
+		}
+	}
+	for _, bad := range []string{"secrets.", "pull_request", "contents: write"} {
+		if strings.Contains(text, bad) {
+			t.Errorf("%s must not contain %q", wf, bad)
+		}
+	}
+	uses := usesRe.FindAllStringSubmatch(text, -1)
+	if len(uses) == 0 {
+		t.Errorf("%s: no checkout step", wf)
+	}
+	for _, m := range uses {
+		if target := strings.Trim(m[1], `"'`); !strings.HasPrefix(target, "actions/checkout@") {
+			t.Errorf("%s: uses %s; only actions/checkout is allowed", wf, target)
+		}
 	}
 }
