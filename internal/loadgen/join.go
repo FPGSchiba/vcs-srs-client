@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,10 +29,29 @@ const (
 	PhaseRamp Phase = iota
 	PhaseSettle
 	PhaseHold
+	PhaseIdle  // before the first ramp
+	PhaseBurst // a join burst (counted apart from ramp)
 )
 
+// String is the phase's name in a control_lost line.
+func (p Phase) String() string {
+	switch p {
+	case PhaseRamp:
+		return "ramp"
+	case PhaseSettle:
+		return "settle"
+	case PhaseHold:
+		return "hold"
+	case PhaseIdle:
+		return "idle"
+	case PhaseBurst:
+		return "burst"
+	}
+	return "ramp"
+}
+
 // PhaseCounter is one counter per Phase.
-type PhaseCounter [3]atomic.Uint64
+type PhaseCounter [5]atomic.Uint64
 
 // DefaultAckTimeout mirrors internal/session's subscribeAckTimeout.
 const DefaultAckTimeout = 2 * time.Second
@@ -38,7 +59,7 @@ const DefaultAckTimeout = 2 * time.Second
 // Joiner composes auth + control directly (design D6) instead of calling
 // session.Connect per bot, so each join reuses a precomputed bcrypt hash.
 type Joiner struct {
-	Dial   func(ctx context.Context) (*grpc.ClientConn, error)
+	Dial   DialFunc
 	Hashes map[string]string // coalition name -> bcrypt hash
 	Unit   string
 	// AckTimeout bounds the wait for the server's subscription ack. Unlike the
@@ -48,6 +69,17 @@ type Joiner struct {
 	Phase             *atomic.Int32
 	Resyncs           *PhaseCounter
 	ResourceExhausted *PhaseCounter
+	// PingEvery is each bot's Ping period; zero disables pings. Every bot
+	// starts at a random offset in [0, PingEvery) derived from PingSeed and
+	// its name, so the server never sees N pings in one millisecond.
+	PingEvery time.Duration
+	PingSeed  int64
+	// OnDead is called at most once per bot, the moment its control plane is
+	// declared dead (never for a Close). It runs on the bot's receive or ping
+	// goroutine and must not block. The record carries identity, cause, code,
+	// timing and ping state; the caller stamps what only it knows (index,
+	// phase).
+	OnDead func(b *ControlBot, d DeathRecord)
 }
 
 // ControlBot is one joined control-plane participant.
@@ -56,12 +88,23 @@ type ControlBot struct {
 	Settings                                      *srspb.ServerSettings
 	Counts                                        *UpdateCounts
 	Store                                         *state.Store // full bots only
+	Name                                          string
+	// LocalAddr is the control connection's local ip:port at join time.
+	LocalAddr string
+	// Pings counts this bot's Pings.
+	Pings PingStats
 
 	conn    *grpc.ClientConn
 	cc      *control.Client
 	cancel  context.CancelFunc
 	done    chan struct{}
 	closing atomic.Bool
+
+	joinedAt time.Time
+	rec      *ConnRecorder
+	pinger   *pinger
+	dead     atomic.Bool
+	onDead   func(DeathRecord)
 
 	mu  sync.Mutex
 	err error
@@ -106,7 +149,7 @@ func (j *Joiner) phase() Phase {
 		return PhaseRamp
 	}
 	p := Phase(j.Phase.Load())
-	if p < PhaseRamp || p > PhaseHold {
+	if p < PhaseRamp || p > PhaseBurst {
 		return PhaseRamp
 	}
 	return p
@@ -144,7 +187,7 @@ func (j *Joiner) Join(ctx context.Context, name, coalition string, full bool) (*
 	if !ok {
 		return nil, fmt.Errorf("join %s: no password hash for coalition %q", name, coalition)
 	}
-	conn, err := j.Dial(ctx)
+	conn, rec, err := j.Dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("join %s: dial: %w", name, err)
 	}
@@ -189,7 +232,10 @@ func (j *Joiner) Join(ctx context.Context, name, coalition string, full bool) (*
 		CoalitionAddr: coalitionAddr,
 		Settings:      st.Settings(),
 		Counts:        &UpdateCounts{},
+		Name:          name,
 		conn:          conn,
+		rec:           rec,
+		joinedAt:      time.Now(),
 		cc:            cc,
 		cancel:        cancel,
 		done:          make(chan struct{}),
@@ -197,6 +243,20 @@ func (j *Joiner) Join(ctx context.Context, name, coalition string, full bool) (*
 	if full {
 		bot.Store = st
 	}
+	if rec != nil {
+		bot.LocalAddr = rec.LocalAddr()
+	}
+	if j.OnDead != nil {
+		bot.onDead = func(d DeathRecord) { j.OnDead(bot, d) }
+	}
+	bot.pinger = newPinger(pingerCfg{
+		Every:  j.PingEvery,
+		Offset: pingOffset(j.PingSeed, name, j.PingEvery),
+		Ping:   bot.pingOnce(j.PingEvery),
+		OnDead: func(failures int, last error) { bot.fireDead(CausePing, last) },
+		Stats:  &bot.Pings,
+	})
+	bot.pinger.start(sctx)
 	go j.receive(sctx, bot, st, stream, full)
 	return bot, nil
 }
@@ -225,10 +285,7 @@ func (j *Joiner) receive(ctx context.Context, bot *ControlBot, st *state.Store, 
 			return
 		}
 		if status.Code(err) != codes.ResourceExhausted {
-			if err == nil {
-				err = errors.New("update stream ended by the server")
-			}
-			bot.setErr(err)
+			bot.fireDead(CauseStream, err)
 			return
 		}
 		j.count(j.ResourceExhausted)
@@ -248,7 +305,7 @@ func (j *Joiner) receive(ctx context.Context, bot *ControlBot, st *state.Store, 
 		if rerr != nil {
 			ncancel()
 			if ctx.Err() == nil && !bot.closing.Load() {
-				bot.setErr(fmt.Errorf("resync: %w", rerr))
+				bot.fireDead(CauseResync, fmt.Errorf("resync: %w", rerr))
 			}
 			return
 		}
@@ -267,6 +324,68 @@ func (b *ControlBot) setErr(err error) {
 		b.err = err
 	}
 	b.mu.Unlock()
+}
+
+// pingOnce returns the pinger's call: one Ping bounded by every, carrying the
+// previous round trip like the real client does.
+func (b *ControlBot) pingOnce(every time.Duration) func(ctx context.Context) (time.Duration, error) {
+	var lastMs int64
+	return func(ctx context.Context) (time.Duration, error) {
+		cctx, cancel := context.WithTimeout(ctx, every)
+		defer cancel()
+		start := time.Now()
+		if _, err := b.cc.PingOnce(cctx, lastMs); err != nil {
+			return 0, err
+		}
+		rtt := time.Since(start)
+		lastMs = rtt.Milliseconds()
+		return rtt, nil
+	}
+}
+
+// fireDead records why the bot died and reports it exactly once, at once. It
+// is a no-op for a bot that is closing or whose context is gone. A nil err is
+// a clean server-side stream end.
+func (b *ControlBot) fireDead(cause string, err error) {
+	if b.closing.Load() {
+		return
+	}
+	if !b.dead.CompareAndSwap(false, true) {
+		return
+	}
+	d := NewDeathRecord(cause, err)
+	if err == nil {
+		err = errors.New(StreamEndedByServer)
+	}
+	b.setErr(err)
+	d.Name, d.GUID = b.Name, b.GUID
+	d.AtUnixMs = time.Now().UnixMilli()
+	d.AgeS = time.Since(b.joinedAt).Seconds()
+	d.LocalAddr = b.LocalAddr
+	if b.rec != nil {
+		if a := b.rec.LocalAddr(); a != "" {
+			d.LocalAddr = a
+		}
+	}
+	if b.pinger != nil {
+		d.SinceLastOKPingS = b.pinger.SinceLastOK()
+		d.PingFailures = b.pinger.Failures()
+		b.pinger.halt()
+	}
+	if b.onDead != nil {
+		b.onDead(d)
+	}
+}
+
+// pingOffset is a deterministic offset in [0, every) for one bot.
+func pingOffset(seed int64, name string, every time.Duration) time.Duration {
+	if every <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	r := rand.New(rand.NewSource(seed ^ int64(h.Sum64())))
+	return time.Duration(r.Int63n(int64(every)))
 }
 
 // Err returns why the bot died, or nil while it is alive.
@@ -296,6 +415,9 @@ func (b *ControlBot) Close(ctx context.Context) error {
 	b.closing.Store(true)
 	derr := b.cc.Disconnect(ctx)
 	b.cancel()
+	if b.pinger != nil {
+		b.pinger.stop()
+	}
 	<-b.done
 	cerr := b.conn.Close()
 	return errors.Join(derr, cerr)

@@ -10,13 +10,13 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -46,15 +46,26 @@ type RunConfig struct {
 	Seed        int64
 	FullSample  int // bots that keep a state.Store; default 16
 	Bounds      Bounds
+	// PingEvery is each bot's control Ping period; zero disables pings.
+	PingEvery time.Duration
+	// JoinRateMax and JoinRateScale bound a set_n ramp's join rate (see
+	// RateLimiter). Both zero means unbounded; the CLI supplies the I-9
+	// defaults (12 and 5000).
+	JoinRateMax, JoinRateScale float64
+	// RampTalker is "silent" (the default when empty) or "live": whether the
+	// talker keeps sending during a set_n ramp.
+	RampTalker string
 }
 
-// DialInsecure returns a Joiner.Dial for a plaintext loopback control port.
-// The caller has already passed addr through AllowList.Check.
-func DialInsecure(addr string) func(ctx context.Context) (*grpc.ClientConn, error) {
-	return func(context.Context) (*grpc.ClientConn, error) {
-		return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
-}
+// I-9 defaults for the `run` flags. The CLI and the features line use them.
+const (
+	DefaultJoinRateMax   = 12.0
+	DefaultJoinRateScale = 5000.0
+	DefaultMaxInFlight   = 8
+	MaxMaxInFlight       = 16
+	RampTalkerSilent     = "silent"
+	RampTalkerLive       = "live"
+)
 
 type runnerBot struct {
 	ctl   *ControlBot
@@ -80,8 +91,11 @@ type Runner struct {
 	wheel      Hist
 	joinHist   Hist
 	sendErrors atomic.Uint64
-	talkCancel context.CancelFunc
-	talkDone   chan struct{}
+	talker     *talkerLoop
+	limiter    *RateLimiter
+	// peakInFlight is the highest observed in-flight join count of the last
+	// ramp, the gauge behind the in-flight cap.
+	peakInFlight atomic.Int32
 
 	// nextIdx is the index (and so the bot name) the next join takes. It is
 	// not len(bots): a failed join leaves a hole, and reusing len(bots) would
@@ -95,10 +109,78 @@ type Runner struct {
 
 	last            *StepReport
 	lastPerListener []LedgerResult
+
+	// Death log (I-10, I-11). dmu guards everything below it.
+	dmu           sync.Mutex
+	deadTotal     int
+	deadSinceStep int
+	deadInHold    int
+	deadFirst     []DeathRecord
+	deathLines    int
+
+	started time.Time
+	lastCmd string
+	errCtx  string
+}
+
+// maxDeathLines caps control_lost lines per process; later deaths are only
+// counted (dead_total).
+const maxDeathLines = 64
+
+// maxCmdContext caps the last command echoed in the fatal error context.
+const maxCmdContext = 200
+
+// maxDeathFirst is how many deaths a step line lists.
+const maxDeathFirst = 8
+
+// onDead records one bot's death, stamping the phase and index, and writes
+// the control_lost line while the cap allows.
+func (r *Runner) onDead(_ *ControlBot, d DeathRecord) {
+	d.Phase = Phase(r.phase.Load()).String()
+	if i := strings.LastIndexByte(d.Name, '-'); i >= 0 {
+		if n, err := strconv.Atoi(d.Name[i+1:]); err == nil {
+			d.Bot = n
+		}
+	}
+	r.dmu.Lock()
+	defer r.dmu.Unlock()
+	r.deadTotal++
+	r.deadSinceStep++
+	if Phase(r.phase.Load()) == PhaseHold {
+		r.deadInHold++
+	}
+	if len(r.deadFirst) < maxDeathFirst {
+		r.deadFirst = append(r.deadFirst, d)
+	}
+	if r.deathLines < maxDeathLines && r.out != nil {
+		r.deathLines++
+		_ = writeLine(r.out, DeathLine{Type: "control_lost", DeathRecord: d, DeadTotal: r.deadTotal})
+	}
+}
+
+// ErrContext describes the run at the moment Serve ended, for the fatal
+// error line: last command, bots, dead bots, uptime.
+func (r *Runner) ErrContext() string { return r.errCtx }
+
+func (r *Runner) snapshotContext() string {
+	r.dmu.Lock()
+	dead := r.deadTotal
+	r.dmu.Unlock()
+	up := 0.0
+	if !r.started.IsZero() {
+		up = math.Round(time.Since(r.started).Seconds()*10) / 10
+	}
+	cmd := r.lastCmd
+	if cmd == "" {
+		cmd = "none"
+	} else if len(cmd) > maxCmdContext {
+		cmd = cmd[:maxCmdContext] + "..."
+	}
+	return fmt.Sprintf("last command %s; bots %d, dead %d, uptime %gs", cmd, len(r.bots), dead, up)
 }
 
 // NewRunner hashes the passwords once and returns an idle Runner.
-func NewRunner(cfg RunConfig, dial func(ctx context.Context) (*grpc.ClientConn, error)) (*Runner, error) {
+func NewRunner(cfg RunConfig, dial DialFunc) (*Runner, error) {
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = 16
 	}
@@ -108,16 +190,32 @@ func NewRunner(cfg RunConfig, dial func(ctx context.Context) (*grpc.ClientConn, 
 	if cfg.Bounds == (Bounds{}) {
 		cfg.Bounds = DefaultBounds
 	}
+	switch cfg.RampTalker {
+	case "":
+		cfg.RampTalker = RampTalkerSilent
+	case RampTalkerSilent, RampTalkerLive:
+	default:
+		return nil, fmt.Errorf("ramp talker %q: want silent or live", cfg.RampTalker)
+	}
+	if cfg.JoinRateMax < 0 || cfg.JoinRateScale < 0 {
+		return nil, errors.New("join rate: max and scale must not be negative")
+	}
+	if cfg.MaxInFlight > MaxMaxInFlight {
+		return nil, fmt.Errorf("max in flight %d: want 1..%d", cfg.MaxInFlight, MaxMaxInFlight)
+	}
 	hashes, err := HashPasswords(cfg.Passwords)
 	if err != nil {
 		return nil, err
 	}
-	r := &Runner{cfg: cfg, freq: cfg.Scenario.FreqKHz()}
+	r := &Runner{cfg: cfg, freq: cfg.Scenario.FreqKHz(),
+		limiter: &RateLimiter{Max: cfg.JoinRateMax, Scale: cfg.JoinRateScale}}
 	r.nextSeq.Store(1)
 	r.joiner = &Joiner{
 		Dial: dial, Hashes: hashes, Unit: cfg.Unit,
 		Phase: &r.phase, Resyncs: &r.resync, ResourceExhausted: &r.rex,
+		PingEvery: cfg.PingEvery, PingSeed: cfg.Seed, OnDead: r.onDead,
 	}
+	r.phase.Store(int32(PhaseIdle))
 	return r, nil
 }
 
@@ -154,10 +252,16 @@ func writeLine(out io.Writer, v any) error {
 // A failed command is still fatal (the error is written, cleanup runs, and it
 // is returned): a talker (bot 0) that cannot join, a decreasing set_n, a
 // cancelled ctx.
+//
+// A dead bot is data too: a control_lost line when it dies and a
+// control_lost block in the next step. A hold fails only for the talker, a
+// lost ledger, ctx, or a missing listener.
 func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) error {
 	out := &lineWriter{w: rawOut}
 	r.out = out
+	r.started = time.Now()
 	defer func() {
+		r.errCtx = r.snapshotContext()
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		r.shutdown(cctx)
@@ -202,6 +306,7 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) erro
 		if len(line) == 0 {
 			continue
 		}
+		r.lastCmd = string(line)
 		cmd, perr := ParseCommand(line)
 		if perr != nil {
 			if werr := writeLine(out, errLine{"error", perr.Error()}); werr != nil {
@@ -214,6 +319,14 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) erro
 		case cmd.SetN != nil:
 			var jr JoinReport
 			jr, cerr = r.setN(ctx, *cmd.SetN)
+			if cerr == nil {
+				if werr := writeLine(out, jr); werr != nil {
+					return werr
+				}
+			}
+		case cmd.Burst != nil:
+			var jr JoinReport
+			jr, cerr = r.burst(ctx, *cmd.Burst)
 			if cerr == nil {
 				if werr := writeLine(out, jr); werr != nil {
 					return werr
@@ -235,6 +348,10 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) erro
 
 func (r *Runner) botName(i int) string { return fmt.Sprintf("%s-%04d", r.cfg.Unit, i) }
 
+// setN ramps to n bots. Bot 0 (the have == 0 path) joins alone, outside the
+// rate limiter and the in-flight cap, so the voice endpoint is known first. Its
+// duration is measured from tally.start, so it is counted in the joins line
+// (joined, join_p99_us, joins_per_s) of the first ramp.
 func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 	have := len(r.bots)
 	had0 := have
@@ -243,7 +360,9 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 		return JoinReport{}, fmt.Errorf("set_n %d: decreasing N is not supported (have %d)", n, have)
 	case n == have:
 		r.nRequested = n
-		return newJoinTally(n, have).report(n, have, 0, RampHealth{}), nil
+		nt := newJoinTally(n, have)
+		nt.configure(RampMode, r.cfg.RampTalker, r.cfg.MaxInFlight, r.limiter)
+		return nt.report(n, have, 0, RampHealth{}), nil
 	}
 	if r.fullSet == nil {
 		// Drawn once from the seed over the first N; bots added later by a
@@ -258,8 +377,20 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 		}
 	}
 	r.nRequested = n
+	silent := r.cfg.RampTalker == RampTalkerSilent
+	if silent && r.talker != nil {
+		r.talker.pause()
+	}
+	// Resume on every exit, error paths included. On the have == 0 path the
+	// talker does not exist yet; it is created paused below.
+	defer func() {
+		if silent && r.talker != nil {
+			r.talker.resume()
+		}
+	}()
 	r.phase.Store(int32(PhaseRamp))
 	tally := newJoinTally(n, have)
+	tally.configure(RampMode, r.cfg.RampTalker, r.cfg.MaxInFlight, r.limiter)
 	rs0 := SampleRuntime()
 	if have == 0 {
 		// Bot 0 joins alone so the voice endpoint and server settings are
@@ -275,20 +406,80 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 		}
 		r.bots = append(r.bots, b)
 		r.nextIdx = 1
-		r.startTalker(b)
+		r.startTalker(b, silent)
 		tally.begin()
-		tally.ok(b.tries)
+		tally.ok(b.tries, time.Since(tally.start))
 		have = 1
 	}
 	stopProgress := r.startProgress(tally)
 	defer stopProgress()
 
-	want := n - have
+	if err := r.rampJoin(ctx, tally, n-have, r.limiter, r.cfg.MaxInFlight); err != nil {
+		return JoinReport{}, err
+	}
+	rs1 := SampleRuntime()
+	rep := tally.report(n, had0, time.Since(tally.start), RampHealth{
+		SchedP99US:   DeltaQuantile(rs0.Sched, rs1.Sched, 0.99).Microseconds(),
+		GCPauseP99US: DeltaQuantile(rs0.GC, rs1.GC, 0.99).Microseconds(),
+	})
+	r.joinFailTotal.Add(uint64(rep.JoinFailures))
+	r.phase.Store(int32(PhaseSettle))
+	return rep, nil
+}
+
+// burst adds cmd.Add bots with no rate limit at cmd.InFlight concurrency, to
+// measure join behaviour on its own (I-13). The talker is paused for a silent
+// burst and is live again afterwards. Failed joins are data, as in setN. A
+// burst before any bot exists is an error: there is no talker or voice
+// endpoint yet.
+func (r *Runner) burst(ctx context.Context, cmd BurstCmd) (JoinReport, error) {
+	have := len(r.bots)
+	if have == 0 || r.talker == nil {
+		return JoinReport{}, errors.New("burst: no bots yet; run set_n first")
+	}
+	want := cmd.Add
+	r.nRequested = have + want
+	silent := cmd.Talker == RampTalkerSilent
+	if silent {
+		r.talker.pause()
+	}
+	defer r.talker.resume()
+	r.phase.Store(int32(PhaseBurst))
+	defer r.phase.Store(int32(PhaseSettle))
+	tally := newJoinTally(have+want, have)
+	tally.configure(BurstMode, cmd.Talker, cmd.InFlight, nil)
+	rs0 := SampleRuntime()
+	stopProgress := r.startProgress(tally)
+	defer stopProgress()
+	if err := r.rampJoin(ctx, tally, want, nil, cmd.InFlight); err != nil {
+		return JoinReport{}, err
+	}
+	rs1 := SampleRuntime()
+	rep := tally.report(have+want, have, time.Since(tally.start), RampHealth{
+		SchedP99US:   DeltaQuantile(rs0.Sched, rs1.Sched, 0.99).Microseconds(),
+		GCPauseP99US: DeltaQuantile(rs0.GC, rs1.GC, 0.99).Microseconds(),
+	})
+	r.joinFailTotal.Add(uint64(rep.JoinFailures))
+	return rep, nil
+}
+
+// rampJoin joins want bots at inFlight concurrency, admitting each through lim
+// (nil means no rate limit). A failed join is recorded in tally, never
+// returned: the only error is the context's. Bots that joined are kept, in
+// index order, so shutdown releases them even when ctx ends the ramp.
+func (r *Runner) rampJoin(ctx context.Context, tally *joinTally, want int, lim *RateLimiter, inFlight int) error {
 	slots := make([]*runnerBot, want)
 	first := r.nextIdx
-	sem := make(chan struct{}, r.cfg.MaxInFlight)
+	sem := make(chan struct{}, inFlight)
 	var wg sync.WaitGroup
 	for k := range slots {
+		// A rate token first, then an in-flight slot, so a join waiting for
+		// its token holds no slot.
+		if lim != nil {
+			if err := lim.Wait(ctx, tally.alive()); err != nil {
+				break
+			}
+		}
 		sem <- struct{}{}
 		if ctx.Err() != nil {
 			<-sem
@@ -300,6 +491,7 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			idx := first + k
+			jstart := time.Now()
 			b, err := r.joinOne(ctx, idx, r.fullSet[idx])
 			if err != nil {
 				if ctx.Err() != nil {
@@ -317,10 +509,11 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 				return
 			}
 			slots[k] = b
-			tally.ok(b.tries)
+			tally.ok(b.tries, time.Since(jstart))
 		}(k)
 	}
 	wg.Wait()
+	r.peakInFlight.Store(int32(tally.peakInFlight()))
 	// Keep what joined so shutdown releases it. Index order is preserved.
 	for _, b := range slots {
 		if b != nil {
@@ -328,17 +521,7 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 		}
 	}
 	r.nextIdx = first + want
-	if err := ctx.Err(); err != nil {
-		return JoinReport{}, err
-	}
-	rs1 := SampleRuntime()
-	rep := tally.report(n, had0, time.Since(tally.start), RampHealth{
-		SchedP99US:   DeltaQuantile(rs0.Sched, rs1.Sched, 0.99).Microseconds(),
-		GCPauseP99US: DeltaQuantile(rs0.GC, rs1.GC, 0.99).Microseconds(),
-	})
-	r.joinFailTotal.Add(uint64(rep.JoinFailures))
-	r.phase.Store(int32(PhaseSettle))
-	return rep, nil
+	return ctx.Err()
 }
 
 // defaultProgressEvery is the progress-line period when none is configured.
@@ -435,52 +618,15 @@ func (r *Runner) joinOne(ctx context.Context, i int, full bool) (*runnerBot, err
 	return &runnerBot{ctl: ctl, voice: vc, id: id, tries: tries}, nil
 }
 
-// startTalker sends SyntheticFrame at 50 fps on an absolute schedule: tick k
-// is due at t0 + k*20ms, never an accumulating ticker.
-// After a stall the loop does not skip or reschedule: it sends the missed
-// frames back to back (open loop), and the lag is recorded against each due
-// time, so no coordinated omission. The burst can distort loss and burst
-// figures; the D14 self-health set exists to flag such a stall.
-func (r *Runner) startTalker(b *runnerBot) {
-	ctx, cancel := context.WithCancel(context.Background())
-	r.talkCancel = cancel
-	r.talkDone = make(chan struct{})
-	go func() {
-		defer close(r.talkDone)
-		t0 := time.Now()
-		for k := 0; ctx.Err() == nil; k++ {
-			due := t0.Add(time.Duration(k) * frameInterval)
-			if d := time.Until(due); d > 0 {
-				timer := time.NewTimer(d)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-			}
-			lag := time.Since(due)
-			if lag < 0 {
-				lag = 0
-			}
-			r.wheel.Record(lag)
-			seq := r.nextSeq.Load()
-			if err := b.voice.Send(seq, r.freq, SyntheticFrame(seq)); err != nil {
-				r.sendErrors.Add(1)
-			}
-			r.nextSeq.Store(seq + 1)
-		}
-	}()
+// startTalker starts the talker on b, paused when paused is true. See
+// talkerLoop for the schedule and the pause semantics.
+func (r *Runner) startTalker(b *runnerBot, paused bool) {
+	r.talker = startTalkerLoop(b.voice, r.freq, &r.nextSeq, &r.wheel, &r.sendErrors, paused)
 }
 
 func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error {
 	if len(r.bots) < 2 {
 		return errors.New("hold: need at least one listener (set_n >= 2)")
-	}
-	for i, b := range r.bots {
-		if err := b.ctl.Err(); err != nil {
-			return fmt.Errorf("hold: bot %d died: %w", i, err)
-		}
 	}
 	talker := r.bots[0]
 	listeners := r.bots[1:]
@@ -488,6 +634,11 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	if frames < 1 {
 		frames = 1
 	}
+	// Zero the hold's death counter before the phase flips, so a death that
+	// lands right after the flip is stamped hold and still counted.
+	r.dmu.Lock()
+	r.deadInHold = 0
+	r.dmu.Unlock()
 	r.phase.Store(int32(PhaseHold))
 	defer r.phase.Store(int32(PhaseSettle))
 
@@ -503,6 +654,7 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	for i, l := range listeners {
 		drops0[i] = l.voice.Drops.Load()
 	}
+	ping0 := r.pingTotals(true)
 	rs0 := SampleRuntime()
 
 	// The window ends when the talker has sent the last expected frame (it
@@ -543,6 +695,7 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	h.WheelLagP99 = r.wheel.Quantile(0.99)
 	h.SchedP99 = DeltaQuantile(rs0.Sched, rs1.Sched, 0.99)
 	h.GCPauseP99 = DeltaQuantile(rs0.GC, rs1.GC, 0.99)
+	h.GCCycles = DeltaCount(rs0.GC, rs1.GC)
 
 	rep := &StepReport{
 		Type: "step", Label: ReportLabel, Payload: PayloadLabel,
@@ -584,8 +737,49 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	if rep.Expected > 0 {
 		rep.LossRatio = float64(rep.Lost) / float64(rep.Expected)
 	}
+	rep.Ping = r.pingReport(ping0)
+	rep.Warnings = r.cfg.Bounds.Warnings(h)
+	r.dmu.Lock()
+	rep.ControlLost = ControlLostReport{
+		DeadTotal: r.deadTotal, DeadInHold: r.deadInHold,
+		DeadSinceLastStep: r.deadSinceStep, Alive: len(r.bots) - r.deadTotal,
+		First: append([]DeathSummary{}, r.deadFirst...),
+	}
+	r.deadSinceStep, r.deadFirst = 0, nil
+	r.dmu.Unlock()
 	r.last, r.lastPerListener = rep, per
 	return nil
+}
+
+type pingTotals struct{ sent, failed uint64 }
+
+// pingTotals sums every bot's Ping counters; reset also clears the RTT
+// histograms so the hold's p99 covers the hold only.
+func (r *Runner) pingTotals(reset bool) pingTotals {
+	var t pingTotals
+	for _, b := range r.bots {
+		t.sent += b.ctl.Pings.Sent.Load()
+		t.failed += b.ctl.Pings.Failed.Load()
+		if reset {
+			b.ctl.Pings.RTT.Reset()
+		}
+	}
+	return t
+}
+
+func (r *Runner) pingReport(base pingTotals) PingReport {
+	if r.cfg.PingEvery <= 0 {
+		return PingReport{}
+	}
+	now := r.pingTotals(false)
+	var h Hist
+	for _, b := range r.bots {
+		h.Merge(&b.ctl.Pings.RTT)
+	}
+	return PingReport{
+		EveryS: r.cfg.PingEvery.Seconds(), Sent: now.sent - base.sent,
+		Failed: now.failed - base.failed, RTTP99Us: h.Quantile(0.99).Microseconds(),
+	}
 }
 
 // updateTotals sums every bot's drain counters by update type name.
@@ -621,10 +815,9 @@ func (r *Runner) report(out io.Writer, step string) error {
 
 // shutdown stops the talker, then BYEs and closes every bot.
 func (r *Runner) shutdown(ctx context.Context) {
-	if r.talkCancel != nil {
-		r.talkCancel()
-		<-r.talkDone
-		r.talkCancel = nil
+	if r.talker != nil {
+		r.talker.stop()
+		r.talker = nil
 	}
 	var wg sync.WaitGroup
 	for _, b := range r.bots {

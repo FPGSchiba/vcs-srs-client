@@ -28,10 +28,13 @@ var addrFlags = []string{"control", "voice", "reflector"}
 
 func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errw, "usage: vcs-loadbot run|reflect|calibrate [flags]")
+		fmt.Fprintln(errw, "usage: vcs-loadbot run|reflect|calibrate|features [flags]")
 		return 2
 	}
 	sub := args[0]
+	if sub == "features" {
+		return featuresCmd(args[1:], out, errw)
+	}
 	switch sub {
 	case "run", "reflect", "calibrate":
 	default:
@@ -51,9 +54,14 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 	passwords := fs.String("passwords", "", "coalition passwords JSON file ({coalition: password})")
 	unit := fs.String("unit", "LDBT", "unit label")
 	seed := fs.Int64("seed", 0, "seed")
-	bounds := fs.String("bounds", "", "JSON overrides for the generator self-health bounds")
+	bounds := fs.String("bounds", "", "JSON overrides for the generator self-health bounds (lowering gc_pause_p99 below its 2ms warn bound also needs gc_pause_warn_p99 lowered)")
 	listen := fs.String("listen", "127.0.0.1:0", "reflect: loopback address to listen on (port 0 = ephemeral)")
 	senders := fs.Int("senders", 2, "reflect: sender goroutines on the one socket (>= 2)")
+	pingEvery := fs.Duration("ping-every", defaultPingEvery, "run: control Ping period per bot (0 disables)")
+	joinRateMax := fs.Float64("join-rate-max", loadgen.DefaultJoinRateMax, "run: joins/s cap for set_n ramps (0 = no cap term)")
+	joinRateScale := fs.Float64("join-rate-scale", loadgen.DefaultJoinRateScale, "run: rate term scale/N_alive for set_n ramps (0 = no scale term)")
+	maxInFlight := fs.Int("max-in-flight", loadgen.DefaultMaxInFlight, "run: concurrent joins in a set_n ramp (1..16)")
+	rampTalker := fs.String("ramp-talker", loadgen.RampTalkerSilent, "run: talker during set_n ramps (silent or live)")
 	steps := fs.String("steps", "64,128,256,512", "calibrate: ascending bot counts")
 	hold := fs.Float64("hold", 3, "calibrate: seconds per step")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -98,7 +106,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 	}
 	return runCmd(ctx, runOpts{
 		scenario: *scenario, arm: *arm, control: *vals["control"], voice: *vals["voice"],
-		passwords: *passwords, unit: *unit, seed: *seed, bounds: *bounds, allow: al,
+		passwords: *passwords, unit: *unit, seed: *seed, bounds: *bounds, allow: al, pingEvery: *pingEvery,
+		joinRateMax: *joinRateMax, joinRateScale: *joinRateScale, maxInFlight: *maxInFlight, rampTalker: *rampTalker,
 	}, in, out, errw)
 }
 
@@ -106,6 +115,10 @@ type runOpts struct {
 	scenario, arm, control, voice, passwords, unit, bounds string
 	seed                                                   int64
 	allow                                                  loadgen.AllowList
+	pingEvery                                              time.Duration
+	joinRateMax, joinRateScale                             float64
+	maxInFlight                                            int
+	rampTalker                                             string
 }
 
 // runCmd implements `vcs-loadbot run`: persistent bots driven by NDJSON on
@@ -118,6 +131,18 @@ func runCmd(ctx context.Context, o runOpts, in io.Reader, out, errw io.Writer) i
 		return 2
 	default:
 		fmt.Fprintf(errw, "vcs-loadbot: unknown --arm %q (S or Seq)\n", o.arm)
+		return 2
+	}
+	if o.maxInFlight < 1 || o.maxInFlight > loadgen.MaxMaxInFlight {
+		fmt.Fprintf(errw, "vcs-loadbot: --max-in-flight %d: want 1..%d\n", o.maxInFlight, loadgen.MaxMaxInFlight)
+		return 2
+	}
+	if o.joinRateMax < 0 || o.joinRateScale < 0 {
+		fmt.Fprintln(errw, "vcs-loadbot: --join-rate-max and --join-rate-scale must not be negative")
+		return 2
+	}
+	if o.rampTalker != loadgen.RampTalkerSilent && o.rampTalker != loadgen.RampTalkerLive {
+		fmt.Fprintf(errw, "vcs-loadbot: --ramp-talker %q: want silent or live\n", o.rampTalker)
 		return 2
 	}
 	if o.control == "" || o.scenario == "" || o.passwords == "" {
@@ -146,14 +171,15 @@ func runCmd(ctx context.Context, o runOpts, in io.Reader, out, errw io.Writer) i
 	}
 	r, err := loadgen.NewRunner(loadgen.RunConfig{
 		Arm: o.arm, Scenario: sc, ControlAddr: o.control, VoiceAddr: o.voice,
-		Allow: o.allow, Passwords: pw, Unit: o.unit, Seed: o.seed, Bounds: b,
-	}, loadgen.DialInsecure(o.control))
+		Allow: o.allow, Passwords: pw, Unit: o.unit, Seed: o.seed, Bounds: b, PingEvery: o.pingEvery,
+		JoinRateMax: o.joinRateMax, JoinRateScale: o.joinRateScale, MaxInFlight: o.maxInFlight, RampTalker: o.rampTalker,
+	}, loadgen.InsecureDialer(o.control))
 	if err != nil {
 		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
 		return 1
 	}
 	if err := r.Serve(ctx, in, out); err != nil {
-		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
+		fmt.Fprintf(errw, "vcs-loadbot: %v (%s)\n", err, r.ErrContext())
 		return 1
 	}
 	return 0
@@ -241,7 +267,8 @@ func calibrateCmd(ctx context.Context, refl, stepsCSV string, holdS float64, see
 			emit(calibrationLine{
 				Type: "calibration", N: s.N, Bots: s.Bots,
 				EgressPPS: s.EgressPPS, ExpectedPPS: s.ExpectedPPS,
-				Valid: s.Valid, Violations: s.Violations,
+				Valid: s.Valid, Violations: s.Violations, Warnings: s.Warnings,
+				Talker:        "per_step",
 				HelloTriesMax: s.HelloTriesMax, HelloRetried: s.HelloRetried,
 				Health: loadgen.NewHealthReport(s.Health), Bounds: br,
 				Label: bo, Payload: loadgen.PayloadLabel,
@@ -282,6 +309,8 @@ type calibrationLine struct {
 	ExpectedPPS   float64              `json:"expected_pps"`
 	Valid         bool                 `json:"valid"`
 	Violations    []string             `json:"violations"`
+	Warnings      []string             `json:"warnings"`
+	Talker        string               `json:"talker"`
 	HelloTriesMax int                  `json:"hello_tries_max"`
 	HelloRetried  int                  `json:"hello_retried"`
 	Health        loadgen.HealthReport `json:"health"`

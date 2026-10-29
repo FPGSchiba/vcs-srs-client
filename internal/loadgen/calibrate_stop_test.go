@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +131,9 @@ func TestCalibrateStreamsEachStep(t *testing.T) {
 	for i, s := range hooked {
 		if s.N != steps[i].N || s.N != []int{4, 8}[i] {
 			t.Errorf("hook %d: N = %d", i, s.N)
+		}
+		if s.Warnings == nil {
+			t.Errorf("N=%d Warnings is nil, want a non-nil slice", s.N)
 		}
 		if s.Bots != s.N {
 			t.Errorf("N=%d Bots = %d", s.N, s.Bots)
@@ -268,5 +272,43 @@ func TestCalibrateDeliveryCountsWholeFrames(t *testing.T) {
 	}
 	if len(steps) != 1 {
 		t.Fatalf("steps = %+v, want one", steps)
+	}
+}
+
+// The talker runs only during a step's hold: while the next step's bots are
+// being added the reflector reads no VOICE, so each hold starts from an empty
+// backlog.
+func TestCalibrateTalkerOnlyDuringHold(t *testing.T) {
+	// Bot 5 joins in step 8's ramp and loses its first HELLO, stretching the
+	// ramp to over a second.
+	var hellos atomic.Int32
+	proxy, allow, r := calibrateBehindProxy(t, func(i int) bool { return i == 5 && hellos.Add(1) == 1 })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	var rx []uint64
+	_, _, err := Calibrate(ctx, proxy, allow, 1, []int{4, 8}, time.Second,
+		WithBounds(relaxedBounds), WithMinDelivery(0),
+		WithProgress(50*time.Millisecond, func(p ProgressLine) {
+			if p.Target != 8 {
+				return
+			}
+			mu.Lock()
+			rx = append(rx, r.VoiceRx())
+			mu.Unlock()
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(rx) < 3 {
+		t.Fatalf("only %d progress samples during step 8's ramp", len(rx))
+	}
+	// The first sample is taken after the previous hold's last packets landed.
+	for i, v := range rx[1:] {
+		if v != rx[0] {
+			t.Fatalf("reflector VOICE count grew during the ramp: sample %d = %d, first = %d", i+1, v, rx[0])
+		}
 	}
 }

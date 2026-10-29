@@ -121,6 +121,28 @@ type JoinReport struct {
 	RampS           float64       `json:"ramp_s"`
 	RampHealth      RampHealth    `json:"ramp_health"`
 	Label           string        `json:"label"`
+
+	// v3 additions (I-12).
+	Mode         string     `json:"mode"`
+	Talker       string     `json:"talker"`
+	JoinsPerS    float64    `json:"joins_per_s"`
+	JoinP99Us    int64      `json:"join_p99_us"`
+	HelloRetried int        `json:"hello_retried"`
+	InFlightMax  int        `json:"in_flight_max"`
+	RateLimit    *RateLimit `json:"rate_limit"`
+}
+
+// RampMode and BurstMode are the joins line's mode values.
+const (
+	RampMode  = "ramp"
+	BurstMode = "burst"
+)
+
+// RateLimit is the ramp's configured limiter; a joins line carries null for
+// an unbounded ramp or a burst.
+type RateLimit struct {
+	MaxPerS float64 `json:"max_per_s"`
+	Scale   float64 `json:"scale"`
 }
 
 // ProgressLine is the `progress` NDJSON line (interface I-2). The ramp phase
@@ -139,12 +161,18 @@ type ProgressLine struct {
 	Bots         int     `json:"bots,omitempty"`
 	HelloRetried int     `json:"hello_retried"`
 	ElapsedS     float64 `json:"elapsed_s"`
+	// RatePerS is the join limit in force (0 = unbounded) and Talker the
+	// talker's state during the ramp (v3, I-14). Ramp lines only.
+	RatePerS float64 `json:"rate_per_s,omitempty"`
+	Talker   string  `json:"talker,omitempty"`
 }
 
 // MarshalJSON keeps zero-valued ramp counters (a ramp that has finished
 // nothing yet still reports done 0) while omitting the other phase's keys.
+// join_failures is the exception: it is absent while 0 (I-17 fixture note), so
+// a clean ramp's line carries no failure key at all.
 func (p ProgressLine) MarshalJSON() ([]byte, error) {
-	if p.Phase == "ramp" {
+	if p.Phase == "ramp" || p.Phase == "burst" {
 		return json.Marshal(struct {
 			Type         string  `json:"type"`
 			Phase        string  `json:"phase"`
@@ -152,11 +180,13 @@ func (p ProgressLine) MarshalJSON() ([]byte, error) {
 			Had          int     `json:"had"`
 			Done         int     `json:"done"`
 			Joined       int     `json:"joined"`
-			JoinFailures int     `json:"join_failures"`
+			JoinFailures int     `json:"join_failures,omitempty"`
 			InFlight     int     `json:"in_flight"`
 			HelloRetried int     `json:"hello_retried"`
 			ElapsedS     float64 `json:"elapsed_s"`
-		}{p.Type, p.Phase, p.Requested, p.Had, p.Done, p.Joined, p.JoinFailures, p.InFlight, p.HelloRetried, p.ElapsedS})
+			RatePerS     float64 `json:"rate_per_s"`
+			Talker       string  `json:"talker"`
+		}{p.Type, p.Phase, p.Requested, p.Had, p.Done, p.Joined, p.JoinFailures, p.InFlight, p.HelloRetried, p.ElapsedS, p.RatePerS, p.Talker})
 	}
 	if p.Phase == "calibrate_ramp" {
 		return json.Marshal(struct {
@@ -185,6 +215,34 @@ type joinTally struct {
 	hist      []int
 	byStage   StageCounts
 	failures  []JoinFailure
+
+	mode, talker string
+	inFlightCap  int
+	limiter      *RateLimiter
+	peak         int
+	dur          Hist // join start to HELLO_ACK, joined bots only
+}
+
+// configure records the ramp's mode, talker state, in-flight cap and
+// limiter for the progress and joins lines.
+func (t *joinTally) configure(mode, talker string, inFlightCap int, l *RateLimiter) {
+	t.mu.Lock()
+	t.mode, t.talker, t.inFlightCap, t.limiter = mode, talker, inFlightCap, l
+	t.mu.Unlock()
+}
+
+// alive is the bot count the rate limiter sees: had plus joined so far.
+func (t *joinTally) alive() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.had + t.joined
+}
+
+// peakInFlight is the highest in-flight count seen.
+func (t *joinTally) peakInFlight() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.peak
 }
 
 func newJoinTally(requested, had int) *joinTally {
@@ -198,6 +256,9 @@ func newJoinTally(requested, had int) *joinTally {
 func (t *joinTally) begin() {
 	t.mu.Lock()
 	t.inFlight++
+	if t.inFlight > t.peak {
+		t.peak = t.inFlight
+	}
 	t.mu.Unlock()
 }
 
@@ -208,12 +269,14 @@ func (t *joinTally) finishLocked() {
 	}
 }
 
-// ok records a bot whose ACK came on HELLO number tries.
-func (t *joinTally) ok(tries int) {
+// ok records a bot whose ACK came on HELLO number tries, d after its join
+// started.
+func (t *joinTally) ok(tries int, d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.finishLocked()
 	t.joined++
+	t.dur.Record(d)
 	if tries >= 2 {
 		t.retried++
 	}
@@ -260,11 +323,20 @@ func (t *joinTally) fail(f JoinFailure) {
 func (t *joinTally) progress() ProgressLine {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	var rate float64
+	if t.limiter != nil {
+		rate = t.limiter.Rate(t.had + t.joined)
+	}
+	phase := "ramp"
+	if t.mode == BurstMode {
+		phase = "burst"
+	}
 	return ProgressLine{
-		Type: "progress", Phase: "ramp", Requested: t.requested, Had: t.had,
+		Type: "progress", Phase: phase, Requested: t.requested, Had: t.had,
 		Done: t.joined + len(t.failures), Joined: t.joined, JoinFailures: len(t.failures),
 		InFlight: t.inFlight, HelloRetried: t.retried,
 		ElapsedS: time.Since(t.start).Seconds(),
+		RatePerS: rate, Talker: t.talker,
 	}
 }
 
@@ -279,11 +351,26 @@ func (t *joinTally) report(requested, had int, ramp time.Duration, rh RampHealth
 	if truncated {
 		failed = failed[:maxFailedListed]
 	}
-	return JoinReport{
+	mode := t.mode
+	if mode == "" {
+		mode = RampMode
+	}
+	rep := JoinReport{
 		Type: "joins", Schema: JoinsSchema, Requested: requested, Had: had,
 		N: had + t.joined, Joined: t.joined, JoinFailures: len(t.failures),
 		FailuresByStage: t.byStage, HelloTriesHist: append([]int(nil), t.hist...),
 		HelloTriesMax: t.triesMax, Failed: failed, FailedTruncated: truncated,
 		RampS: ramp.Seconds(), RampHealth: rh, Label: ReportLabel,
+		Mode: mode, Talker: t.talker, HelloRetried: t.retried, InFlightMax: t.inFlightCap,
 	}
+	if ramp > 0 {
+		rep.JoinsPerS = float64(t.joined) / ramp.Seconds()
+	}
+	if t.joined > 0 {
+		rep.JoinP99Us = t.dur.Quantile(0.99).Microseconds()
+	}
+	if t.limiter != nil && mode == RampMode && (t.limiter.Max > 0 || t.limiter.Scale > 0) {
+		rep.RateLimit = &RateLimit{MaxPerS: t.limiter.Max, Scale: t.limiter.Scale}
+	}
+	return rep
 }

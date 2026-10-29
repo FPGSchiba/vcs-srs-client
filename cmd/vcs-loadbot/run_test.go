@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -69,5 +70,24 @@ func TestRunSubcommandEndToEnd(t *testing.T) {
 	}
 	if steps != 1 {
 		t.Fatalf("step lines = %d, want 1; stdout=%q", steps, out.String())
+	}
+}
+
+func TestRunFatalErrorCarriesContext(t *testing.T) {
+	pw := filepath.Join(t.TempDir(), "pw.json")
+	if err := os.WriteFile(pw, []byte(`{"x":"y"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errw bytes.Buffer
+	code := run(context.Background(), []string{
+		"run", "--scenario", "one-big-net", "--control", "127.0.0.1:1",
+		"--allow", "127.0.0.1:1", "--passwords", pw,
+	}, strings.NewReader(`{"hold":1}`+"\n"), &out, &errw)
+	if code != 1 {
+		t.Fatalf("exit = %d, stderr=%q", code, errw.String())
+	}
+	re := `^vcs-loadbot: hold: need at least one listener .* \(last command \{"hold":1\}; bots 0, dead 0, uptime [0-9.]+s\)\n$`
+	if ok, _ := regexp.MatchString(re, errw.String()); !ok {
+		t.Fatalf("stderr = %q", errw.String())
 	}
 }

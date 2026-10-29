@@ -19,10 +19,18 @@ const JoinLabel = "closed-loop, <= 16 in flight; server-side cost only; client h
 
 // Command is one NDJSON line on the bot's stdin. Exactly one field is set.
 type Command struct {
-	SetN   *int     `json:"set_n"`
-	Hold   *float64 `json:"hold"`
-	Report *string  `json:"report"`
-	Quit   bool     `json:"quit"`
+	SetN   *int      `json:"set_n"`
+	Hold   *float64  `json:"hold"`
+	Report *string   `json:"report"`
+	Quit   bool      `json:"quit"`
+	Burst  *BurstCmd `json:"burst"`
+}
+
+// BurstCmd is the burst command's body (I-13). All three fields are required.
+type BurstCmd struct {
+	Add      int    `json:"add"`
+	InFlight int    `json:"in_flight"`
+	Talker   string `json:"talker"`
 }
 
 // ParseCommand decodes one command line: unknown fields, trailing data and
@@ -55,6 +63,18 @@ func ParseCommand(line []byte) (Command, error) {
 	}
 	if c.Quit {
 		set++
+	}
+	if c.Burst != nil {
+		set++
+		b := c.Burst
+		switch {
+		case b.Add < 1:
+			return Command{}, fmt.Errorf("command: burst add %d must be >= 1", b.Add)
+		case b.InFlight < 1 || b.InFlight > MaxMaxInFlight:
+			return Command{}, fmt.Errorf("command: burst in_flight %d must be 1..%d", b.InFlight, MaxMaxInFlight)
+		case b.Talker != RampTalkerSilent && b.Talker != RampTalkerLive:
+			return Command{}, fmt.Errorf("command: burst talker %q: want silent or live", b.Talker)
+		}
 	}
 	if set != 1 {
 		return Command{}, fmt.Errorf("command: exactly one field must be set, got %d", set)
@@ -89,6 +109,7 @@ type HealthReport struct {
 	WheelLagP99Us int64    `json:"wheel_lag_p99_us"`
 	SchedP99Us    int64    `json:"sched_p99_us"`
 	GCPauseP99Us  int64    `json:"gc_pause_p99_us"`
+	GCCycles      uint64   `json:"gc_cycles"`
 	GenCPU        *float64 `json:"gen_cpu"`
 }
 
@@ -100,6 +121,7 @@ func NewHealthReport(h Health) HealthReport {
 		WheelLagP99Us: h.WheelLagP99.Microseconds(),
 		SchedP99Us:    h.SchedP99.Microseconds(),
 		GCPauseP99Us:  h.GCPauseP99.Microseconds(),
+		GCCycles:      h.GCCycles,
 	}
 	if h.RxLagP99 != nil {
 		us := h.RxLagP99.Microseconds()
@@ -114,23 +136,25 @@ func NewHealthReport(h Health) HealthReport {
 
 // BoundsReport is Bounds in wire form, recorded in every report.
 type BoundsReport struct {
-	MaxSocketDrops uint64  `json:"max_socket_drops"`
-	RxLagP99Us     int64   `json:"rx_lag_p99_us"`
-	WheelLagP99Us  int64   `json:"wheel_lag_p99_us"`
-	SchedP99Us     int64   `json:"sched_p99_us"`
-	GCPauseP99Us   int64   `json:"gc_pause_p99_us"`
-	MaxGenCPU      float64 `json:"max_gen_cpu"`
+	MaxSocketDrops   uint64  `json:"max_socket_drops"`
+	RxLagP99Us       int64   `json:"rx_lag_p99_us"`
+	WheelLagP99Us    int64   `json:"wheel_lag_p99_us"`
+	SchedP99Us       int64   `json:"sched_p99_us"`
+	GCPauseP99Us     int64   `json:"gc_pause_p99_us"`
+	GCPauseWarnP99Us int64   `json:"gc_pause_warn_p99_us"`
+	MaxGenCPU        float64 `json:"max_gen_cpu"`
 }
 
 // NewBoundsReport converts b.
 func NewBoundsReport(b Bounds) BoundsReport {
 	return BoundsReport{
-		MaxSocketDrops: b.MaxSocketDrops,
-		RxLagP99Us:     b.RxLagP99.Microseconds(),
-		WheelLagP99Us:  b.WheelLagP99.Microseconds(),
-		SchedP99Us:     b.SchedP99.Microseconds(),
-		GCPauseP99Us:   b.GCPauseP99.Microseconds(),
-		MaxGenCPU:      b.MaxGenCPU,
+		MaxSocketDrops:   b.MaxSocketDrops,
+		RxLagP99Us:       b.RxLagP99.Microseconds(),
+		WheelLagP99Us:    b.WheelLagP99.Microseconds(),
+		SchedP99Us:       b.SchedP99.Microseconds(),
+		GCPauseP99Us:     b.GCPauseP99.Microseconds(),
+		GCPauseWarnP99Us: b.GCPauseWarnP99.Microseconds(),
+		MaxGenCPU:        b.MaxGenCPU,
 	}
 }
 
@@ -172,10 +196,36 @@ type StepReport struct {
 	Violations []string     `json:"violations"`
 	Valid      bool         `json:"valid"`
 	Bounds     BoundsReport `json:"bounds"`
+
+	ControlLost ControlLostReport `json:"control_lost"`
+	Ping        PingReport        `json:"ping"`
+	// Warnings is never null.
+	Warnings []string `json:"warnings"`
+}
+
+// ControlLostReport is a step's view of dead bots (I-11).
+type ControlLostReport struct {
+	DeadTotal         int            `json:"dead_total"`
+	DeadInHold        int            `json:"dead_in_hold"`
+	DeadSinceLastStep int            `json:"dead_since_last_step"`
+	Alive             int            `json:"alive"`
+	First             []DeathSummary `json:"first"`
+}
+
+// DeathSummary is an I-10 object without type and dead_total.
+type DeathSummary = DeathRecord
+
+// PingReport is the control-plane Ping activity of one hold (I-11).
+type PingReport struct {
+	EveryS   float64 `json:"every_s"`
+	Sent     uint64  `json:"sent"`
+	Failed   uint64  `json:"failed"`
+	RTTP99Us int64   `json:"rtt_p99_us"`
 }
 
 // ParseBounds overlays a JSON object on DefaultBounds. Keys: max_socket_drops,
-// rx_lag_p99, wheel_lag_p99, sched_p99, gc_pause_p99 (Go duration strings) and
+// rx_lag_p99, wheel_lag_p99, sched_p99, gc_pause_p99, gc_pause_warn_p99 (Go
+// duration strings; the warn bound must not exceed the hard one) and
 // max_gen_cpu. Empty input is the defaults; unknown keys are an error.
 func ParseBounds(s string) (Bounds, error) {
 	b := DefaultBounds
@@ -188,6 +238,7 @@ func ParseBounds(s string) (Bounds, error) {
 		WheelLagP99    *string  `json:"wheel_lag_p99"`
 		SchedP99       *string  `json:"sched_p99"`
 		GCPauseP99     *string  `json:"gc_pause_p99"`
+		GCPauseWarnP99 *string  `json:"gc_pause_warn_p99"`
 		MaxGenCPU      *float64 `json:"max_gen_cpu"`
 	}
 	dec := json.NewDecoder(bytes.NewReader([]byte(s)))
@@ -210,6 +261,7 @@ func ParseBounds(s string) (Bounds, error) {
 		{"wheel_lag_p99", raw.WheelLagP99, &b.WheelLagP99},
 		{"sched_p99", raw.SchedP99, &b.SchedP99},
 		{"gc_pause_p99", raw.GCPauseP99, &b.GCPauseP99},
+		{"gc_pause_warn_p99", raw.GCPauseWarnP99, &b.GCPauseWarnP99},
 	} {
 		if f.in == nil {
 			continue
@@ -219,6 +271,9 @@ func ParseBounds(s string) (Bounds, error) {
 			return Bounds{}, fmt.Errorf("bounds: %s: %w", f.name, err)
 		}
 		*f.out = d
+	}
+	if b.GCPauseWarnP99 > b.GCPauseP99 {
+		return Bounds{}, fmt.Errorf("bounds: gc_pause_warn_p99 %v exceeds gc_pause_p99 %v", b.GCPauseWarnP99, b.GCPauseP99)
 	}
 	return b, nil
 }

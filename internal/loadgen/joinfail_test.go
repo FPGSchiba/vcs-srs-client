@@ -33,7 +33,7 @@ func TestServeSetNContinuesPastHelloFailure(t *testing.T) {
 		Arm: "S", Scenario: sc, ControlAddr: srv.ControlAddr, VoiceAddr: proxy,
 		Allow: allow, Passwords: map[string]string{srv.Coalition: srv.Password},
 		Unit: "LDBT", Seed: 1, Bounds: DefaultBounds,
-	}, DialInsecure(srv.ControlAddr))
+	}, InsecureDialer(srv.ControlAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func newJoinFailRunner(t *testing.T, drop func(int) bool) *Runner {
 		Arm: "S", Scenario: sc, ControlAddr: srv.ControlAddr, VoiceAddr: proxy,
 		Allow: allow, Passwords: map[string]string{srv.Coalition: srv.Password},
 		Unit: "LDBT", Seed: 1, Bounds: DefaultBounds,
-	}, DialInsecure(srv.ControlAddr))
+	}, InsecureDialer(srv.ControlAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,6 +217,9 @@ func TestServeProgressLines(t *testing.T) {
 	}
 	num := func(k string) int {
 		v, ok := last[k].(float64)
+		if !ok && k == "join_failures" {
+			return 0 // omitted while 0 (I-17 fixture note)
+		}
 		if !ok {
 			t.Fatalf("progress key %q missing or not a number: %v", k, last)
 		}

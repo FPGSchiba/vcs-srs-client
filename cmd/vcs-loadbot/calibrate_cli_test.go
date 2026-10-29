@@ -120,7 +120,15 @@ func TestCalibrateCLIStopsAtLastGoodStep(t *testing.T) {
 		if !strings.HasPrefix(l, `{"type":"`+h.Type+`"`) {
 			t.Errorf("%s line does not lead with type: %.60s", h.Type, l)
 		}
-		if got, w := keysOf(t, l), want[h.Type]; fmt.Sprint(got) != fmt.Sprint(w) {
+		w := want[h.Type]
+		if h.Type == "calibration" { // C-T7/C-T8 add warnings and talker to the v2 key set
+			w = append(append([]string{}, w...), "warnings", "talker")
+			sort.Strings(w)
+		}
+		if h.Type == "calibration" && !strings.Contains(l, `"talker":"per_step"`) {
+			t.Errorf("calibration line lacks talker per_step: %.200s", l)
+		}
+		if got := keysOf(t, l); fmt.Sprint(got) != fmt.Sprint(w) {
 			t.Errorf("%s keys = %v, want %v", h.Type, got, w)
 		}
 	}
@@ -175,5 +183,37 @@ func TestReflectStatsLineHasSplitCounters(t *testing.T) {
 		if _, ok := m[k]; !ok {
 			t.Errorf("reflector_stats lacks %q: %s", k, st)
 		}
+	}
+}
+
+// Every calibration step line says the talker runs per step (W6 fix 2, R2-10).
+func TestCalibrateStepLineTalkerPerStep(t *testing.T) {
+	refl, stopRefl := startReflectCLI(t)
+	var out, errw bytes.Buffer
+	code := run(context.Background(), []string{"calibrate", "--reflector", refl, "--allow", refl, "--steps", "4", "--hold", "1"},
+		strings.NewReader(""), &out, &errw)
+	stopRefl()
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errw.String())
+	}
+	n := 0
+	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var h struct {
+			Type   string `json:"type"`
+			Talker string `json:"talker"`
+		}
+		if err := json.Unmarshal([]byte(l), &h); err != nil {
+			t.Fatalf("line %q: %v", l, err)
+		}
+		if h.Type != "calibration" {
+			continue
+		}
+		n++
+		if h.Talker != "per_step" {
+			t.Errorf("calibration talker = %q, want per_step", h.Talker)
+		}
+	}
+	if n == 0 {
+		t.Fatalf("no calibration line in output:\n%s", out.String())
 	}
 }

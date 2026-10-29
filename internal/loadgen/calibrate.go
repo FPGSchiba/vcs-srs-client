@@ -17,6 +17,7 @@ type CalStep struct {
 	EgressPPS  float64 // unique frames delivered to listeners per second of hold
 	Health     Health
 	Violations []string
+	Warnings   []string // soft bounds exceeded; never nil, never invalidates
 	Valid      bool
 
 	Bots          int     // bots alive during the hold (= N)
@@ -209,11 +210,6 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 			liveBots.Store(int64(len(bots)))
 		}
 		stopRamp()
-		if talkCancel == nil {
-			tctx, cancel := context.WithCancel(context.Background())
-			talkCancel, talkDone = cancel, make(chan struct{})
-			go calTalk(tctx, talkDone, bots[0], freq, &nextSeq, &wheel, &sendErrs)
-		}
 		talker, listeners := bots[0], bots[1:n]
 		base := uint64(nextSeq.Load()) + holdLeadFrames
 		for _, l := range listeners {
@@ -227,6 +223,11 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 			drops0[i] = l.Drops.Load()
 		}
 		rs0 := SampleRuntime()
+		// The talker runs only for this hold, so every step starts from an
+		// empty reflector backlog; nextSeq carries over, keeping ledgers unique.
+		tctx, tcancel := context.WithCancel(context.Background())
+		talkCancel, talkDone = tcancel, make(chan struct{})
+		go calTalk(tctx, talkDone, bots[0], freq, &nextSeq, &wheel, &sendErrs)
 		end := base + uint64(frames)
 		deadline := time.After(hold + 5*time.Second)
 		poll := time.NewTicker(5 * time.Millisecond)
@@ -249,6 +250,9 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 		case <-time.After(holdDrain):
 		}
 		rs1 := SampleRuntime()
+		talkCancel()
+		<-talkDone
+		talkCancel = nil
 
 		h := Health{GenCPU: -1, SendErrors: sendErrs.Load() - se0}
 		var rx Hist
@@ -263,6 +267,7 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 		h.WheelLagP99 = wheel.Quantile(0.99)
 		h.SchedP99 = DeltaQuantile(rs0.Sched, rs1.Sched, 0.99)
 		h.GCPauseP99 = DeltaQuantile(rs0.GC, rs1.GC, 0.99)
+		h.GCCycles = DeltaCount(rs0.GC, rs1.GC)
 
 		var unique uint64
 		for _, l := range listeners {
@@ -276,7 +281,7 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 		v := o.bounds.Violations(h)
 		step := CalStep{
 			N: n, EgressPPS: float64(unique) / hold.Seconds(),
-			Health: h, Violations: v, Valid: len(v) == 0,
+			Health: h, Violations: v, Warnings: o.bounds.Warnings(h), Valid: len(v) == 0,
 			Bots: n, ExpectedPPS: framesPerSec * float64(n-1),
 			HelloTriesMax: triesMax, HelloRetried: retried,
 		}

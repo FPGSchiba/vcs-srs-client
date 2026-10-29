@@ -36,7 +36,7 @@ func ifaceLines(t *testing.T, name string) []string {
 // roundTrip decodes line into dst with DisallowUnknownFields, re-marshals
 // dst and requires the same map as the line itself: the bot emits exactly the
 // agreed keys and types.
-func roundTrip(t *testing.T, name, line string, dst any) {
+func roundTrip(t *testing.T, name, line string, dst any, drop ...string) {
 	t.Helper()
 	dec := json.NewDecoder(strings.NewReader(line))
 	dec.DisallowUnknownFields()
@@ -53,6 +53,16 @@ func roundTrip(t *testing.T, name, line string, dst any) {
 	}
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
+	}
+	for _, k := range drop {
+		// "a.b" drops key b of the object at key a.
+		if parent, child, ok := strings.Cut(k, "."); ok {
+			if m, isMap := got[parent].(map[string]any); isMap {
+				delete(m, child)
+			}
+			continue
+		}
+		delete(got, k)
 	}
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("%s: round trip differs\nwant %v\ngot  %v\nline %s\nout  %s", name, want, got, line, b)
@@ -93,7 +103,8 @@ func TestInterfaceFixturesRoundTrip(t *testing.T) {
 				t.Fatalf("%s: fixture line of unexpected type %q", f, head.Type)
 			}
 			seen[head.Type]++
-			roundTrip(t, f, line, dst)
+			// The v2 fixtures predate the v3 keys; C-T10 round-trips the v3 ones.
+			roundTrip(t, f, line, dst, v3Keys[head.Type]...)
 		}
 	}
 	for _, typ := range []string{"joins", "progress", "calibration", "calibration_stopped", "receive_capacity", "reflector_stats"} {
@@ -116,4 +127,13 @@ func TestStepReportCarriesInterfaceAdditions(t *testing.T) {
 	if m["n_requested"] != float64(7) || m["join_failures_total"] != float64(3) {
 		t.Fatalf("step line lacks n_requested/join_failures_total: %s", b)
 	}
+}
+
+// v3Keys are the keys v3 added to v2 line types (I-12, I-14); the v2
+// fixtures do not have them.
+var v3Keys = map[string][]string{
+	"joins":    {"mode", "talker", "joins_per_s", "join_p99_us", "hello_retried", "in_flight_max", "rate_limit"},
+	"progress": {"rate_per_s", "talker"},
+	// C-T7: soft GC bound, warnings and GC cycles.
+	"calibration": {"warnings", "talker", "health.gc_cycles", "bounds.gc_pause_warn_p99_us"},
 }

@@ -7,9 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/FPGSchiba/vcs-srs-client/internal/loadgen"
 )
 
 func TestRunRefusesNonLoopbackBeforeDial(t *testing.T) {
@@ -132,5 +137,81 @@ func TestParseSteps(t *testing.T) {
 		if _, err := parseSteps(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+func TestFeaturesSubcommand(t *testing.T) {
+	var out, errw bytes.Buffer
+	code := run(context.Background(), []string{"features"}, strings.NewReader(""), &out, &errw)
+	if code != 0 || errw.Len() != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errw.String())
+	}
+	if n := strings.Count(out.String(), "\n"); n != 1 || !strings.HasSuffix(out.String(), "\n") {
+		t.Fatalf("want exactly one line, got %q", out.String())
+	}
+	want, err := os.ReadFile("../../internal/loadgen/testdata/interface/v3-features.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g, w map[string]any
+	if err := json.Unmarshal(out.Bytes(), &g); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(want, &w); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("features line\n got %v\nwant %v", g, w)
+	}
+	fs, _ := g["features"].([]any)
+	strs := make([]string, len(fs))
+	for i, f := range fs {
+		strs[i], _ = f.(string)
+	}
+	if !sort.StringsAreSorted(strs) {
+		t.Fatalf("features not sorted: %v", strs)
+	}
+}
+
+func TestFeaturesDefaultsMatchFlags(t *testing.T) {
+	var out, errw bytes.Buffer
+	if code := run(context.Background(), []string{"features"}, strings.NewReader(""), &out, &errw); code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	var l featuresLine
+	if err := json.Unmarshal(out.Bytes(), &l); err != nil {
+		t.Fatal(err)
+	}
+	// Flag defaults, read back from the real flag set via -h output.
+	var herr bytes.Buffer
+	run(context.Background(), []string{"run", "-h"}, strings.NewReader(""), io.Discard, &herr)
+	help := herr.String()
+	d := l.Defaults
+	for _, c := range []struct{ flag, def string }{
+		{"ping-every", fmt.Sprintf("(default %v)", defaultPingEvery)},
+		{"join-rate-max", fmt.Sprintf("(default %v)", d.JoinRateMax)},
+		{"join-rate-scale", fmt.Sprintf("(default %v)", d.JoinRateScale)},
+		{"max-in-flight", fmt.Sprintf("(default %d)", d.MaxInFlight)},
+		{"ramp-talker", fmt.Sprintf("(default %q)", d.RampTalker)},
+	} {
+		i := strings.Index(help, "-"+c.flag+" ")
+		if i < 0 {
+			t.Fatalf("flag %s missing from help:\n%s", c.flag, help)
+		}
+		rest := help[i:]
+		if j := strings.Index(rest[1:], "\n  -"); j >= 0 {
+			rest = rest[:j+1]
+		}
+		if !strings.Contains(rest, c.def) {
+			t.Errorf("flag %s: help %q lacks %s", c.flag, rest, c.def)
+		}
+	}
+	if d.PingEveryS != 5 || d.JoinRateMax != loadgen.DefaultJoinRateMax || d.JoinRateScale != loadgen.DefaultJoinRateScale ||
+		d.MaxInFlight != loadgen.DefaultMaxInFlight || d.RampTalker != loadgen.RampTalkerSilent {
+		t.Errorf("defaults = %+v", d)
+	}
+	b := loadgen.DefaultBounds
+	if d.GCPauseP99US != b.GCPauseP99.Microseconds() || d.GCPauseWarnP99US != b.GCPauseWarnP99.Microseconds() {
+		t.Errorf("gc defaults %+v vs bounds %v/%v", d, b.GCPauseP99, b.GCPauseWarnP99)
 	}
 }
