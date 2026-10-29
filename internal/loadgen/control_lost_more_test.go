@@ -252,3 +252,14 @@ func TestServeFatalErrorCarriesContext(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotContextCapsLongLastCommand(t *testing.T) {
+	r := &Runner{lastCmd: strings.Repeat("x", 5000)}
+	got := r.snapshotContext()
+	if len(got) > 400 {
+		t.Fatalf("context not capped: %d bytes", len(got))
+	}
+	if !strings.Contains(got, "...") {
+		t.Fatalf("no truncation marker: %q", got)
+	}
+}

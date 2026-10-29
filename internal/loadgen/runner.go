@@ -107,6 +107,9 @@ type Runner struct {
 // counted (dead_total).
 const maxDeathLines = 64
 
+// maxCmdContext caps the last command echoed in the fatal error context.
+const maxCmdContext = 200
+
 // maxDeathFirst is how many deaths a step line lists.
 const maxDeathFirst = 8
 
@@ -150,6 +153,8 @@ func (r *Runner) snapshotContext() string {
 	cmd := r.lastCmd
 	if cmd == "" {
 		cmd = "none"
+	} else if len(cmd) > maxCmdContext {
+		cmd = cmd[:maxCmdContext] + "..."
 	}
 	return fmt.Sprintf("last command %s; bots %d, dead %d, uptime %gs", cmd, len(r.bots), dead, up)
 }
@@ -549,6 +554,11 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	if frames < 1 {
 		frames = 1
 	}
+	// Zero the hold's death counter before the phase flips, so a death that
+	// lands right after the flip is stamped hold and still counted.
+	r.dmu.Lock()
+	r.deadInHold = 0
+	r.dmu.Unlock()
 	r.phase.Store(int32(PhaseHold))
 	defer r.phase.Store(int32(PhaseSettle))
 
@@ -564,9 +574,6 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	for i, l := range listeners {
 		drops0[i] = l.voice.Drops.Load()
 	}
-	r.dmu.Lock()
-	r.deadInHold = 0
-	r.dmu.Unlock()
 	ping0 := r.pingTotals(true)
 	rs0 := SampleRuntime()
 
