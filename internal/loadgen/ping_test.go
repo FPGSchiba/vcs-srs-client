@@ -334,3 +334,33 @@ func TestControlBotPingDeathThroughJoiner(t *testing.T) {
 		t.Fatalf("failed pings = %d", bot.Pings.Failed.Load())
 	}
 }
+
+// An OnDead that stops its own pinger (as a Close would) must not deadlock:
+// the loop used to wait on itself through stop().
+func TestPingerOnDeadMayStopItsPinger(t *testing.T) {
+	ft := newFakeTick()
+	handled := make(chan struct{}, 1)
+	var p *pinger
+	stopped := make(chan struct{})
+	p = newPinger(pingerCfg{
+		Every: time.Second,
+		Tick:  ft.tick,
+		Ping: func(context.Context) (time.Duration, error) {
+			defer func() { handled <- struct{}{} }()
+			return 0, status.Error(codes.Unavailable, "gone")
+		},
+		OnDead: func(int, error) {
+			p.stop()
+			close(stopped)
+		},
+	})
+	p.start(context.Background())
+	fire(t, ft, handled)
+	fire(t, ft, handled)
+	fire(t, ft, handled)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDead calling stop() deadlocked the pinger")
+	}
+}

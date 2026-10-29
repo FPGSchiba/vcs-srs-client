@@ -86,8 +86,9 @@ type pingerCfg struct {
 	Ping func(ctx context.Context) (time.Duration, error)
 	// Tick returns the tick channel and its stop func; nil means a real ticker.
 	Tick func(d time.Duration) (<-chan time.Time, func())
-	// OnDead is called once, on the pinger's goroutine, after
-	// PingFailureThreshold consecutive failures.
+	// OnDead is called once, on its own goroutine, after
+	// PingFailureThreshold consecutive failures. Because the loop has already
+	// returned, it may call stop() or Close without deadlocking.
 	OnDead func(failures int, last error)
 	Stats  *PingStats
 }
@@ -175,7 +176,7 @@ func (p *pinger) loop(ctx context.Context) {
 		}
 		if n := p.failures.Add(1); int(n) >= PingFailureThreshold {
 			if p.cfg.OnDead != nil {
-				p.cfg.OnDead(int(n), err)
+				go p.cfg.OnDead(int(n), err)
 			}
 			return
 		}
