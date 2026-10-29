@@ -71,6 +71,25 @@ func TestServeBurstWritesBurstJoins(t *testing.T) {
 	}
 }
 
+func TestServeBurstConcurrentInFlight(t *testing.T) {
+	g := newServeRigCfg(t, 0, nil)
+	g.feed(t, `{"set_n":4}`, `{"hold":1}`, `{"burst":{"add":6,"in_flight":6,"talker":"live"}}`)
+	sampleBurst(g, t, func() bool { return len(joinsLines(g, t)) >= 2 })
+	js := joinsLines(g, t)
+	if len(js) != 2 {
+		t.Fatalf("want 2 joins lines, got %d", len(js))
+	}
+	j := js[1]
+	if j["mode"] != "burst" || j["requested"] != float64(10) || j["had"] != float64(4) ||
+		j["joined"] != float64(6) || j["join_failures"] != float64(0) ||
+		j["in_flight_max"] != float64(6) || j["rate_limit"] != nil || j["talker"] != "live" {
+		t.Fatalf("burst joins = %v", j)
+	}
+	if err := g.finish(t); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestServeBurstSilent(t *testing.T) {
 	g := newServeRigCfg(t, 0, nil)
 	g.feed(t, `{"set_n":3}`, `{"burst":{"add":20,"in_flight":1,"talker":"silent"}}`)
