@@ -281,7 +281,8 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 			HelloTriesMax: triesMax, HelloRetried: retried,
 		}
 		var short *CalStoppedError
-		if pct, under := deliveryShortfall(unique, step.ExpectedPPS*hold.Seconds(), o.minDeliver); under {
+		// Expected is what the listeners were told to expect: whole frames.
+		if pct, under := deliveryShortfall(unique, float64(frames*len(listeners)), o.minDeliver); under {
 			step.Valid = false
 			step.Violations = append(step.Violations,
 				fmt.Sprintf("delivered %.1f%% of expected frames, under the %.0f%% minimum", pct, 100*o.minDeliver))

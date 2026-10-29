@@ -249,3 +249,24 @@ func TestDeliveryShortfall(t *testing.T) {
 		t.Error("expected 0 frames must not count as a shortfall")
 	}
 }
+
+// The delivery rule compares against the frames the listeners were told to
+// expect (hold rounded to whole 20 ms frames), not the unrounded hold: a 29 ms
+// hold sends one frame per listener, and delivering it is 100%, not 69%.
+func TestCalibrateDeliveryCountsWholeFrames(t *testing.T) {
+	r := startReflector(t, 2)
+	allow, err := ParseAllow(r.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	steps, _, err := Calibrate(ctx, r.Addr(), allow, 1, []int{4}, 29*time.Millisecond,
+		WithBounds(relaxedBounds))
+	if err != nil {
+		t.Fatalf("err = %v, want nil: one whole frame per listener delivered", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("steps = %+v, want one", steps)
+	}
+}
