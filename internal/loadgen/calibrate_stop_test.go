@@ -24,6 +24,19 @@ func calibrateBehindProxy(t *testing.T, drop func(int) bool) (string, AllowList,
 	return proxy, allow, r
 }
 
+// calCapacity counts only valid steps: this is why the stop test must take
+// host health and delivery out of play, or a jittery runner zeroes capacity.
+func TestCalCapacityIgnoresInvalidSteps(t *testing.T) {
+	got := calCapacity([]CalStep{{N: 4, EgressPPS: 150, Valid: false}}, nil, 0)
+	if got.PPS != 0 {
+		t.Errorf("PPS = %v, want 0 from an invalid step", got.PPS)
+	}
+	got = calCapacity([]CalStep{{N: 4, EgressPPS: 150, Valid: true}}, nil, 0)
+	if got.PPS != 150 {
+		t.Errorf("PPS = %v, want 150", got.PPS)
+	}
+}
+
 // relaxedBounds takes host timing jitter out of a test that is about the stop
 // path, not about generator health: a shared macOS runner can exceed the 2 ms
 // p99 bounds, which scores the step invalid and zeroes the capacity.
@@ -71,7 +84,7 @@ func TestCalibrateStopsAtLastGoodStep(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	steps, capy, err := Calibrate(ctx, proxy, allow, 1, []int{4, 8}, time.Second,
-		WithReflectorErrors(r.SendErrors), WithBounds(relaxedBounds))
+		WithReflectorErrors(r.SendErrors), WithBounds(relaxedBounds), WithMinDelivery(0))
 	var stop *CalStoppedError
 	if !errors.As(err, &stop) {
 		t.Fatalf("err = %v, want *CalStoppedError", err)
@@ -100,6 +113,7 @@ func TestCalibrateStreamsEachStep(t *testing.T) {
 	var hooked []CalStep
 	returned := false
 	steps, _, err := Calibrate(ctx, r.Addr(), allow, 1, []int{4, 8}, time.Second,
+		WithBounds(relaxedBounds), WithMinDelivery(0),
 		WithStepHook(func(s CalStep) {
 			if returned {
 				t.Error("hook called after Calibrate returned")
