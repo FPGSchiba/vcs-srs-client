@@ -340,6 +340,10 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) erro
 
 func (r *Runner) botName(i int) string { return fmt.Sprintf("%s-%04d", r.cfg.Unit, i) }
 
+// setN ramps to n bots. Bot 0 (the have == 0 path) joins alone, outside the
+// rate limiter and the in-flight cap, so the voice endpoint is known first. Its
+// duration is measured from tally.start, so it is counted in the joins line
+// (joined, join_p99_us, joins_per_s) of the first ramp.
 func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 	have := len(r.bots)
 	had0 := have
