@@ -185,3 +185,35 @@ func TestReflectStatsLineHasSplitCounters(t *testing.T) {
 		}
 	}
 }
+
+// Every calibration step line says the talker runs per step (W6 fix 2, R2-10).
+func TestCalibrateStepLineTalkerPerStep(t *testing.T) {
+	refl, stopRefl := startReflectCLI(t)
+	var out, errw bytes.Buffer
+	code := run(context.Background(), []string{"calibrate", "--reflector", refl, "--allow", refl, "--steps", "4", "--hold", "1"},
+		strings.NewReader(""), &out, &errw)
+	stopRefl()
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errw.String())
+	}
+	n := 0
+	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var h struct {
+			Type   string `json:"type"`
+			Talker string `json:"talker"`
+		}
+		if err := json.Unmarshal([]byte(l), &h); err != nil {
+			t.Fatalf("line %q: %v", l, err)
+		}
+		if h.Type != "calibration" {
+			continue
+		}
+		n++
+		if h.Talker != "per_step" {
+			t.Errorf("calibration talker = %q, want per_step", h.Talker)
+		}
+	}
+	if n == 0 {
+		t.Fatalf("no calibration line in output:\n%s", out.String())
+	}
+}
