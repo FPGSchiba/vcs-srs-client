@@ -324,6 +324,14 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) erro
 					return werr
 				}
 			}
+		case cmd.Burst != nil:
+			var jr JoinReport
+			jr, cerr = r.burst(ctx, *cmd.Burst)
+			if cerr == nil {
+				if werr := writeLine(out, jr); werr != nil {
+					return werr
+				}
+			}
 		case cmd.Hold != nil:
 			cerr = r.hold(ctx, time.Duration(*cmd.Hold*float64(time.Second)), *cmd.Hold)
 		case cmd.Report != nil:
@@ -406,16 +414,71 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 	stopProgress := r.startProgress(tally)
 	defer stopProgress()
 
-	want := n - have
+	if err := r.rampJoin(ctx, tally, n-have, r.limiter, r.cfg.MaxInFlight); err != nil {
+		return JoinReport{}, err
+	}
+	rs1 := SampleRuntime()
+	rep := tally.report(n, had0, time.Since(tally.start), RampHealth{
+		SchedP99US:   DeltaQuantile(rs0.Sched, rs1.Sched, 0.99).Microseconds(),
+		GCPauseP99US: DeltaQuantile(rs0.GC, rs1.GC, 0.99).Microseconds(),
+	})
+	r.joinFailTotal.Add(uint64(rep.JoinFailures))
+	r.phase.Store(int32(PhaseSettle))
+	return rep, nil
+}
+
+// burst adds cmd.Add bots with no rate limit at cmd.InFlight concurrency, to
+// measure join behaviour on its own (I-13). The talker is paused for a silent
+// burst and is live again afterwards. Failed joins are data, as in setN. A
+// burst before any bot exists is an error: there is no talker or voice
+// endpoint yet.
+func (r *Runner) burst(ctx context.Context, cmd BurstCmd) (JoinReport, error) {
+	have := len(r.bots)
+	if have == 0 || r.talker == nil {
+		return JoinReport{}, errors.New("burst: no bots yet; run set_n first")
+	}
+	want := cmd.Add
+	r.nRequested = have + want
+	silent := cmd.Talker == RampTalkerSilent
+	if silent {
+		r.talker.pause()
+	}
+	defer r.talker.resume()
+	r.phase.Store(int32(PhaseBurst))
+	defer r.phase.Store(int32(PhaseSettle))
+	tally := newJoinTally(have+want, have)
+	tally.configure(BurstMode, cmd.Talker, cmd.InFlight, nil)
+	rs0 := SampleRuntime()
+	stopProgress := r.startProgress(tally)
+	defer stopProgress()
+	if err := r.rampJoin(ctx, tally, want, nil, cmd.InFlight); err != nil {
+		return JoinReport{}, err
+	}
+	rs1 := SampleRuntime()
+	rep := tally.report(have+want, have, time.Since(tally.start), RampHealth{
+		SchedP99US:   DeltaQuantile(rs0.Sched, rs1.Sched, 0.99).Microseconds(),
+		GCPauseP99US: DeltaQuantile(rs0.GC, rs1.GC, 0.99).Microseconds(),
+	})
+	r.joinFailTotal.Add(uint64(rep.JoinFailures))
+	return rep, nil
+}
+
+// rampJoin joins want bots at inFlight concurrency, admitting each through lim
+// (nil means no rate limit). A failed join is recorded in tally, never
+// returned: the only error is the context's. Bots that joined are kept, in
+// index order, so shutdown releases them even when ctx ends the ramp.
+func (r *Runner) rampJoin(ctx context.Context, tally *joinTally, want int, lim *RateLimiter, inFlight int) error {
 	slots := make([]*runnerBot, want)
 	first := r.nextIdx
-	sem := make(chan struct{}, r.cfg.MaxInFlight)
+	sem := make(chan struct{}, inFlight)
 	var wg sync.WaitGroup
 	for k := range slots {
 		// A rate token first, then an in-flight slot, so a join waiting for
 		// its token holds no slot.
-		if err := r.limiter.Wait(ctx, tally.alive()); err != nil {
-			break
+		if lim != nil {
+			if err := lim.Wait(ctx, tally.alive()); err != nil {
+				break
+			}
 		}
 		sem <- struct{}{}
 		if ctx.Err() != nil {
@@ -458,17 +521,7 @@ func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 		}
 	}
 	r.nextIdx = first + want
-	if err := ctx.Err(); err != nil {
-		return JoinReport{}, err
-	}
-	rs1 := SampleRuntime()
-	rep := tally.report(n, had0, time.Since(tally.start), RampHealth{
-		SchedP99US:   DeltaQuantile(rs0.Sched, rs1.Sched, 0.99).Microseconds(),
-		GCPauseP99US: DeltaQuantile(rs0.GC, rs1.GC, 0.99).Microseconds(),
-	})
-	r.joinFailTotal.Add(uint64(rep.JoinFailures))
-	r.phase.Store(int32(PhaseSettle))
-	return rep, nil
+	return ctx.Err()
 }
 
 // defaultProgressEvery is the progress-line period when none is configured.

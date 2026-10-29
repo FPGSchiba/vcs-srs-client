@@ -19,10 +19,18 @@ const JoinLabel = "closed-loop, <= 16 in flight; server-side cost only; client h
 
 // Command is one NDJSON line on the bot's stdin. Exactly one field is set.
 type Command struct {
-	SetN   *int     `json:"set_n"`
-	Hold   *float64 `json:"hold"`
-	Report *string  `json:"report"`
-	Quit   bool     `json:"quit"`
+	SetN   *int      `json:"set_n"`
+	Hold   *float64  `json:"hold"`
+	Report *string   `json:"report"`
+	Quit   bool      `json:"quit"`
+	Burst  *BurstCmd `json:"burst"`
+}
+
+// BurstCmd is the burst command's body (I-13). All three fields are required.
+type BurstCmd struct {
+	Add      int    `json:"add"`
+	InFlight int    `json:"in_flight"`
+	Talker   string `json:"talker"`
 }
 
 // ParseCommand decodes one command line: unknown fields, trailing data and
@@ -55,6 +63,18 @@ func ParseCommand(line []byte) (Command, error) {
 	}
 	if c.Quit {
 		set++
+	}
+	if c.Burst != nil {
+		set++
+		b := c.Burst
+		switch {
+		case b.Add < 1:
+			return Command{}, fmt.Errorf("command: burst add %d must be >= 1", b.Add)
+		case b.InFlight < 1 || b.InFlight > MaxMaxInFlight:
+			return Command{}, fmt.Errorf("command: burst in_flight %d must be 1..%d", b.InFlight, MaxMaxInFlight)
+		case b.Talker != RampTalkerSilent && b.Talker != RampTalkerLive:
+			return Command{}, fmt.Errorf("command: burst talker %q: want silent or live", b.Talker)
+		}
 	}
 	if set != 1 {
 		return Command{}, fmt.Errorf("command: exactly one field must be set, got %d", set)

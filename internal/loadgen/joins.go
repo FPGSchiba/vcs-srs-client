@@ -170,7 +170,7 @@ type ProgressLine struct {
 // MarshalJSON keeps zero-valued ramp counters (a ramp that has finished
 // nothing yet still reports done 0) while omitting the other phase's keys.
 func (p ProgressLine) MarshalJSON() ([]byte, error) {
-	if p.Phase == "ramp" {
+	if p.Phase == "ramp" || p.Phase == "burst" {
 		return json.Marshal(struct {
 			Type         string  `json:"type"`
 			Phase        string  `json:"phase"`
@@ -325,8 +325,12 @@ func (t *joinTally) progress() ProgressLine {
 	if t.limiter != nil {
 		rate = t.limiter.Rate(t.had + t.joined)
 	}
+	phase := "ramp"
+	if t.mode == BurstMode {
+		phase = "burst"
+	}
 	return ProgressLine{
-		Type: "progress", Phase: "ramp", Requested: t.requested, Had: t.had,
+		Type: "progress", Phase: phase, Requested: t.requested, Had: t.had,
 		Done: t.joined + len(t.failures), Joined: t.joined, JoinFailures: len(t.failures),
 		InFlight: t.inFlight, HelloRetried: t.retried,
 		ElapsedS: time.Since(t.start).Seconds(),
