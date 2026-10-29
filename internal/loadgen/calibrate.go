@@ -17,6 +17,7 @@ type CalStep struct {
 	EgressPPS  float64 // unique frames delivered to listeners per second of hold
 	Health     Health
 	Violations []string
+	Warnings   []string // soft bounds exceeded; never nil, never invalidates
 	Valid      bool
 
 	Bots          int     // bots alive during the hold (= N)
@@ -263,6 +264,7 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 		h.WheelLagP99 = wheel.Quantile(0.99)
 		h.SchedP99 = DeltaQuantile(rs0.Sched, rs1.Sched, 0.99)
 		h.GCPauseP99 = DeltaQuantile(rs0.GC, rs1.GC, 0.99)
+		h.GCCycles = DeltaCount(rs0.GC, rs1.GC)
 
 		var unique uint64
 		for _, l := range listeners {
@@ -276,7 +278,7 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 		v := o.bounds.Violations(h)
 		step := CalStep{
 			N: n, EgressPPS: float64(unique) / hold.Seconds(),
-			Health: h, Violations: v, Valid: len(v) == 0,
+			Health: h, Violations: v, Warnings: o.bounds.Warnings(h), Valid: len(v) == 0,
 			Bots: n, ExpectedPPS: framesPerSec * float64(n-1),
 			HelloTriesMax: triesMax, HelloRetried: retried,
 		}

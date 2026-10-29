@@ -214,6 +214,14 @@ func TestStepReportControlLostAndPing(t *testing.T) {
 	if ping["every_s"].(float64) != 0 || ping["sent"].(float64) != 0 || ping["failed"].(float64) != 0 || ping["rtt_p99_us"].(float64) != 0 {
 		t.Errorf("ping block with --ping-every 0 = %v, want zeros", ping)
 	}
+	hb := steps["b"]["health"].(map[string]any)
+	if _, ok := hb["gc_cycles"].(float64); !ok {
+		t.Errorf("health.gc_cycles missing or not a number: %v", hb)
+	}
+	bb := steps["b"]["bounds"].(map[string]any)
+	if bb["gc_pause_p99_us"].(float64) != 5000 || bb["gc_pause_warn_p99_us"].(float64) != 2000 {
+		t.Errorf("gc bounds = %v, want 5000 hard and 2000 warn", bb)
+	}
 	if w, ok := steps["b"]["warnings"].([]any); !ok || len(w) != 0 {
 		t.Errorf("warnings = %v, want []", steps["b"]["warnings"])
 	}

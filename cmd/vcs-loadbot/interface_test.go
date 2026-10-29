@@ -55,6 +55,13 @@ func roundTrip(t *testing.T, name, line string, dst any, drop ...string) {
 		t.Fatal(err)
 	}
 	for _, k := range drop {
+		// "a.b" drops key b of the object at key a.
+		if parent, child, ok := strings.Cut(k, "."); ok {
+			if m, isMap := got[parent].(map[string]any); isMap {
+				delete(m, child)
+			}
+			continue
+		}
 		delete(got, k)
 	}
 	if !reflect.DeepEqual(want, got) {
@@ -127,4 +134,6 @@ func TestStepReportCarriesInterfaceAdditions(t *testing.T) {
 var v3Keys = map[string][]string{
 	"joins":    {"mode", "talker", "joins_per_s", "join_p99_us", "hello_retried", "in_flight_max", "rate_limit"},
 	"progress": {"rate_per_s", "talker"},
+	// C-T7: soft GC bound, warnings and GC cycles.
+	"calibration": {"warnings", "health.gc_cycles", "bounds.gc_pause_warn_p99_us"},
 }

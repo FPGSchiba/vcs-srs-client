@@ -131,6 +131,9 @@ func TestCalibrateStreamsEachStep(t *testing.T) {
 		if s.N != steps[i].N || s.N != []int{4, 8}[i] {
 			t.Errorf("hook %d: N = %d", i, s.N)
 		}
+		if s.Warnings == nil {
+			t.Errorf("N=%d Warnings is nil, want a non-nil slice", s.N)
+		}
 		if s.Bots != s.N {
 			t.Errorf("N=%d Bots = %d", s.N, s.Bots)
 		}

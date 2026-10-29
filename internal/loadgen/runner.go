@@ -695,6 +695,7 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	h.WheelLagP99 = r.wheel.Quantile(0.99)
 	h.SchedP99 = DeltaQuantile(rs0.Sched, rs1.Sched, 0.99)
 	h.GCPauseP99 = DeltaQuantile(rs0.GC, rs1.GC, 0.99)
+	h.GCCycles = DeltaCount(rs0.GC, rs1.GC)
 
 	rep := &StepReport{
 		Type: "step", Label: ReportLabel, Payload: PayloadLabel,
@@ -737,7 +738,7 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 		rep.LossRatio = float64(rep.Lost) / float64(rep.Expected)
 	}
 	rep.Ping = r.pingReport(ping0)
-	rep.Warnings = []string{}
+	rep.Warnings = r.cfg.Bounds.Warnings(h)
 	r.dmu.Lock()
 	rep.ControlLost = ControlLostReport{
 		DeadTotal: r.deadTotal, DeadInHold: r.deadInHold,

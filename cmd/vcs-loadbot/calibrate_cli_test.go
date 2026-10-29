@@ -120,7 +120,12 @@ func TestCalibrateCLIStopsAtLastGoodStep(t *testing.T) {
 		if !strings.HasPrefix(l, `{"type":"`+h.Type+`"`) {
 			t.Errorf("%s line does not lead with type: %.60s", h.Type, l)
 		}
-		if got, w := keysOf(t, l), want[h.Type]; fmt.Sprint(got) != fmt.Sprint(w) {
+		w := want[h.Type]
+		if h.Type == "calibration" { // C-T7 adds warnings to the v2 key set
+			w = append(append([]string{}, w...), "warnings")
+			sort.Strings(w)
+		}
+		if got := keysOf(t, l); fmt.Sprint(got) != fmt.Sprint(w) {
 			t.Errorf("%s keys = %v, want %v", h.Type, got, w)
 		}
 	}
