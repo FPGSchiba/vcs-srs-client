@@ -281,8 +281,7 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 			HelloTriesMax: triesMax, HelloRetried: retried,
 		}
 		var short *CalStoppedError
-		if exp := step.ExpectedPPS * hold.Seconds(); exp > 0 && float64(unique) < o.minDeliver*exp {
-			pct := 100 * float64(unique) / exp
+		if pct, under := deliveryShortfall(unique, step.ExpectedPPS*hold.Seconds(), o.minDeliver); under {
 			step.Valid = false
 			step.Violations = append(step.Violations,
 				fmt.Sprintf("delivered %.1f%% of expected frames, under the %.0f%% minimum", pct, 100*o.minDeliver))
@@ -299,6 +298,15 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 		}
 	}
 	return steps, calCapacity(steps, o.reflErrs, reflBase), nil
+}
+
+// deliveryShortfall reports the delivered percentage (actual / expected) and
+// whether it is under the minimum fraction. No expected frames is no shortfall.
+func deliveryShortfall(unique uint64, expected, min float64) (pct float64, short bool) {
+	if expected <= 0 {
+		return 0, false
+	}
+	return 100 * float64(unique) / expected, float64(unique) < min*expected
 }
 
 // calCapacity is the receive capacity over the completed steps: the largest

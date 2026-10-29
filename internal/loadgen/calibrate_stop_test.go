@@ -221,3 +221,31 @@ func TestCalStoppedReasonMatchesInterface(t *testing.T) {
 		}
 	}
 }
+
+// The 99% rule on its own: a step that delivered nothing, or 98%, is short;
+// 99% and above is not. DefaultMinDelivery is the rule's one constant.
+func TestDeliveryShortfall(t *testing.T) {
+	if DefaultMinDelivery != 0.99 {
+		t.Fatalf("DefaultMinDelivery = %v, want 0.99", DefaultMinDelivery)
+	}
+	cases := []struct {
+		name   string
+		unique uint64
+		want   float64
+		short  bool
+	}{
+		{"0%", 0, 0, true},
+		{"98%", 980, 98, true},
+		{"99%", 990, 99, false},
+		{"100%", 1000, 100, false},
+	}
+	for _, c := range cases {
+		pct, short := deliveryShortfall(c.unique, 1000, DefaultMinDelivery)
+		if short != c.short || pct != c.want {
+			t.Errorf("%s: got (%v, %v), want (%v, %v)", c.name, pct, short, c.want, c.short)
+		}
+	}
+	if _, short := deliveryShortfall(0, 0, DefaultMinDelivery); short {
+		t.Error("expected 0 frames must not count as a shortfall")
+	}
+}
