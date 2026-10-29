@@ -3,6 +3,7 @@ package loadgen
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,46 @@ func calibrateBehindProxy(t *testing.T, drop func(int) bool) (string, AllowList,
 	return proxy, allow, r
 }
 
+// relaxedBounds takes host timing jitter out of a test that is about the stop
+// path, not about generator health: a shared macOS runner can exceed the 2 ms
+// p99 bounds, which scores the step invalid and zeroes the capacity.
+var relaxedBounds = Bounds{
+	MaxSocketDrops: ^uint64(0),
+	RxLagP99:       time.Hour, WheelLagP99: time.Hour, SchedP99: time.Hour, GCPauseP99: time.Hour,
+	MaxGenCPU: 1e9,
+}
+
+// A step that delivers under the minimum fraction of its expected frames is
+// invalid and ends calibration at the last good step (stage "delivery").
+func TestCalibrateStopsOnUnderDelivery(t *testing.T) {
+	r := startReflector(t, 2)
+	allow, err := ParseAllow(r.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// A fraction above 1 can never be met, so the first step must be rejected.
+	steps, capy, err := Calibrate(ctx, r.Addr(), allow, 1, []int{4, 8}, time.Second,
+		WithBounds(relaxedBounds), WithMinDelivery(1.5))
+	var stop *CalStoppedError
+	if !errors.As(err, &stop) {
+		t.Fatalf("err = %v, want *CalStoppedError", err)
+	}
+	if stop.Stage != "delivery" || stop.N != 4 || stop.Bots != 4 {
+		t.Errorf("stop = %+v, want Stage delivery N 4 Bots 4", stop)
+	}
+	if len(steps) != 1 || steps[0].Valid || len(steps[0].Violations) == 0 {
+		t.Fatalf("steps = %+v, want the N=4 step recorded as invalid", steps)
+	}
+	if capy.PPS != 0 {
+		t.Errorf("capacity PPS = %v, want 0: an undelivering step adds none", capy.PPS)
+	}
+	if got := stop.Reason(); !strings.Contains(got, "delivered") || !strings.Contains(got, "150%") {
+		t.Errorf("Reason() = %q, want delivered %% against the 150%% minimum", got)
+	}
+}
+
 // A bot that cannot complete its handshake ends calibration at the last good
 // step: the completed steps and their capacity come back with a typed error.
 func TestCalibrateStopsAtLastGoodStep(t *testing.T) {
@@ -30,7 +71,7 @@ func TestCalibrateStopsAtLastGoodStep(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	steps, capy, err := Calibrate(ctx, proxy, allow, 1, []int{4, 8}, time.Second,
-		WithReflectorErrors(r.SendErrors))
+		WithReflectorErrors(r.SendErrors), WithBounds(relaxedBounds))
 	var stop *CalStoppedError
 	if !errors.As(err, &stop) {
 		t.Fatalf("err = %v, want *CalStoppedError", err)
@@ -156,6 +197,9 @@ func TestCalStoppedReasonMatchesInterface(t *testing.T) {
 			Err: errors.New("talker stalled at N=8")}, "talker stalled at N=8"},
 		{CalStoppedError{N: 8, Bots: 8, Stage: "ledger",
 			Err: errors.New("bot lost its ledger at N=8")}, "bot lost its ledger at N=8"},
+		{CalStoppedError{N: 8, Bots: 8, Stage: "delivery",
+			Err: errors.New("delivered 12.0% of expected frames at N=8, under the 99% minimum")},
+			"delivered 12.0% of expected frames at N=8, under the 99% minimum"},
 	}
 	for _, c := range cases {
 		if got := c.e.Reason(); got != c.want {

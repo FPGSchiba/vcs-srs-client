@@ -31,7 +31,7 @@ type CalStep struct {
 type CalStoppedError struct {
 	N     int    // the step that could not complete
 	Bots  int    // bots alive when it stopped
-	Stage string // hello, voice_dial, talker_stalled or ledger
+	Stage string // hello, voice_dial, talker_stalled, ledger or delivery
 	Bot   int    // the failing bot's index (0 when not applicable)
 	Tries int    // HELLOs the failing bot sent (0 when not applicable)
 	Err   error
@@ -68,11 +68,12 @@ type ReceiveCapacity struct {
 type CalOption func(*calOpts)
 
 type calOpts struct {
-	reflErrs func() uint64
-	bounds   Bounds
-	hook     func(CalStep)
-	progEvry time.Duration
-	progress func(ProgressLine)
+	reflErrs   func() uint64
+	bounds     Bounds
+	minDeliver float64
+	hook       func(CalStep)
+	progEvry   time.Duration
+	progress   func(ProgressLine)
 }
 
 // WithStepHook calls f once per completed step, in order, as soon as the step
@@ -91,6 +92,14 @@ func WithProgress(every time.Duration, f func(ProgressLine)) CalOption {
 // subcommand reports it on stdout when it stops.
 func WithReflectorErrors(f func() uint64) CalOption { return func(o *calOpts) { o.reflErrs = f } }
 
+// DefaultMinDelivery is the fraction of a step's expected frames that must
+// reach the listeners for the step to count: below it the step is invalid and
+// calibration ends at the last good step.
+const DefaultMinDelivery = 0.99
+
+// WithMinDelivery overrides the minimum delivered fraction of ExpectedPPS.
+func WithMinDelivery(f float64) CalOption { return func(o *calOpts) { o.minDeliver = f } }
+
 // WithBounds overrides the self-health bounds.
 func WithBounds(b Bounds) CalOption { return func(o *calOpts) { o.bounds = b } }
 
@@ -99,7 +108,7 @@ func WithBounds(b Bounds) CalOption { return func(o *calOpts) { o.bounds = b } }
 // talker send SyntheticFrame at 50 fps through the reflector, and scores the
 // generator's own health during the hold.
 func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64, ns []int, hold time.Duration, opts ...CalOption) ([]CalStep, ReceiveCapacity, error) {
-	o := calOpts{bounds: DefaultBounds}
+	o := calOpts{bounds: DefaultBounds, minDeliver: DefaultMinDelivery}
 	for _, f := range opts {
 		f(&o)
 	}
@@ -271,9 +280,22 @@ func Calibrate(ctx context.Context, reflAddr string, allow AllowList, seed int64
 			Bots: n, ExpectedPPS: framesPerSec * float64(n-1),
 			HelloTriesMax: triesMax, HelloRetried: retried,
 		}
+		var short *CalStoppedError
+		if exp := step.ExpectedPPS * hold.Seconds(); exp > 0 && float64(unique) < o.minDeliver*exp {
+			pct := 100 * float64(unique) / exp
+			step.Valid = false
+			step.Violations = append(step.Violations,
+				fmt.Sprintf("delivered %.1f%% of expected frames, under the %.0f%% minimum", pct, 100*o.minDeliver))
+			short = &CalStoppedError{N: n, Bots: len(bots), Stage: "delivery",
+				Err: fmt.Errorf("delivered %.1f%% of expected frames at N=%d, under the %.0f%% minimum",
+					pct, n, 100*o.minDeliver)}
+		}
 		steps = append(steps, step)
 		if o.hook != nil {
 			o.hook(step)
+		}
+		if short != nil {
+			return stopped(short)
 		}
 	}
 	return steps, calCapacity(steps, o.reflErrs, reflBase), nil
