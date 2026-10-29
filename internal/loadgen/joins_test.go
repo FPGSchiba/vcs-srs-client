@@ -102,7 +102,7 @@ func TestJoinTallyConcurrent(t *testing.T) {
 				if i%10 == 0 {
 					tl.fail(JoinFailure{Bot: g*100 + i, Stage: StageHello, Tries: 5})
 				} else {
-					tl.ok(1 + i%3, time.Millisecond)
+					tl.ok(1+i%3, time.Millisecond)
 				}
 				_ = tl.progress()
 			}
