@@ -83,6 +83,16 @@ type Runner struct {
 	talkCancel context.CancelFunc
 	talkDone   chan struct{}
 
+	// nextIdx is the index (and so the bot name) the next join takes. It is
+	// not len(bots): a failed join leaves a hole, and reusing len(bots) would
+	// collide with a live bot's name.
+	nextIdx       int
+	nRequested    int
+	joinFailTotal atomic.Uint64
+	// progressEvery is the progress-line period; zero means 5 s.
+	progressEvery time.Duration
+	out           *lineWriter
+
 	last            *StepReport
 	lastPerListener []LedgerResult
 }
@@ -116,6 +126,19 @@ type errLine struct {
 	Error string `json:"error"`
 }
 
+// lineWriter serialises whole-line writes so a progress goroutine and Serve
+// never interleave bytes.
+type lineWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lineWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 func writeLine(out io.Writer, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -126,9 +149,14 @@ func writeLine(out io.Writer, v any) error {
 }
 
 // Serve executes commands from in until quit or EOF, writing NDJSON to out.
-// A malformed command line is reported as an error line and skipped; a failed
-// command is fatal (the error is written, cleanup runs, and it is returned).
-func (r *Runner) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+// A malformed command line is reported as an error line and skipped. A failed
+// join is data, not an error: set_n reports it in a joins line and carries on.
+// A failed command is still fatal (the error is written, cleanup runs, and it
+// is returned): a talker (bot 0) that cannot join, a decreasing set_n, a
+// cancelled ctx.
+func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) error {
+	out := &lineWriter{w: rawOut}
+	r.out = out
 	defer func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -184,7 +212,13 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		var cerr error
 		switch {
 		case cmd.SetN != nil:
-			cerr = r.setN(ctx, *cmd.SetN)
+			var jr JoinReport
+			jr, cerr = r.setN(ctx, *cmd.SetN)
+			if cerr == nil {
+				if werr := writeLine(out, jr); werr != nil {
+					return werr
+				}
+			}
 		case cmd.Hold != nil:
 			cerr = r.hold(ctx, time.Duration(*cmd.Hold*float64(time.Second)), *cmd.Hold)
 		case cmd.Report != nil:
@@ -201,13 +235,15 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 
 func (r *Runner) botName(i int) string { return fmt.Sprintf("%s-%04d", r.cfg.Unit, i) }
 
-func (r *Runner) setN(ctx context.Context, n int) error {
+func (r *Runner) setN(ctx context.Context, n int) (JoinReport, error) {
 	have := len(r.bots)
+	had0 := have
 	switch {
 	case n < have:
-		return fmt.Errorf("set_n %d: decreasing N is not supported (have %d)", n, have)
+		return JoinReport{}, fmt.Errorf("set_n %d: decreasing N is not supported (have %d)", n, have)
 	case n == have:
-		return nil
+		r.nRequested = n
+		return newJoinTally(n, have).report(n, have, 0, RampHealth{}), nil
 	}
 	if r.fullSet == nil {
 		// Drawn once from the seed over the first N; bots added later by a
@@ -221,59 +257,125 @@ func (r *Runner) setN(ctx context.Context, n int) error {
 			r.fullSet[p] = true
 		}
 	}
+	r.nRequested = n
 	r.phase.Store(int32(PhaseRamp))
+	tally := newJoinTally(n, have)
+	rs0 := SampleRuntime()
 	if have == 0 {
 		// Bot 0 joins alone so the voice endpoint and server settings are
-		// known before the rest, and it becomes the talker.
+		// known before the rest, and it becomes the talker. Without a talker
+		// there is nothing to measure, so its failure stays fatal.
 		b, err := r.joinOne(ctx, 0, r.fullSet[0])
 		if err != nil {
-			return err
+			// Fatal for the whole command (Serve exits), and the progress
+			// ticker has not started. Reset the phase anyway so making this
+			// error non-fatal later cannot leave the runner stuck in ramp.
+			r.phase.Store(int32(PhaseSettle))
+			return JoinReport{}, err
 		}
 		r.bots = append(r.bots, b)
+		r.nextIdx = 1
 		r.startTalker(b)
+		tally.begin()
+		tally.ok(b.tries)
 		have = 1
 	}
-	slots := make([]*runnerBot, n-have)
+	stopProgress := r.startProgress(tally)
+	defer stopProgress()
+
+	want := n - have
+	slots := make([]*runnerBot, want)
+	first := r.nextIdx
 	sem := make(chan struct{}, r.cfg.MaxInFlight)
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var firstErr error
-	jctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	for k := range slots {
 		sem <- struct{}{}
+		if ctx.Err() != nil {
+			<-sem
+			break
+		}
+		tally.begin()
 		wg.Add(1)
 		go func(k int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if jctx.Err() != nil {
-				return
-			}
-			b, err := r.joinOne(jctx, have+k, r.fullSet[have+k])
-			mu.Lock()
-			defer mu.Unlock()
+			idx := first + k
+			b, err := r.joinOne(ctx, idx, r.fullSet[idx])
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-					cancel()
+				if ctx.Err() != nil {
+					// Interrupted by cancellation, not a join failure. The
+					// tally is discarded (setN returns ctx.Err()), so do not
+					// record a misleading control-stage failure.
+					return
 				}
+				var je *JoinError
+				if errors.As(err, &je) {
+					tally.fail(je.failure())
+					return
+				}
+				tally.fail(JoinFailure{Bot: idx, Stage: StageControl, Error: err.Error()})
 				return
 			}
 			slots[k] = b
+			tally.ok(b.tries)
 		}(k)
 	}
 	wg.Wait()
-	// Keep what joined so shutdown releases it, then report any failure.
+	// Keep what joined so shutdown releases it. Index order is preserved.
 	for _, b := range slots {
 		if b != nil {
 			r.bots = append(r.bots, b)
 		}
 	}
-	if firstErr != nil {
-		return firstErr
+	r.nextIdx = first + want
+	if err := ctx.Err(); err != nil {
+		return JoinReport{}, err
 	}
+	rs1 := SampleRuntime()
+	rep := tally.report(n, had0, time.Since(tally.start), RampHealth{
+		SchedP99US:   DeltaQuantile(rs0.Sched, rs1.Sched, 0.99).Microseconds(),
+		GCPauseP99US: DeltaQuantile(rs0.GC, rs1.GC, 0.99).Microseconds(),
+	})
+	r.joinFailTotal.Add(uint64(rep.JoinFailures))
 	r.phase.Store(int32(PhaseSettle))
-	return nil
+	return rep, nil
+}
+
+// defaultProgressEvery is the progress-line period when none is configured.
+const defaultProgressEvery = 5 * time.Second
+
+// progressPeriod returns every, or the 5 s default when it is not positive.
+func progressPeriod(every time.Duration) time.Duration {
+	if every <= 0 {
+		return defaultProgressEvery
+	}
+	return every
+}
+
+// startProgress writes a ramp progress line every progressEvery (5 s by
+// default) until the returned stop function is called. A ramp shorter than
+// the period writes none.
+func (r *Runner) startProgress(t *joinTally) (stop func()) {
+	every := progressPeriod(r.progressEvery)
+	if r.out == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		tk := time.NewTicker(every)
+		defer tk.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tk.C:
+				_ = writeLine(r.out, t.progress())
+			}
+		}
+	}()
+	return func() { close(done); <-stopped }
 }
 
 func (r *Runner) resolveVoiceAddr(b *ControlBot) error {
@@ -300,33 +402,33 @@ func (r *Runner) joinOne(ctx context.Context, i int, full bool) (*runnerBot, err
 	start := time.Now()
 	ctl, err := r.joiner.Join(ctx, r.botName(i), r.cfg.Scenario.Coalition, full)
 	if err != nil {
-		return nil, err
+		return nil, &JoinError{Bot: i, Stage: StageControl, Err: err}
 	}
 	r.joinHist.Record(time.Since(start))
-	fail := func(err error) (*runnerBot, error) {
+	fail := func(stage JoinStage, tries int, what string, bare bool, err error) (*runnerBot, error) {
 		_ = ctl.Close(context.Background())
-		return nil, fmt.Errorf("bot %d: %w", i, err)
+		return nil, &JoinError{Bot: i, GUID: ctl.GUID, Stage: stage, Tries: tries, Err: err, what: what, bare: bare}
 	}
 	if i == 0 {
 		if err := r.resolveVoiceAddr(ctl); err != nil {
-			return fail(err)
+			return fail(StageRadio, 0, "", true, err)
 		}
 	}
 	id, err := uuid.Parse(ctl.GUID)
 	if err != nil {
-		return fail(fmt.Errorf("client guid %q: %w", ctl.GUID, err))
+		return fail(StageRadio, 0, fmt.Sprintf("client guid %q", ctl.GUID), false, err)
 	}
 	if err := ctl.UpdateRadio(ctx, r.freq.MHz32()); err != nil {
-		return fail(fmt.Errorf("update radio: %w", err))
+		return fail(StageRadio, 0, "", false, err)
 	}
 	vc, err := DialVoice(r.voiceAddr, id)
 	if err != nil {
-		return fail(fmt.Errorf("dial voice: %w", err))
+		return fail(StageVoiceDial, 0, "", false, err)
 	}
 	tries, err := vc.Hello(ctx, ctl.Secret, DefaultHelloLadder)
 	if err != nil {
 		vc.Close()
-		return fail(fmt.Errorf("hello: %w", err))
+		return fail(StageHello, tries, "", false, err)
 	}
 	// The receive loop outlives this call; Close ends it.
 	vc.Start(context.Background())
@@ -445,6 +547,7 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	rep := &StepReport{
 		Type: "step", Label: ReportLabel, Payload: PayloadLabel,
 		Arm: r.cfg.Arm, Scenario: r.cfg.Scenario.Name,
+		NRequested: r.nRequested, JoinFailuresTotal: r.joinFailTotal.Load(),
 		N: len(r.bots), Talkers: 1, Listeners: len(listeners), HoldS: secs,
 		Resyncs:           holdDelta(phaseCounts(&r.resync), resync0),
 		ResourceExhausted: holdDelta(phaseCounts(&r.rex), rex0),

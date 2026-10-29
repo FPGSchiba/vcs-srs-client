@@ -147,6 +147,11 @@ type StepReport struct {
 	Listeners int     `json:"listeners"`
 	HoldS     float64 `json:"hold_s"`
 
+	// NRequested is the last set_n's requested N; JoinFailuresTotal counts
+	// failed join attempts since the process started (interface I-3).
+	NRequested        int    `json:"n_requested"`
+	JoinFailuresTotal uint64 `json:"join_failures_total"`
+
 	Expected  uint64  `json:"expected"`
 	Unique    uint64  `json:"unique"`
 	Lost      uint64  `json:"lost"`
