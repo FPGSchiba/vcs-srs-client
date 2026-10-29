@@ -28,10 +28,13 @@ var addrFlags = []string{"control", "voice", "reflector"}
 
 func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errw, "usage: vcs-loadbot run|reflect|calibrate [flags]")
+		fmt.Fprintln(errw, "usage: vcs-loadbot run|reflect|calibrate|features [flags]")
 		return 2
 	}
 	sub := args[0]
+	if sub == "features" {
+		return featuresCmd(args[1:], out, errw)
+	}
 	switch sub {
 	case "run", "reflect", "calibrate":
 	default:
@@ -54,7 +57,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 	bounds := fs.String("bounds", "", "JSON overrides for the generator self-health bounds (lowering gc_pause_p99 below its 2ms warn bound also needs gc_pause_warn_p99 lowered)")
 	listen := fs.String("listen", "127.0.0.1:0", "reflect: loopback address to listen on (port 0 = ephemeral)")
 	senders := fs.Int("senders", 2, "reflect: sender goroutines on the one socket (>= 2)")
-	pingEvery := fs.Duration("ping-every", 5*time.Second, "run: control Ping period per bot (0 disables)")
+	pingEvery := fs.Duration("ping-every", defaultPingEvery, "run: control Ping period per bot (0 disables)")
 	joinRateMax := fs.Float64("join-rate-max", loadgen.DefaultJoinRateMax, "run: joins/s cap for set_n ramps (0 = no cap term)")
 	joinRateScale := fs.Float64("join-rate-scale", loadgen.DefaultJoinRateScale, "run: rate term scale/N_alive for set_n ramps (0 = no scale term)")
 	maxInFlight := fs.Int("max-in-flight", loadgen.DefaultMaxInFlight, "run: concurrent joins in a set_n ramp (1..16)")
