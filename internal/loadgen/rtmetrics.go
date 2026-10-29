@@ -37,6 +37,24 @@ func cloneHist(s metrics.Sample) metrics.Float64Histogram {
 	}
 }
 
+// DeltaCount returns the number of observations added between before and
+// after (the sum of the per-bucket count differences). Buckets whose count
+// went backwards contribute 0. For the GC-pause histogram it is the number
+// of GC pauses in the window, reported as gc_cycles.
+func DeltaCount(before, after metrics.Float64Histogram) uint64 {
+	var total uint64
+	for i, a := range after.Counts {
+		var b uint64
+		if i < len(before.Counts) {
+			b = before.Counts[i]
+		}
+		if a > b {
+			total += a - b
+		}
+	}
+	return total
+}
+
 // DeltaQuantile returns the upper bound of the bucket holding rank q of the
 // count difference after-before, or 0 when that difference is empty. When
 // the bucket's upper bound is +Inf its finite lower bound is returned, which

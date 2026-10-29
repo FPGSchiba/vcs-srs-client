@@ -33,6 +33,26 @@ func TestDeltaQuantileInfiniteTop(t *testing.T) {
 	}
 }
 
+func TestDeltaCount(t *testing.T) {
+	before := hist([]uint64{5, 1, 0})
+	after := hist([]uint64{6, 4, 2})
+	if got := DeltaCount(before, after); got != 6 {
+		t.Fatalf("got %d, want 6", got)
+	}
+	if got := DeltaCount(after, after); got != 0 {
+		t.Fatalf("empty delta = %d, want 0", got)
+	}
+	if got := DeltaCount(metrics.Float64Histogram{}, metrics.Float64Histogram{}); got != 0 {
+		t.Fatalf("zero hist = %d", got)
+	}
+	if got := DeltaCount(after, before); got != 0 {
+		t.Fatalf("reversed = %d, want 0", got)
+	}
+	if got := DeltaCount(metrics.Float64Histogram{}, after); got != 12 {
+		t.Fatalf("no before = %d, want 12", got)
+	}
+}
+
 func TestSampleRuntimeHasBuckets(t *testing.T) {
 	s := SampleRuntime()
 	if len(s.Sched.Buckets) <= 1 || len(s.GC.Buckets) <= 1 {
