@@ -217,6 +217,9 @@ func TestServeProgressLines(t *testing.T) {
 	}
 	num := func(k string) int {
 		v, ok := last[k].(float64)
+		if !ok && k == "join_failures" {
+			return 0 // omitted while 0 (I-17 fixture note)
+		}
 		if !ok {
 			t.Fatalf("progress key %q missing or not a number: %v", k, last)
 		}
