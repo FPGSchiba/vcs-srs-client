@@ -16,13 +16,13 @@ func TestJoinTallyReport(t *testing.T) {
 	tl := newJoinTally(75+10, 10)
 	// 40 successes: tries 1 (30), 2 (7), 5 (3).
 	for i := 0; i < 30; i++ {
-		tl.ok(1)
+		tl.ok(1, time.Millisecond)
 	}
 	for i := 0; i < 7; i++ {
-		tl.ok(2)
+		tl.ok(2, time.Millisecond)
 	}
 	for i := 0; i < 3; i++ {
-		tl.ok(5)
+		tl.ok(5, time.Millisecond)
 	}
 	// 35 failures across all four stages, inserted in descending bot order.
 	stages := []JoinStage{StageControl, StageRadio, StageVoiceDial, StageHello}
@@ -77,7 +77,7 @@ func TestJoinTallyReport(t *testing.T) {
 	}
 	// hello_tries_max includes failed bots even when no success went that high.
 	t2 := newJoinTally(2, 0)
-	t2.ok(1)
+	t2.ok(1, time.Millisecond)
 	t2.fail(JoinFailure{Bot: 1, Stage: StageHello, Tries: 5})
 	if m := t2.report(2, 0, 0, RampHealth{}).HelloTriesMax; m != 5 {
 		t.Fatalf("failed-bot max %d", m)
@@ -102,7 +102,7 @@ func TestJoinTallyConcurrent(t *testing.T) {
 				if i%10 == 0 {
 					tl.fail(JoinFailure{Bot: g*100 + i, Stage: StageHello, Tries: 5})
 				} else {
-					tl.ok(1 + i%3)
+					tl.ok(1 + i%3, time.Millisecond)
 				}
 				_ = tl.progress()
 			}
@@ -154,7 +154,11 @@ func TestJoinReportMatchesInterfaceFixture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := fixtureMap(t, b), fixtureMap(t, g(c.file)); !reflect.DeepEqual(got, want) {
+		got, want := fixtureMap(t, b), fixtureMap(t, g(c.file))
+		for _, k := range []string{"mode", "talker", "joins_per_s", "join_p99_us", "hello_retried", "in_flight_max", "rate_limit"} {
+			delete(got, k) // v3 keys; the v2 fixture has none
+		}
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s mismatch:\n got  %s\n want %s", c.file, b, g(c.file))
 		}
 	}
@@ -175,7 +179,12 @@ func TestProgressLineMatchesFixture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(fixtureMap(t, out), fixtureMap(t, lines[i])) {
+		gm := fixtureMap(t, out)
+		if c.Phase == "ramp" {
+			delete(gm, "rate_per_s")
+			delete(gm, "talker")
+		}
+		if !reflect.DeepEqual(gm, fixtureMap(t, lines[i])) {
 			t.Fatalf("line %d: got %s want %s", i, out, lines[i])
 		}
 	}
@@ -201,7 +210,7 @@ func TestJoinTallyOkClampsTriesBelowOne(t *testing.T) {
 	tl := newJoinTally(3, 0)
 	for _, tries := range []int{0, -1, 1} {
 		tl.begin()
-		tl.ok(tries)
+		tl.ok(tries, time.Millisecond)
 	}
 	r := tl.report(3, 0, 0, RampHealth{})
 	if r.HelloTriesHist[0] != 0 {

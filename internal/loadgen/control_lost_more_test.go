@@ -25,6 +25,11 @@ type serveRig struct {
 }
 
 func newServeRig(t *testing.T, ping time.Duration) *serveRig {
+	return newServeRigCfg(t, ping, nil)
+}
+
+// newServeRigCfg is newServeRig with a hook to adjust the RunConfig.
+func newServeRigCfg(t *testing.T, ping time.Duration, mut func(*RunConfig)) *serveRig {
 	t.Helper()
 	srv := testdata.Start(t)
 	sc, err := LoadScenario("one-big-net")
@@ -37,14 +42,19 @@ func newServeRig(t *testing.T, ping time.Duration) *serveRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := NewRunner(RunConfig{
+	cfg := RunConfig{
 		Arm: "S", Scenario: sc, ControlAddr: proxy.Addr(), VoiceAddr: voiceAddr,
 		Allow: allow, Passwords: map[string]string{srv.Coalition: srv.Password},
 		Unit: "LDBT", Seed: 1, Bounds: DefaultBounds, PingEvery: ping,
-	}, InsecureDialer(proxy.Addr()))
+	}
+	if mut != nil {
+		mut(&cfg)
+	}
+	r, err := NewRunner(cfg, InsecureDialer(proxy.Addr()))
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.progressEvery = rigProgressEvery
 	pr, pw := io.Pipe()
 	g := &serveRig{r: r, proxy: proxy, out: &syncBuf{}, pw: pw, done: make(chan error, 1), srv: srv}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
