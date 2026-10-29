@@ -169,6 +169,8 @@ type ProgressLine struct {
 
 // MarshalJSON keeps zero-valued ramp counters (a ramp that has finished
 // nothing yet still reports done 0) while omitting the other phase's keys.
+// join_failures is the exception: it is absent while 0 (I-17 fixture note), so
+// a clean ramp's line carries no failure key at all.
 func (p ProgressLine) MarshalJSON() ([]byte, error) {
 	if p.Phase == "ramp" || p.Phase == "burst" {
 		return json.Marshal(struct {
@@ -178,7 +180,7 @@ func (p ProgressLine) MarshalJSON() ([]byte, error) {
 			Had          int     `json:"had"`
 			Done         int     `json:"done"`
 			Joined       int     `json:"joined"`
-			JoinFailures int     `json:"join_failures"`
+			JoinFailures int     `json:"join_failures,omitempty"`
 			InFlight     int     `json:"in_flight"`
 			HelloRetried int     `json:"hello_retried"`
 			ElapsedS     float64 `json:"elapsed_s"`
