@@ -121,9 +121,12 @@ func TestCalibrateCLIStopsAtLastGoodStep(t *testing.T) {
 			t.Errorf("%s line does not lead with type: %.60s", h.Type, l)
 		}
 		w := want[h.Type]
-		if h.Type == "calibration" { // C-T7 adds warnings to the v2 key set
-			w = append(append([]string{}, w...), "warnings")
+		if h.Type == "calibration" { // C-T7/C-T8 add warnings and talker to the v2 key set
+			w = append(append([]string{}, w...), "warnings", "talker")
 			sort.Strings(w)
+		}
+		if h.Type == "calibration" && !strings.Contains(l, `"talker":"per_step"`) {
+			t.Errorf("calibration line lacks talker per_step: %.200s", l)
 		}
 		if got := keysOf(t, l); fmt.Sprint(got) != fmt.Sprint(w) {
 			t.Errorf("%s keys = %v, want %v", h.Type, got, w)

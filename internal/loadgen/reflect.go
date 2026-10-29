@@ -72,10 +72,14 @@ type Reflector struct {
 	jobDepth  int
 	queueFull atomic.Uint64 // destinations skipped because a sender queue was full
 	writeErr  atomic.Uint64 // failed WriteToUDPAddrPort calls
+	voiceRx   atomic.Uint64 // VOICE packets read
 
 	mu    sync.Mutex
 	peers atomic.Pointer[[]reflPeer] // copy-on-write snapshot
 }
+
+// VoiceRx is the number of VOICE packets the reflector has read.
+func (r *Reflector) VoiceRx() uint64 { return r.voiceRx.Load() }
 
 // NewReflector listens on addr (port 0 for an ephemeral port) with at least
 // two sender goroutines.
@@ -195,6 +199,7 @@ func (r *Reflector) Serve(ctx context.Context) error {
 				r.writeErr.Add(1)
 			}
 		case voice.PacketTypeVoice:
+			r.voiceRx.Add(1)
 			peers := *r.peers.Load()
 			pkt := append([]byte(nil), buf[:n]...) // workers outlive buf
 			for i, rg := range SplitDests(len(peers), r.senders) {

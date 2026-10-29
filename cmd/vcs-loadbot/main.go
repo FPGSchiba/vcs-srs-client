@@ -265,6 +265,7 @@ func calibrateCmd(ctx context.Context, refl, stepsCSV string, holdS float64, see
 				Type: "calibration", N: s.N, Bots: s.Bots,
 				EgressPPS: s.EgressPPS, ExpectedPPS: s.ExpectedPPS,
 				Valid: s.Valid, Violations: s.Violations, Warnings: s.Warnings,
+				Talker:        "per_step",
 				HelloTriesMax: s.HelloTriesMax, HelloRetried: s.HelloRetried,
 				Health: loadgen.NewHealthReport(s.Health), Bounds: br,
 				Label: bo, Payload: loadgen.PayloadLabel,
@@ -306,6 +307,7 @@ type calibrationLine struct {
 	Valid         bool                 `json:"valid"`
 	Violations    []string             `json:"violations"`
 	Warnings      []string             `json:"warnings"`
+	Talker        string               `json:"talker"`
 	HelloTriesMax int                  `json:"hello_tries_max"`
 	HelloRetried  int                  `json:"hello_retried"`
 	Health        loadgen.HealthReport `json:"health"`

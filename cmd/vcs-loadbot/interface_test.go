@@ -135,5 +135,5 @@ var v3Keys = map[string][]string{
 	"joins":    {"mode", "talker", "joins_per_s", "join_p99_us", "hello_retried", "in_flight_max", "rate_limit"},
 	"progress": {"rate_per_s", "talker"},
 	// C-T7: soft GC bound, warnings and GC cycles.
-	"calibration": {"warnings", "health.gc_cycles", "bounds.gc_pause_warn_p99_us"},
+	"calibration": {"warnings", "talker", "health.gc_cycles", "bounds.gc_pause_warn_p99_us"},
 }
