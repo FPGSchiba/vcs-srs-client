@@ -83,7 +83,7 @@ func TestCalibrateStopsAtLastGoodStep(t *testing.T) {
 		t.Errorf("stop = %+v, want N 8 Bots 6 Stage hello Bot 6 Tries 5", stop)
 	}
 	if capy.PPS <= 0 {
-		t.Errorf("capacity PPS = %v, want > 0 over the completed step", capy.PPS)
+		t.Errorf("capacity PPS = %v, want > 0 over the completed step; step = %+v", capy.PPS, steps[0])
 	}
 }
 
