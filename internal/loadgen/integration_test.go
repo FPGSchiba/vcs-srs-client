@@ -35,7 +35,7 @@ func TestLoadbotOneBigNetAgainstRealServer(t *testing.T) {
 		Passwords: map[string]string{srv.Coalition: srv.Password},
 		Unit:      "LDBT", Seed: 1,
 		Bounds: DefaultBounds,
-	}, DialInsecure(srv.ControlAddr))
+	}, InsecureDialer(srv.ControlAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestEveryListenerReceives(t *testing.T) {
 		Arm: "S", Scenario: sc, ControlAddr: srv.ControlAddr, VoiceAddr: voiceAddr,
 		Allow: allow, Passwords: map[string]string{srv.Coalition: srv.Password},
 		Unit: "LDBT", Seed: 1, Bounds: DefaultBounds,
-	}, DialInsecure(srv.ControlAddr))
+	}, InsecureDialer(srv.ControlAddr))
 	if err != nil {
 		t.Fatal(err)
 	}

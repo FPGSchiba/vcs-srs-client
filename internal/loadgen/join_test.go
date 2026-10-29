@@ -2,6 +2,7 @@ package loadgen
 
 import (
 	"context"
+	"google.golang.org/grpc"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -20,7 +21,10 @@ func newTestJoiner(t *testing.T, f *grpctest.Fake) *Joiner {
 	t.Cleanup(cleanup)
 	var phase atomic.Int32
 	return &Joiner{
-		Dial:              dial,
+		Dial: func(ctx context.Context) (*grpc.ClientConn, *ConnRecorder, error) {
+			c, err := dial(ctx)
+			return c, &ConnRecorder{}, err
+		},
 		Hashes:            map[string]string{"Blue": "hash"},
 		Unit:              "LDBT",
 		AckTimeout:        2 * time.Second,

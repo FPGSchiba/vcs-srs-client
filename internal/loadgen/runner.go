@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/FPGSchiba/vcs-srs-client/internal/voice"
 	srspb "github.com/FPGSchiba/vcs-srs-client/srspb"
@@ -46,14 +44,6 @@ type RunConfig struct {
 	Seed        int64
 	FullSample  int // bots that keep a state.Store; default 16
 	Bounds      Bounds
-}
-
-// DialInsecure returns a Joiner.Dial for a plaintext loopback control port.
-// The caller has already passed addr through AllowList.Check.
-func DialInsecure(addr string) func(ctx context.Context) (*grpc.ClientConn, error) {
-	return func(context.Context) (*grpc.ClientConn, error) {
-		return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
 }
 
 type runnerBot struct {
@@ -98,7 +88,7 @@ type Runner struct {
 }
 
 // NewRunner hashes the passwords once and returns an idle Runner.
-func NewRunner(cfg RunConfig, dial func(ctx context.Context) (*grpc.ClientConn, error)) (*Runner, error) {
+func NewRunner(cfg RunConfig, dial DialFunc) (*Runner, error) {
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = 16
 	}

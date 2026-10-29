@@ -147,7 +147,7 @@ func runCmd(ctx context.Context, o runOpts, in io.Reader, out, errw io.Writer) i
 	r, err := loadgen.NewRunner(loadgen.RunConfig{
 		Arm: o.arm, Scenario: sc, ControlAddr: o.control, VoiceAddr: o.voice,
 		Allow: o.allow, Passwords: pw, Unit: o.unit, Seed: o.seed, Bounds: b,
-	}, loadgen.DialInsecure(o.control))
+	}, loadgen.InsecureDialer(o.control))
 	if err != nil {
 		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
 		return 1
