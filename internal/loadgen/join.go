@@ -29,10 +29,29 @@ const (
 	PhaseRamp Phase = iota
 	PhaseSettle
 	PhaseHold
+	PhaseIdle  // before the first ramp
+	PhaseBurst // a join burst (counted apart from ramp)
 )
 
+// String is the phase's name in a control_lost line.
+func (p Phase) String() string {
+	switch p {
+	case PhaseRamp:
+		return "ramp"
+	case PhaseSettle:
+		return "settle"
+	case PhaseHold:
+		return "hold"
+	case PhaseIdle:
+		return "idle"
+	case PhaseBurst:
+		return "burst"
+	}
+	return "ramp"
+}
+
 // PhaseCounter is one counter per Phase.
-type PhaseCounter [3]atomic.Uint64
+type PhaseCounter [5]atomic.Uint64
 
 // DefaultAckTimeout mirrors internal/session's subscribeAckTimeout.
 const DefaultAckTimeout = 2 * time.Second
@@ -130,7 +149,7 @@ func (j *Joiner) phase() Phase {
 		return PhaseRamp
 	}
 	p := Phase(j.Phase.Load())
-	if p < PhaseRamp || p > PhaseHold {
+	if p < PhaseRamp || p > PhaseBurst {
 		return PhaseRamp
 	}
 	return p

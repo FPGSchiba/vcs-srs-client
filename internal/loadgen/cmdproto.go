@@ -172,6 +172,31 @@ type StepReport struct {
 	Violations []string     `json:"violations"`
 	Valid      bool         `json:"valid"`
 	Bounds     BoundsReport `json:"bounds"`
+
+	ControlLost ControlLostReport `json:"control_lost"`
+	Ping        PingReport        `json:"ping"`
+	// Warnings is never null.
+	Warnings []string `json:"warnings"`
+}
+
+// ControlLostReport is a step's view of dead bots (I-11).
+type ControlLostReport struct {
+	DeadTotal         int            `json:"dead_total"`
+	DeadInHold        int            `json:"dead_in_hold"`
+	DeadSinceLastStep int            `json:"dead_since_last_step"`
+	Alive             int            `json:"alive"`
+	First             []DeathSummary `json:"first"`
+}
+
+// DeathSummary is an I-10 object without type and dead_total.
+type DeathSummary = DeathRecord
+
+// PingReport is the control-plane Ping activity of one hold (I-11).
+type PingReport struct {
+	EveryS   float64 `json:"every_s"`
+	Sent     uint64  `json:"sent"`
+	Failed   uint64  `json:"failed"`
+	RTTP99Us int64   `json:"rtt_p99_us"`
 }
 
 // ParseBounds overlays a JSON object on DefaultBounds. Keys: max_socket_drops,

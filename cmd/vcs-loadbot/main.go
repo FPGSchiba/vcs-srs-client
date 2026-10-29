@@ -54,6 +54,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 	bounds := fs.String("bounds", "", "JSON overrides for the generator self-health bounds")
 	listen := fs.String("listen", "127.0.0.1:0", "reflect: loopback address to listen on (port 0 = ephemeral)")
 	senders := fs.Int("senders", 2, "reflect: sender goroutines on the one socket (>= 2)")
+	pingEvery := fs.Duration("ping-every", 5*time.Second, "run: control Ping period per bot (0 disables)")
 	steps := fs.String("steps", "64,128,256,512", "calibrate: ascending bot counts")
 	hold := fs.Float64("hold", 3, "calibrate: seconds per step")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -98,7 +99,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errw io.Writer) 
 	}
 	return runCmd(ctx, runOpts{
 		scenario: *scenario, arm: *arm, control: *vals["control"], voice: *vals["voice"],
-		passwords: *passwords, unit: *unit, seed: *seed, bounds: *bounds, allow: al,
+		passwords: *passwords, unit: *unit, seed: *seed, bounds: *bounds, allow: al, pingEvery: *pingEvery,
 	}, in, out, errw)
 }
 
@@ -106,6 +107,7 @@ type runOpts struct {
 	scenario, arm, control, voice, passwords, unit, bounds string
 	seed                                                   int64
 	allow                                                  loadgen.AllowList
+	pingEvery                                              time.Duration
 }
 
 // runCmd implements `vcs-loadbot run`: persistent bots driven by NDJSON on
@@ -146,14 +148,14 @@ func runCmd(ctx context.Context, o runOpts, in io.Reader, out, errw io.Writer) i
 	}
 	r, err := loadgen.NewRunner(loadgen.RunConfig{
 		Arm: o.arm, Scenario: sc, ControlAddr: o.control, VoiceAddr: o.voice,
-		Allow: o.allow, Passwords: pw, Unit: o.unit, Seed: o.seed, Bounds: b,
+		Allow: o.allow, Passwords: pw, Unit: o.unit, Seed: o.seed, Bounds: b, PingEvery: o.pingEvery,
 	}, loadgen.InsecureDialer(o.control))
 	if err != nil {
 		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
 		return 1
 	}
 	if err := r.Serve(ctx, in, out); err != nil {
-		fmt.Fprintf(errw, "vcs-loadbot: %v\n", err)
+		fmt.Fprintf(errw, "vcs-loadbot: %v (%s)\n", err, r.ErrContext())
 		return 1
 	}
 	return 0

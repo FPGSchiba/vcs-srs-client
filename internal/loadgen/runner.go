@@ -10,6 +10,8 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +46,8 @@ type RunConfig struct {
 	Seed        int64
 	FullSample  int // bots that keep a state.Store; default 16
 	Bounds      Bounds
+	// PingEvery is each bot's control Ping period; zero disables pings.
+	PingEvery time.Duration
 }
 
 type runnerBot struct {
@@ -85,6 +89,69 @@ type Runner struct {
 
 	last            *StepReport
 	lastPerListener []LedgerResult
+
+	// Death log (I-10, I-11). dmu guards everything below it.
+	dmu           sync.Mutex
+	deadTotal     int
+	deadSinceStep int
+	deadInHold    int
+	deadFirst     []DeathRecord
+	deathLines    int
+
+	started time.Time
+	lastCmd string
+	errCtx  string
+}
+
+// maxDeathLines caps control_lost lines per process; later deaths are only
+// counted (dead_total).
+const maxDeathLines = 64
+
+// maxDeathFirst is how many deaths a step line lists.
+const maxDeathFirst = 8
+
+// onDead records one bot's death, stamping the phase and index, and writes
+// the control_lost line while the cap allows.
+func (r *Runner) onDead(_ *ControlBot, d DeathRecord) {
+	d.Phase = Phase(r.phase.Load()).String()
+	if i := strings.LastIndexByte(d.Name, '-'); i >= 0 {
+		if n, err := strconv.Atoi(d.Name[i+1:]); err == nil {
+			d.Bot = n
+		}
+	}
+	r.dmu.Lock()
+	defer r.dmu.Unlock()
+	r.deadTotal++
+	r.deadSinceStep++
+	if Phase(r.phase.Load()) == PhaseHold {
+		r.deadInHold++
+	}
+	if len(r.deadFirst) < maxDeathFirst {
+		r.deadFirst = append(r.deadFirst, d)
+	}
+	if r.deathLines < maxDeathLines && r.out != nil {
+		r.deathLines++
+		_ = writeLine(r.out, DeathLine{Type: "control_lost", DeathRecord: d, DeadTotal: r.deadTotal})
+	}
+}
+
+// ErrContext describes the run at the moment Serve ended, for the fatal
+// error line: last command, bots, dead bots, uptime.
+func (r *Runner) ErrContext() string { return r.errCtx }
+
+func (r *Runner) snapshotContext() string {
+	r.dmu.Lock()
+	dead := r.deadTotal
+	r.dmu.Unlock()
+	up := 0.0
+	if !r.started.IsZero() {
+		up = math.Round(time.Since(r.started).Seconds()*10) / 10
+	}
+	cmd := r.lastCmd
+	if cmd == "" {
+		cmd = "none"
+	}
+	return fmt.Sprintf("last command %s; bots %d, dead %d, uptime %gs", cmd, len(r.bots), dead, up)
 }
 
 // NewRunner hashes the passwords once and returns an idle Runner.
@@ -107,7 +174,9 @@ func NewRunner(cfg RunConfig, dial DialFunc) (*Runner, error) {
 	r.joiner = &Joiner{
 		Dial: dial, Hashes: hashes, Unit: cfg.Unit,
 		Phase: &r.phase, Resyncs: &r.resync, ResourceExhausted: &r.rex,
+		PingEvery: cfg.PingEvery, PingSeed: cfg.Seed, OnDead: r.onDead,
 	}
+	r.phase.Store(int32(PhaseIdle))
 	return r, nil
 }
 
@@ -144,10 +213,16 @@ func writeLine(out io.Writer, v any) error {
 // A failed command is still fatal (the error is written, cleanup runs, and it
 // is returned): a talker (bot 0) that cannot join, a decreasing set_n, a
 // cancelled ctx.
+//
+// A dead bot is data too: a control_lost line when it dies and a
+// control_lost block in the next step. A hold fails only for the talker, a
+// lost ledger, ctx, or a missing listener.
 func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) error {
 	out := &lineWriter{w: rawOut}
 	r.out = out
+	r.started = time.Now()
 	defer func() {
+		r.errCtx = r.snapshotContext()
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		r.shutdown(cctx)
@@ -192,6 +267,7 @@ func (r *Runner) Serve(ctx context.Context, in io.Reader, rawOut io.Writer) erro
 		if len(line) == 0 {
 			continue
 		}
+		r.lastCmd = string(line)
 		cmd, perr := ParseCommand(line)
 		if perr != nil {
 			if werr := writeLine(out, errLine{"error", perr.Error()}); werr != nil {
@@ -467,11 +543,6 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	if len(r.bots) < 2 {
 		return errors.New("hold: need at least one listener (set_n >= 2)")
 	}
-	for i, b := range r.bots {
-		if err := b.ctl.Err(); err != nil {
-			return fmt.Errorf("hold: bot %d died: %w", i, err)
-		}
-	}
 	talker := r.bots[0]
 	listeners := r.bots[1:]
 	frames := int(math.Round(secs * framesPerSec))
@@ -493,6 +564,10 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	for i, l := range listeners {
 		drops0[i] = l.voice.Drops.Load()
 	}
+	r.dmu.Lock()
+	r.deadInHold = 0
+	r.dmu.Unlock()
+	ping0 := r.pingTotals(true)
 	rs0 := SampleRuntime()
 
 	// The window ends when the talker has sent the last expected frame (it
@@ -574,8 +649,49 @@ func (r *Runner) hold(ctx context.Context, d time.Duration, secs float64) error 
 	if rep.Expected > 0 {
 		rep.LossRatio = float64(rep.Lost) / float64(rep.Expected)
 	}
+	rep.Ping = r.pingReport(ping0)
+	rep.Warnings = []string{}
+	r.dmu.Lock()
+	rep.ControlLost = ControlLostReport{
+		DeadTotal: r.deadTotal, DeadInHold: r.deadInHold,
+		DeadSinceLastStep: r.deadSinceStep, Alive: len(r.bots) - r.deadTotal,
+		First: append([]DeathSummary{}, r.deadFirst...),
+	}
+	r.deadSinceStep, r.deadFirst = 0, nil
+	r.dmu.Unlock()
 	r.last, r.lastPerListener = rep, per
 	return nil
+}
+
+type pingTotals struct{ sent, failed uint64 }
+
+// pingTotals sums every bot's Ping counters; reset also clears the RTT
+// histograms so the hold's p99 covers the hold only.
+func (r *Runner) pingTotals(reset bool) pingTotals {
+	var t pingTotals
+	for _, b := range r.bots {
+		t.sent += b.ctl.Pings.Sent.Load()
+		t.failed += b.ctl.Pings.Failed.Load()
+		if reset {
+			b.ctl.Pings.RTT.Reset()
+		}
+	}
+	return t
+}
+
+func (r *Runner) pingReport(base pingTotals) PingReport {
+	if r.cfg.PingEvery <= 0 {
+		return PingReport{}
+	}
+	now := r.pingTotals(false)
+	var h Hist
+	for _, b := range r.bots {
+		h.Merge(&b.ctl.Pings.RTT)
+	}
+	return PingReport{
+		EveryS: r.cfg.PingEvery.Seconds(), Sent: now.sent - base.sent,
+		Failed: now.failed - base.failed, RTTP99Us: h.Quantile(0.99).Microseconds(),
+	}
 }
 
 // updateTotals sums every bot's drain counters by update type name.
