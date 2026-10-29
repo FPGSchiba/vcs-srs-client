@@ -65,10 +65,9 @@ func startTalkerLoop(s frameSender, freq voice.KHz, seq *atomic.Uint32, wheel *H
 					return
 				case p := <-t.ctrl:
 					timer.Stop()
+					// Only a pause changes anything here: a resume of a
+					// live talker keeps its schedule.
 					paused = p
-					if !paused {
-						t0, k = time.Now(), 0
-					}
 					continue
 				case <-timer.C:
 				}
@@ -100,7 +99,8 @@ func (t *talkerLoop) set(p bool) {
 // frame is sent after it returns.
 func (t *talkerLoop) pause() { t.set(true) }
 
-// resume restarts the schedule at now.
+// resume restarts the schedule at now if the talker is paused; on a live
+// talker it is a no-op.
 func (t *talkerLoop) resume() { t.set(false) }
 
 // stop ends the loop and waits for it.

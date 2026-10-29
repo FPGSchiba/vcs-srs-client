@@ -124,3 +124,32 @@ func TestTalkerPauseAfterStopDoesNotBlock(t *testing.T) {
 		t.Fatal("pause/resume blocked on a stopped talker")
 	}
 }
+
+// A resume on a talker that is not paused (a live burst ends with one) must
+// not restart the schedule: restarting would send a frame at once, less than
+// 20 ms after the previous one.
+func TestTalkerResumeWhileLiveKeepsSchedule(t *testing.T) {
+	var (
+		seq  atomic.Uint32
+		errs atomic.Uint64
+		wh   Hist
+	)
+	seq.Store(1)
+	fs := &fakeSender{}
+	tk := startTalkerLoop(fs, 0, &seq, &wh, &errs, false)
+	defer tk.stop()
+	for i := 0; i < 5; i++ {
+		time.Sleep(25 * time.Millisecond)
+		tk.resume()
+	}
+	time.Sleep(30 * time.Millisecond)
+	tk.pause()
+	fs.mu.Lock()
+	at := append([]time.Time(nil), fs.at...)
+	fs.mu.Unlock()
+	for i := 1; i < len(at); i++ {
+		if gap := at[i].Sub(at[i-1]); gap < 10*time.Millisecond {
+			t.Fatalf("frames %d and %d only %v apart: resume restarted a live schedule", i-1, i, gap)
+		}
+	}
+}
