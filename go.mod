@@ -6,7 +6,7 @@ toolchain go1.27.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/gen2brain/malgo v0.11.26
+	github.com/gen2brain/malgo v0.11.27
 	github.com/google/uuid v1.6.0
 	github.com/holoplot/go-evdev v0.0.0-20260909133534-d873ed210bda
 	github.com/robotn/gohook v1.0.0-beta1 // pinned: purego backends exist only from this tag; build with -tags purego
